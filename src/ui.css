@@ -1,0 +1,816 @@
+/* Minimal UI for the ERPlus preview */
+
+:root {
+    --bg: #ffffff;
+    --muted: #9ca3af;
+    --card: #f8fafc;
+    --accent: #2563eb;
+    --success: #16a34a;
+    --danger: #dc2626;
+}
+
+body {
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    background: var(--bg);
+    color: #111827;
+}
+
+.card {
+    background: var(--card);
+    border-radius: 8px;
+    padding: 12px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.card-content {
+    padding: 8px 4px;
+}
+
+.btn {
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: #111827;
+    color: #fff;
+    cursor: pointer;
+}
+
+.btn-primary {
+    background: var(--accent);
+    border-color: rgba(37, 99, 235, 0.9);
+}
+
+.btn-secondary {
+    background: #f3f4f6;
+    color: #111827;
+    border-color: #e5e7eb;
+}
+
+.btn-outline {
+    background: #fff;
+    color: #111827;
+    border-color: #e5e7eb;
+}
+
+.btn-outline:hover {
+    background: #f3f4f6;
+}
+
+.btn-ghost {
+    background: transparent;
+    color: var(--muted);
+    border-color: transparent;
+}
+
+.btn-add {
+    background: var(--success);
+    border-color: rgba(22, 163, 74, 0.9);
+    color: #fff;
+}
+
+.btn-icon {
+    padding: 6px;
+    width: 36px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 10px;
+    flex-wrap: nowrap;
+    /* Color-coding for mode selector icon buttons (History/Latest) */
+
+    .tree-node-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+        color: #6b7280;
+    }
+
+    .tree-node-text {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    /* muted icon when inactive */
+    background: #fff;
+}
+
+.btn-icon.btn-mode:hover {
+    background: #f3f4f6;
+    /* neutral hover */
+}
+
+.btn-icon.btn-mode.btn-mode-active {
+    background: #16a34a;
+    /* green active */
+    /* filled when active */
+    color: #fff;
+    border-color: #16a34a;
+}
+
+/* Mode selector dropdown (History metric picker) */
+.mode-select {
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid rgba(22, 163, 74, 0.35);
+    background: #fff;
+    color: #16a34a;
+    padding: 0 10px;
+    font-size: 14px;
+    margin-left: 6px;
+}
+
+.mode-select:hover {
+    background: rgba(22, 163, 74, 0.06);
+}
+
+.mode-select:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.2);
+}
+
+/* spacer between mode controls and settings */
+.actions-gap {
+    width: 14px;
+}
+
+/* vertical separator between action clusters */
+.actions-sep {
+    width: 1px;
+    height: 24px;
+    background: #e5e7eb;
+    margin: 0 6px;
+}
+
+/* date pill shown in Day mode next to the calendar icon */
+.date-pill {
+    height: 36px;
+    border-radius: 8px;
+    border: 1px solid rgba(22, 163, 74, 0.35);
+    background: #fff;
+    color: #16a34a;
+    padding: 0 10px;
+    font-size: 14px;
+}
+
+.date-pill:hover {
+    background: rgba(22, 163, 74, 0.06);
+}
+
+.date-pill:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.2);
+}
+
+/* Calendar popup overlay and container */
+.calendar-popup-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+}
+
+.calendar-popup {
+    position: fixed;
+    top: 80px;
+    right: 24px;
+    z-index: 50;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+    padding: 16px;
+}
+
+/* Settings menu popup */
+.settings-menu-popup {
+    position: fixed;
+    top: 80px;
+    right: 24px;
+    z-index: 50;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+    min-width: 220px;
+    overflow: hidden;
+}
+
+.settings-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 12px 16px;
+    border: none;
+    background: white;
+    color: #111827;
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.settings-menu-item:hover {
+    background: #f3f4f6;
+}
+
+.settings-menu-item svg {
+    flex-shrink: 0;
+    color: #6b7280;
+}
+
+/* Dialog styling */
+.dialog-overlay {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 40px;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.3);
+    z-index: 50;
+}
+
+.dialog-content {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+    max-width: 50%;
+    min-width: 320px;
+    width: fit-content;
+    padding: 24px;
+}
+
+.dialog-content>div {
+    margin: 0 24px;
+}
+
+.dialog-content .dialog-header {
+    margin: 0;
+}
+
+.dialog-content .dialog-footer {
+    margin: 24px -24px -24px;
+    padding: 24px;
+    border-top: 1px solid #e5e7eb;
+    background: #f9fafb;
+    border-radius: 0 0 8px 8px;
+}
+
+/* Narrow dialog variant for compact edit panels */
+.dialog-content.narrow-dialog {
+    display: block;
+    /* predictable sizing */
+    box-sizing: border-box;
+    width: auto;
+    max-width: 420px;
+    /* hard cap for compact panels */
+    min-width: 280px;
+    /* small but usable */
+}
+
+.dialog-content.narrow-dialog>div {
+    margin: 0;
+    /* avoid extra horizontal width from margins */
+}
+
+.dialog-content.narrow-dialog .dialog-footer {
+    margin: 12px 0 0 0;
+    /* remove negative margins that widen panel */
+    padding: 12px 0 0 0;
+    border-top: 1px solid #e5e7eb;
+    background: transparent;
+}
+
+input[type="date"],
+input[type="time"],
+input[type="number"],
+input[type="text"] {
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid #e5e7eb;
+    font-family: inherit;
+    font-size: 16px;
+    color: inherit;
+}
+
+/* responsive container fix */
+.recharts-responsive-container {
+    width: 100% !important;
+}
+
+/* small layout tweaks for grid */
+.cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+
+/* Drag & drop lists in Customize dialog */
+.dnd-column {
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.dnd-column-title {
+    font-weight: 600;
+    margin-bottom: 8px;
+    text-align: center;
+}
+
+.dnd-list {
+    list-style: none;
+    margin: 0;
+    padding: 8px;
+    min-height: 160px;
+    /* make drop zone usable even when empty */
+    border: 1px dashed #e5e7eb;
+    border-radius: 8px;
+    background: white;
+}
+
+.dnd-item {
+    user-select: none;
+    padding: 6px 10px;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    background: #fff;
+    margin-bottom: 6px;
+    cursor: grab;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.dnd-item .dnd-icon {
+    flex: 0 0 auto;
+}
+
+.dnd-item .dnd-title {
+    flex: 1 1 auto;
+}
+
+.dnd-empty {
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+    padding: 8px 0;
+}
+
+/* Card typography */
+.card-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 4px 0 2px 0;
+}
+
+.card-data {
+    font-size: 22px;
+    font-weight: 700;
+    margin: 2px 0 4px 0;
+}
+
+.card-updated {
+    font-size: 12px;
+    color: var(--muted);
+    margin: 2px 0;
+}
+
+/* Switch component styles */
+.switch-root {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    width: 42px;
+    height: 25px;
+    background-color: rgba(0, 0, 0, 0.1);
+    border-radius: 9999px;
+    position: relative;
+    cursor: pointer;
+    transition: background-color 0.15s ease-in-out;
+}
+
+.switch-root.checked {
+    background-color: var(--accent);
+}
+
+.switch-thumb {
+    display: block;
+    width: 21px;
+    height: 21px;
+    background-color: white;
+    border-radius: 9999px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+    transition: transform 0.15s ease-in-out;
+    transform: translateX(2px);
+}
+
+.switch-root.checked .switch-thumb {
+    transform: translateX(19px);
+}
+
+/* Entity relationship views */
+.header-date {
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 8px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #e5e7eb;
+    color: #374151;
+}
+
+.status-connected {
+    background: rgba(22, 163, 74, 0.15);
+    color: #15803d;
+}
+
+.status-loading {
+    background: rgba(37, 99, 235, 0.12);
+    color: #1d4ed8;
+}
+
+.status-error {
+    background: rgba(220, 38, 38, 0.08);
+    color: #b91c1c;
+    border: 1px solid rgba(220, 38, 38, 0.2);
+    font-size: 12px;
+    margin-top: 6px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    max-width: 420px;
+}
+
+.status-empty {
+    background: rgba(107, 114, 128, 0.15);
+    color: #6b7280;
+}
+
+.focus-panel {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    height: 36px;
+    padding: 0 12px;
+    border-radius: 999px;
+    background: #f3f4f6;
+    border: 1px solid #e5e7eb;
+    margin-bottom: 0;
+}
+
+.focus-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    line-height: 1;
+}
+
+.focus-select {
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    color: #111827;
+    outline: none;
+    height: 100%;
+}
+
+.hierarchy-grid,
+.directory-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    align-items: start;
+}
+
+.section-title {
+    font-weight: 600;
+    margin-bottom: 10px;
+    font-size: 16px;
+}
+
+.subsection-title {
+    font-weight: 600;
+    margin: 10px 0 6px;
+    font-size: 14px;
+    color: #374151;
+}
+
+.tree-root {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.tree-item {
+    margin-bottom: 8px;
+}
+
+.tree-node {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 6px 10px;
+    max-width: 100%;
+}
+
+.tree-node-warning {
+    border-color: #dc2626;
+}
+
+.tree-node-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: nowrap;
+    min-width: 0;
+}
+
+.tree-toggle {
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    color: #6b7280;
+    width: 20px;
+    height: 20px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.tree-toggle:hover {
+    background: #f3f4f6;
+}
+
+.tree-node-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    color: #6b7280;
+    flex-shrink: 0;
+}
+
+.tree-node-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.tree-pill {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: #e5e7eb;
+    color: #374151;
+}
+
+.tree-pill.entity {
+    background: rgba(37, 99, 235, 0.15);
+    color: #1d4ed8;
+}
+
+.tree-pill.person {
+    background: rgba(22, 163, 74, 0.15);
+    color: #15803d;
+}
+
+.tree-name {
+    font-weight: 600;
+    white-space: normal;
+    word-break: break-word;
+}
+
+.tree-rel {
+    font-size: 12px;
+    color: #6b7280;
+    white-space: normal;
+    word-break: break-word;
+}
+
+.tree-cycle {
+    font-size: 12px;
+    color: #dc2626;
+}
+
+.tree-children {
+    list-style: none;
+    margin: 8px 0 0 8px;
+    padding: 0 0 0 22px;
+    border-left: 2px dashed #e5e7eb;
+}
+
+.relationship-list,
+.directory-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: 8px;
+}
+
+.relationship-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+
+.relationship-name {
+    font-weight: 600;
+}
+
+.relationship-meta {
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.directory-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.directory-scroll {
+    max-height: 60vh;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.directory-icon {
+    width: 20px;
+    height: 20px;
+    color: #6b7280;
+}
+
+.directory-name {
+    font-weight: 600;
+}
+
+.directory-meta {
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.empty-text {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 8px;
+}
+
+.editor-section {
+    margin-top: 28px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    align-items: start;
+}
+
+.editor-help {
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 10px;
+}
+
+.editor-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.form-grid {
+    display: grid;
+    gap: 12px;
+}
+
+.form-row {
+    display: grid;
+    gap: 8px;
+}
+
+.form-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+}
+
+.form-inline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.form-input,
+.form-select {
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid #e5e7eb;
+    font-size: 14px;
+    background: #fff;
+    color: #111827;
+    min-width: 140px;
+}
+
+.form-input:focus,
+.form-select:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+    border-color: rgba(37, 99, 235, 0.5);
+}
+
+.form-divider {
+    height: 1px;
+    background: #e5e7eb;
+    margin: 4px 0;
+}
+
+.fab-container {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 20px;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 40;
+}
+
+.fab-add {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 18px;
+    border-radius: 999px;
+    box-shadow: 0 10px 25px rgba(15, 23, 42, 0.15);
+}
+
+.dialog-choice-grid {
+    display: grid;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.card .icon-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* header selected date under Overview */
+.header-date {
+    font-size: 16px;
+    margin-top: 2px;
+}
+
+/* .header-date-row removed (not used) */
+
+/* Hide native date picker icon inside DOB field; we use external button */
+input[type="date"].no-native-picker::-webkit-calendar-picker-indicator {
+    display: none;
+}
+
+input[type="date"].no-native-picker {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+}
+
+/* Hide native time picker icon for targeted inputs; we use external button */
+input[type="time"].no-native-picker::-webkit-calendar-picker-indicator {
+    display: none;
+}
+
+input[type="time"].no-native-picker {
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+}
