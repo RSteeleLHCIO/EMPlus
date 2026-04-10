@@ -1007,93 +1007,114 @@ export default function EntityApp() {
       )}
 
       {viewMode === "hierarchy" && (
-        <div className="hierarchy-grid">
+        <div className="hierarchy-vertical">
+
+          {/* ── OWNERS (above the focus box) ── */}
           {focusNode?.kind !== "person" && (
-            <Card>
+            <div className="hv-owners-row">
+              {getOwnersOf(relList, focusId).length === 0 ? (
+                <div className="hv-empty">No owners recorded</div>
+              ) : (
+                getOwnersOf(relList, focusId).map((item) => {
+                  const ownerNode = getNode(nodeList, item.nodeId);
+                  if (!ownerNode) return null;
+                  const pct = item.rel?.percent;
+                  const showPct = pct != null && Number.isFinite(Number(pct)) && Number(pct) !== 100;
+                  return (
+                    <div
+                      key={item.nodeId}
+                      className="hv-neighbor-box"
+                      onClick={() => setFocusId(item.nodeId)}
+                      title="Click to focus"
+                    >
+                      {ownerNode.logo && (
+                        <img src={ownerNode.logo} alt="" className="hv-neighbor-logo" />
+                      )}
+                      <div className="hv-neighbor-name">{ownerNode.name}</div>
+                      {showPct && (
+                        <div className="hv-neighbor-pct">{Number(pct)}%</div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+
+          {/* ── connector line from owners down to focus ── */}
+          {focusNode?.kind !== "person" && getOwnersOf(relList, focusId).length > 0 && (
+            <div className="hv-connector" />
+          )}
+
+          {/* ── FOCUS BOX (centre) ── */}
+          <div className="hv-focus-box">
+            {focusNode?.logo && (
+              <img src={focusNode.logo} alt="" className="hv-focus-logo" />
+            )}
+            <div className="hv-focus-name">{focusNode?.name || focusId}</div>
+            {focusNode?.kind === "person" && focusNode?.photo && (
+              <img src={focusNode.photo} alt="" className="hv-focus-photo" />
+            )}
+          </div>
+
+          {/* ── connector line from focus down to owned ── */}
+          {getOwnedBy(relList, focusId).length > 0 && (
+            <div className="hv-connector" />
+          )}
+
+          {/* ── OWNED BY (below the focus box) ── */}
+          {getOwnedBy(relList, focusId).length > 0 && (
+            <div className="hv-owned-row">
+              {getOwnedBy(relList, focusId).map((item) => {
+                const ownedNode = getNode(nodeList, item.nodeId);
+                if (!ownedNode) return null;
+                const pct = item.rel?.percent;
+                const showPct = pct != null && Number.isFinite(Number(pct)) && Number(pct) !== 100;
+                return (
+                  <div
+                    key={item.nodeId}
+                    className="hv-neighbor-box"
+                    onClick={() => setFocusId(item.nodeId)}
+                    title="Click to focus"
+                  >
+                    {ownedNode.logo && (
+                      <img src={ownedNode.logo} alt="" className="hv-neighbor-logo" />
+                    )}
+                    <div className="hv-neighbor-name">{ownedNode.name}</div>
+                    {showPct && (
+                      <div className="hv-neighbor-pct">{Number(pct)}%</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ── RELATIONSHIPS (employees / employers) ── */}
+          {(focusEmployees.length > 0 || focusEmployers.length > 0) && (
+            <Card style={{ marginTop: 24, alignSelf: "center", minWidth: 280, maxWidth: 480 }}>
               <CardContent>
-                <div className="section-title">Owners of {focusNode?.name || focusId}</div>
-                <ul className="tree-root">
-                  <TreeNode
-                    tree={ownerTree}
-                    relLabel={null}
-                    nodes={nodeList}
-                    onRelClick={(rel) => {
-                      setEditOwnershipId(rel.id);
-                      setOpenDialog({ type: "edit-ownership" });
-                    }}
-                    ownershipTotals={ownershipTotalsByEntity}
-                    warnOwnershipTotals
-                    collapsedNodes={collapsedOwnerNodes}
-                    onToggleCollapse={toggleOwnerCollapse}
-                  />
+                <div className="section-title">
+                  {focusNode?.kind === "entity" ? "Employees" : "Employed by"}
+                </div>
+                <ul className="relationship-list">
+                  {(focusNode?.kind === "entity" ? focusEmployees : focusEmployers).map((item) => (
+                    <li
+                      key={`${item.rel.id}-${item.nodeId}`}
+                      style={{ cursor: "pointer" }}
+                      onClick={() => {
+                        setEditEmploymentId(item.rel.id);
+                        setOpenDialog({ type: "edit-employment" });
+                      }}
+                    >
+                      <span className="relationship-name">{getNodeName(item.nodeId)}</span>
+                      <span className="relationship-meta">{formatRel(item.rel)}</span>
+                    </li>
+                  ))}
                 </ul>
               </CardContent>
             </Card>
           )}
-          <Card>
-            <CardContent>
-              <div className="section-title">Owned by {focusNode?.name || focusId}</div>
-              <ul className="tree-root">
-                <TreeNode
-                  tree={ownedTree}
-                  relLabel={null}
-                  nodes={nodeList}
-                  onRelClick={(rel) => {
-                    setEditOwnershipId(rel.id);
-                    setOpenDialog({ type: "edit-ownership" });
-                  }}
-                  collapsedNodes={collapsedOwnedNodes}
-                  onToggleCollapse={toggleOwnedCollapse}
-                />
-              </ul>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent>
-              <div className="section-title">Relationships</div>
-              {focusNode?.kind === "entity" ? (
-                <ul className="relationship-list">
-                  {focusEmployees.length === 0 ? (
-                    <li className="empty-text">No employees listed</li>
-                  ) : (
-                    focusEmployees.map((item) => (
-                      <li
-                        key={`${item.rel.id}-${item.nodeId}`}
-                        style={{ cursor: "pointer" }}
-                        onClick={() => {
-                          setEditEmploymentId(item.rel.id);
-                          setOpenDialog({ type: "edit-employment" });
-                        }}
-                      >
-                        <span className="relationship-name">{getNodeName(item.nodeId)}</span>
-                        <span className="relationship-meta">{formatRel(item.rel)}</span>
-                      </li>
-                    ))
-                  )}
-                </ul>
-              ) : (
-                <ul className="relationship-list">
-                  {focusEmployers.length === 0 ? (
-                    <li className="empty-text">No employers listed</li>
-                  ) : (
-                    focusEmployers.map((item) => (
-                      <li
-                        key={`${item.rel.id}-${item.nodeId}`}
-                        style={{ cursor: "pointer" }}
-                        onClick={() => {
-                          setEditEmploymentId(item.rel.id);
-                          setOpenDialog({ type: "edit-employment" });
-                        }}
-                      >
-                        <span className="relationship-name">{getNodeName(item.nodeId)}</span>
-                        <span className="relationship-meta">{formatRel(item.rel)}</span>
-                      </li>
-                    ))
-                  )}
-                </ul>
-              )}
-            </CardContent>
-          </Card>
         </div>
       )}
 
