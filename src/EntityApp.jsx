@@ -297,6 +297,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     logo: "",
   });
   const [dupMatches, setDupMatches] = useState([]);
+  const [dirSearch, setDirSearch] = useState("");
 
   function checkDuplicateName(name) {
     const q = name.trim().toLowerCase();
@@ -418,6 +419,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       ),
     [personNodes]
   );
+
+  const dirSearchLower = dirSearch.trim().toLowerCase();
+  const filteredEntityNodes = dirSearchLower
+    ? sortedEntityNodes.filter((n) => (n.name || n.id || "").toLowerCase().includes(dirSearchLower))
+    : sortedEntityNodes;
+  const filteredPersonNodes = dirSearchLower
+    ? sortedPersonNodes.filter((n) => (n.name || n.id || "").toLowerCase().includes(dirSearchLower))
+    : sortedPersonNodes;
 
   const apiRequest = async (path, options = {}) => {
     const { headers: optHeaders, ...restOptions } = options;
@@ -1196,9 +1205,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         onClick={() => setFocusId(item.nodeId)}
                         title={isZero ? "Non-economic / 0% interest" : "Click to focus"}
                       >
-                        {ownerNode.logo && (
-                          <img src={ownerNode.logo} alt="" className="hv-neighbor-logo" />
-                        )}
+                        {ownerNode.kind === "person"
+                          ? ownerNode.photo
+                            ? <img src={ownerNode.photo} alt="" className="hv-neighbor-photo" />
+                            : <Users size={22} className="hv-neighbor-icon" />
+                          : ownerNode.logo
+                            ? <img src={ownerNode.logo} alt="" className="hv-neighbor-logo" />
+                            : <Building2 size={22} className="hv-neighbor-icon" />
+                        }
                         <div className="hv-neighbor-name">{ownerNode.name}</div>
                         {showPct && (
                           <div className="hv-neighbor-pct">{Number(pct)}%</div>
@@ -1264,9 +1278,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     onClick={() => setFocusId(item.nodeId)}
                     title={isZero ? "Non-economic / 0% interest" : "Click to focus"}
                   >
-                    {ownedNode.logo && (
-                      <img src={ownedNode.logo} alt="" className="hv-neighbor-logo" />
-                    )}
+                    {ownedNode.kind === "person"
+                      ? ownedNode.photo
+                        ? <img src={ownedNode.photo} alt="" className="hv-neighbor-photo" />
+                        : <Users size={22} className="hv-neighbor-icon" />
+                      : ownedNode.logo
+                        ? <img src={ownedNode.logo} alt="" className="hv-neighbor-logo" />
+                        : <Building2 size={22} className="hv-neighbor-icon" />
+                    }
                     <div className="hv-neighbor-name">{ownedNode.name}</div>
                     {showPct && (
                       <div className="hv-neighbor-pct">{Number(pct)}%</div>
@@ -1307,12 +1326,27 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
       {viewMode === "directory" && (
         <div className="directory-grid">
+          <div className="directory-search-bar">
+            <Search size={15} style={{ color: "#9ca3af", flexShrink: 0 }} />
+            <input
+              type="text"
+              placeholder="Search entities and people…"
+              value={dirSearch}
+              onChange={(e) => setDirSearch(e.target.value)}
+              className="directory-search-input"
+            />
+            {dirSearch && (
+              <button className="directory-search-clear" onClick={() => setDirSearch("")} title="Clear">
+                <X size={13} />
+              </button>
+            )}
+          </div>
           <Card>
             <CardContent>
-              <div className="section-title">Entities</div>
+              <div className="section-title">Entities {dirSearchLower ? `(${filteredEntityNodes.length})` : ""}</div>
               <div className="directory-scroll">
                 <ul className="directory-list">
-                  {sortedEntityNodes.map((n) => (
+                  {filteredEntityNodes.map((n) => (
                     <li key={n.id}>
                       <div
                         className="directory-item"
@@ -1322,7 +1356,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           setOpenDialog({ type: "edit-node" });
                         }}
                       >
-                        <Building2 className="directory-icon" />
+                        {n.logo
+                          ? <img src={n.logo} alt="" className="directory-thumb" />
+                          : <Building2 className="directory-icon" />}
                         <div>
                           <div className="directory-name">{n.name}</div>
                           <div className="directory-meta">{n.id}</div>
@@ -1336,10 +1372,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           </Card>
           <Card>
             <CardContent>
-              <div className="section-title">People</div>
+              <div className="section-title">People {dirSearchLower ? `(${filteredPersonNodes.length})` : ""}</div>
               <div className="directory-scroll">
                 <ul className="directory-list">
-                  {sortedPersonNodes.map((n) => (
+                  {filteredPersonNodes.map((n) => (
                     <li key={n.id}>
                       <div
                         className="directory-item"
@@ -1349,7 +1385,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           setOpenDialog({ type: "edit-node" });
                         }}
                       >
-                        <Users className="directory-icon" />
+                        {n.photo
+                          ? <img src={n.photo} alt="" className="directory-thumb directory-thumb--round" />
+                          : <Users className="directory-icon" />}
                         <div>
                           <div className="directory-name">{n.name}</div>
                           <div className="directory-meta">{n.id}</div>
