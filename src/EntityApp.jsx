@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { CalendarDays, Link, Users, Building2, Plus, Pencil, ChevronRight, ChevronDown, Upload } from "lucide-react";
+import { CalendarDays, Link, Users, Building2, Plus, Pencil, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass } from "lucide-react";
 import { Calendar } from "./components/ui/calendar";
 import { Input } from "./components/ui/input";
 import {
@@ -189,7 +189,7 @@ const toIsoDate = (d) => {
   return `${yyyy}-${mm}-${dd}`;
 };
 
-export default function EntityApp() {
+export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) {
   const [nodeList, setNodeList] = useState(initialNodes);
   const [relList, setRelList] = useState(initialRelationships);
   const [viewMode, setViewMode] = useState("hierarchy");
@@ -204,6 +204,10 @@ export default function EntityApp() {
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [showCalendarPopup, setShowCalendarPopup] = useState(false);
   const calendarButtonRef = useRef(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showDateSelection, setShowDateSelection] = useState(false);
+  const settingsRef = useRef(null);
+  const focusBoxRef = useRef(null);
   const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5174";
   const [remoteStatus, setRemoteStatus] = useState("idle");
   const [remoteError, setRemoteError] = useState("");
@@ -277,26 +281,7 @@ export default function EntityApp() {
       return { type: "entity", label: "Entities" };
     };
 
-  const clientId = useMemo(() => {
-    if (typeof window === "undefined") return "test";
-    const params = new URLSearchParams(window.location.search);
-    const fromQuery = params.get("client");
-    if (fromQuery) {
-      try {
-        localStorage.setItem("clientId", fromQuery);
-      } catch {
-        // ignore storage errors
-      }
-      return fromQuery;
-    }
-    try {
-      const stored = localStorage.getItem("clientId");
-      if (stored) return stored;
-    } catch {
-      // ignore storage errors
-    }
-    return "test";
-  }, []);
+  const clientId = clientIdProp || "test";
 
   const [newNode, setNewNode] = useState({
     name: "",
@@ -311,6 +296,28 @@ export default function EntityApp() {
     hrUrl: "",
     logo: "",
   });
+  const [dupMatches, setDupMatches] = useState([]);
+
+  function checkDuplicateName(name) {
+    const q = name.trim().toLowerCase();
+    if (!q) { setDupMatches([]); return; }
+    const matches = nodeList
+      .filter((n) => {
+        const t = (n.name || "").toLowerCase();
+        if (t === q) return true;
+        if (t.includes(q) || q.includes(t)) return true;
+        // simple bigram overlap
+        const bigrams = (s) => { const b = new Set(); for (let i = 0; i < s.length - 1; i++) b.add(s.slice(i, i + 2)); return b; };
+        const bq = bigrams(q), bt = bigrams(t);
+        let shared = 0;
+        bq.forEach((g) => { if (bt.has(g)) shared++; });
+        const score = (2 * shared) / (bq.size + bt.size || 1);
+        return score >= 0.4;
+      })
+      .map((n) => n.name);
+    setDupMatches(matches);
+  }
+
   const [editNodeId, setEditNodeId] = useState(initialNodes[0]?.id ?? "");
   const [nodeDraft, setNodeDraft] = useState({
     name: "",
@@ -367,6 +374,12 @@ export default function EntityApp() {
   const [isAddingNode, setIsAddingNode] = useState(false);
   const [isAddingOwnership, setIsAddingOwnership] = useState(false);
   const [isAddingEmployment, setIsAddingEmployment] = useState(false);
+  const [ownerEditorRows, setOwnerEditorRows] = useState([]);
+  const [ownerEditorOriginal, setOwnerEditorOriginal] = useState([]);
+  const [ownerSearch, setOwnerSearch] = useState("");
+  const [ownerSearchOpen, setOwnerSearchOpen] = useState(false);
+  const [isSavingOwners, setIsSavingOwners] = useState(false);
+  const [isCreatingOwnerNode, setIsCreatingOwnerNode] = useState(false);
   const [collapsedOwnerNodes, setCollapsedOwnerNodes] = useState(() => new Set());
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
 
@@ -407,9 +420,14 @@ export default function EntityApp() {
   );
 
   const apiRequest = async (path, options = {}) => {
+    const { headers: optHeaders, ...restOptions } = options;
     const response = await fetch(`${apiBase}${path}`, {
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+        ...(optHeaders || {}),
+      },
+      ...restOptions,
     });
     if (!response.ok) {
       const text = await response.text();
@@ -473,8 +491,11 @@ export default function EntityApp() {
       setRemoteError("");
       const response = await fetch(`${apiBase}/api/directory`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ client: clientId, debug: false }),
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ debug: false }),
       });
       if (!response.ok) {
         throw new Error(`API error ${response.status}`);
@@ -639,6 +660,116 @@ export default function EntityApp() {
 
   const makeRelId = () => `rel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+  const openOwnerEditor = (targetId) => {
+    const currentOwners = getOwnersOf(relList, targetId).map((item) => {
+      const node = getNode(nodeList, item.nodeId);
+      return {
+        nodeId: item.nodeId,
+        name: node?.name ?? item.nodeId,
+        percent: item.rel?.percent != null ? String(item.rel.percent) : "",
+        startDate: item.rel?.startDate ?? "",
+        endDate: item.rel?.endDate ?? "",
+        isNew: false,
+      };
+    });
+    setOwnerEditorRows(currentOwners);
+    setOwnerEditorOriginal(currentOwners);
+    setOwnerSearch("");
+    setOwnerSearchOpen(false);
+    setOpenDialog({ type: "edit-owners", targetId });
+  };
+
+  const saveOwnerEditor = async () => {
+    const targetId = openDialog?.targetId;
+    if (!targetId) return;
+    setIsSavingOwners(true);
+    try {
+      const removedRows = ownerEditorOriginal.filter(
+        (orig) => !ownerEditorRows.find((r) => r.nodeId === orig.nodeId)
+      );
+      for (const row of removedRows) {
+        await apiRequest("/api/relationships/owns", {
+          method: "DELETE",
+          body: JSON.stringify({ from: row.nodeId, to: targetId, client: clientId }),
+        });
+      }
+      const changedRows = ownerEditorRows.filter((row) => {
+        if (row.isNew) return false;
+        const orig = ownerEditorOriginal.find((o) => o.nodeId === row.nodeId);
+        return orig && String(row.percent) !== String(orig.percent);
+      });
+      for (const row of changedRows) {
+        await apiRequest("/api/relationships/owns", {
+          method: "PUT",
+          body: JSON.stringify({
+            from: row.nodeId, to: targetId,
+            percent: row.percent !== "" ? Number(row.percent) : null,
+            startDate: row.startDate || null, endDate: row.endDate || null,
+            client: clientId,
+          }),
+        });
+      }
+      for (const row of ownerEditorRows.filter((r) => r.isNew)) {
+        await apiRequest("/api/relationships/owns", {
+          method: "POST",
+          body: JSON.stringify({
+            from: row.nodeId, to: targetId,
+            percent: row.percent !== "" ? Number(row.percent) : null,
+            startDate: row.startDate || null, endDate: row.endDate || null,
+            client: clientId,
+          }),
+        });
+      }
+      setRelList((prev) => {
+        let next = [...prev];
+        for (const row of removedRows) {
+          next = next.filter((r) => !(r.type === "owns" && r.from === row.nodeId && r.to === targetId));
+        }
+        for (const row of changedRows) {
+          const idx = next.findIndex((r) => r.type === "owns" && r.from === row.nodeId && r.to === targetId);
+          if (idx !== -1) next[idx] = { ...next[idx], percent: row.percent !== "" ? Number(row.percent) : null };
+        }
+        for (const row of ownerEditorRows.filter((r) => r.isNew)) {
+          next.push({ id: makeRelId(), type: "owns", from: row.nodeId, to: targetId,
+            percent: row.percent !== "" ? Number(row.percent) : null,
+            startDate: row.startDate || null, endDate: row.endDate || null });
+        }
+        return next;
+      });
+      setRemoteStatus("connected");
+      setOpenDialog(null);
+    } catch (err) {
+      setRemoteStatus("error");
+      setRemoteError(err.message);
+    } finally {
+      setIsSavingOwners(false);
+    }
+  };
+
+  const createOwnerNode = async (kind) => {
+    const name = ownerSearch.trim();
+    if (!name) return;
+    setIsCreatingOwnerNode(true);
+    try {
+      const created = await apiRequest("/api/nodes", {
+        method: "POST",
+        body: JSON.stringify({ name, kind, client: clientId }),
+      });
+      setNodeList((prev) => [...prev, created]);
+      setOwnerEditorRows((prev) => [
+        ...prev,
+        { nodeId: created.id, name: created.name, percent: "", startDate: "", endDate: "", isNew: true },
+      ]);
+      setOwnerSearch("");
+      setOwnerSearchOpen(false);
+    } catch (err) {
+      setRemoteStatus("error");
+      setRemoteError(err.message);
+    } finally {
+      setIsCreatingOwnerNode(false);
+    }
+  };
+
   const getNodeName = (id) => getNode(nodeList, id)?.name || id;
 
   useEffect(() => {
@@ -783,6 +914,23 @@ export default function EntityApp() {
   );
   const directOwnerTotalOk = Math.abs(directOwnerTotal - 100) < 0.01;
 
+  useEffect(() => {
+    if (viewMode === "hierarchy" && focusBoxRef.current) {
+      focusBoxRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [focusId, viewMode]);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const handler = (e) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target)) {
+        setSettingsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [settingsOpen]);
+
   const niceDate = selectedDate.toLocaleDateString(undefined, {
     weekday: "short",
     month: "short",
@@ -791,58 +939,92 @@ export default function EntityApp() {
   });
 
   return (
-    <div style={{ maxWidth: "90%", margin: "0 auto", padding: "24px 16px 120px" }} data-lpignore="true">
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+    <div style={viewMode === "hierarchy" ? {} : { paddingBottom: 120 }} data-lpignore="true">
+      <div className="app-header">
+        <div style={{ maxWidth: "90%", margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
           <div style={{ fontSize: 22, fontWeight: 600 }}>{toSentenceCase(clientId)}</div>
           <div style={{ fontSize: 22, fontWeight: 600 }}>Entity Dashboard</div>
-          <div className="header-date">{niceDate}</div>
+          {showDateSelection && <div className="header-date">{niceDate}</div>}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <div className="focus-panel">
-            <span className="focus-label">Focus</span>
-            <select
-              className="focus-select"
-              value={focusId}
-              onChange={(e) => setFocusId(e.target.value)}
-              data-lpignore="true"
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {showDateSelection && (
+            <Button
+              type="button"
+              variant="outline"
+              className="btn-icon"
+              aria-label="Select date"
+              ref={calendarButtonRef}
+              onClick={() => setShowCalendarPopup((prev) => !prev)}
             >
-              {nodeList.map((node) => (
-                <option key={node.id} value={node.id}>
-                  {node.name}
-                </option>
-              ))}
-            </select>
+              <CalendarDays />
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            className="btn-icon"
+            aria-label={viewMode === "hierarchy" ? "Switch to Directory" : "Switch to Hierarchy"}
+            title={viewMode === "hierarchy" ? "Directory" : "Hierarchy"}
+            onClick={() => setViewMode(viewMode === "hierarchy" ? "directory" : "hierarchy")}
+          >
+            {viewMode === "hierarchy" ? <LayoutList size={18} /> : <GitFork size={18} />}
+          </Button>
+          {remoteStatus === "loading" && (
+            <Button type="button" variant="outline" className="btn-icon btn-loading" aria-label="Loading…" title="Loading…" disabled>
+              <Hourglass size={18} />
+            </Button>
+          )}
+          <div className="settings-anchor" ref={settingsRef}>
+            <Button
+              type="button"
+              variant="outline"
+              className="btn-icon"
+              aria-label="Settings"
+              onClick={() => setSettingsOpen((prev) => !prev)}
+            >
+              <Settings size={18} />
+            </Button>
+            {settingsOpen && (
+              <div className="settings-menu">
+                <button
+                  className="settings-menu-item"
+                  onClick={() => { setShowDateSelection((prev) => !prev); setSettingsOpen(false); }}
+                >
+                  <CalendarDays size={15} />
+                  {showDateSelection ? "Hide date selection" : "Show date selection"}
+                </button>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => {
+                    setUploadOpen(true);
+                    setUploadStatus("idle");
+                    setUploadError("");
+                    setUploadSummary(null);
+                    setUploadFile(null);
+                    setUploadDetected("");
+                    setSettingsOpen(false);
+                  }}
+                >
+                  <Upload size={15} />
+                  Import CSV
+                </button>
+                <div className="settings-menu-divider" />
+                <button
+                  className="settings-menu-item settings-menu-item--danger"
+                  onClick={() => { setSettingsOpen(false); if (onSignOut) onSignOut(); }}
+                >
+                  <LogOut size={15} />
+                  Sign out
+                </button>
+              </div>
+            )}
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            className="btn-icon"
-            aria-label="Select date"
-            ref={calendarButtonRef}
-            onClick={() => setShowCalendarPopup((prev) => !prev)}
-          >
-            <CalendarDays />
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="btn-icon"
-            aria-label="Upload CSV"
-            title="Import CSV"
-            onClick={() => {
-              setUploadOpen(true);
-              setUploadStatus("idle");
-              setUploadError("");
-              setUploadSummary(null);
-              setUploadFile(null);
-              setUploadDetected("");
-            }}
-          >
-            <Upload />
-          </Button>
         </div>
-      </div>
+        </div>{/* end maxWidth wrapper */}
+      </div>{/* end app-header */}
+
+      <div className="app-content">
 
       {showCalendarPopup && (
         <>
@@ -978,28 +1160,6 @@ export default function EntityApp() {
         </DialogContent>
       </Dialog>
 
-      <div style={{ display: "flex", justifyContent: "center", gap: 8, margin: "18px 0" }}>
-        <Button
-          type="button"
-          variant={viewMode === "hierarchy" ? "default" : "outline"}
-          onClick={() => setViewMode("hierarchy")}
-        >
-          Hierarchy
-        </Button>
-        <Button
-          type="button"
-          variant={viewMode === "directory" ? "default" : "outline"}
-          onClick={() => setViewMode("directory")}
-        >
-          Directory
-        </Button>
-      </div>
-
-      {remoteStatus === "loading" && (
-        <div style={{ textAlign: "center", color: "#6b7280", marginBottom: 12 }}>
-          Loading directory...
-        </div>
-      )}
       {remoteStatus === "error" && (
         <div style={{ textAlign: "center", color: "#dc2626", marginBottom: 12 }}>
           {remoteError || "Unable to load directory"}
@@ -1009,35 +1169,55 @@ export default function EntityApp() {
       {viewMode === "hierarchy" && (
         <div className="hierarchy-vertical">
 
+          <div className="hv-above">
           {/* ── OWNERS (above the focus box) ── */}
           {focusNode?.kind !== "person" && (
-            <div className="hv-owners-row">
-              {getOwnersOf(relList, focusId).length === 0 ? (
-                <div className="hv-empty">No owners recorded</div>
-              ) : (
-                getOwnersOf(relList, focusId).map((item) => {
-                  const ownerNode = getNode(nodeList, item.nodeId);
-                  if (!ownerNode) return null;
-                  const pct = item.rel?.percent;
-                  const showPct = pct != null && Number.isFinite(Number(pct)) && Number(pct) !== 100;
-                  return (
-                    <div
-                      key={item.nodeId}
-                      className="hv-neighbor-box"
-                      onClick={() => setFocusId(item.nodeId)}
-                      title="Click to focus"
-                    >
-                      {ownerNode.logo && (
-                        <img src={ownerNode.logo} alt="" className="hv-neighbor-logo" />
-                      )}
-                      <div className="hv-neighbor-name">{ownerNode.name}</div>
-                      {showPct && (
-                        <div className="hv-neighbor-pct">{Number(pct)}%</div>
-                      )}
-                    </div>
-                  );
-                })
-              )}
+            <div className="hv-section">
+              <div className="hv-section-header">
+                <span className="hv-section-label">Owners</span>
+                <button className="hv-section-add" title="Edit owners" onClick={() => openOwnerEditor(focusId)}>
+                  <Pencil size={11} />
+                </button>
+              </div>
+              <div className="hv-owners-row">
+                {getOwnersOf(relList, focusId).length === 0 ? (
+                  <div className="hv-empty">No owners recorded</div>
+                ) : (
+                  [...getOwnersOf(relList, focusId).map((item) => {
+                    const ownerNode = getNode(nodeList, item.nodeId);
+                    if (!ownerNode) return null;
+                    const pct = item.rel?.percent;
+                    const showPct = pct != null && Number.isFinite(Number(pct));
+                    const isZero = showPct && Number(pct) === 0;
+                    return (
+                      <div
+                        key={item.nodeId}
+                        className={`hv-neighbor-box${isZero ? " hv-neighbor-box--zero" : ""}`}
+                        onClick={() => setFocusId(item.nodeId)}
+                        title={isZero ? "Non-economic / 0% interest" : "Click to focus"}
+                      >
+                        {ownerNode.logo && (
+                          <img src={ownerNode.logo} alt="" className="hv-neighbor-logo" />
+                        )}
+                        <div className="hv-neighbor-name">{ownerNode.name}</div>
+                        {showPct && (
+                          <div className="hv-neighbor-pct">{Number(pct)}%</div>
+                        )}
+                      </div>
+                    );
+                  }),
+                  (() => {
+                    const gap = Math.round((100 - directOwnerTotal) * 10) / 10;
+                    if (directOwnerTotalOk || directOwnerTotal === 0 || gap <= 0) return null;
+                    return (
+                      <div key="__unknown__" className="hv-neighbor-box hv-neighbor-box--unknown">
+                        <div className="hv-neighbor-name">Unknown</div>
+                        <div className="hv-neighbor-pct">{gap}%</div>
+                      </div>
+                    );
+                  })()]
+                )}
+              </div>
             </div>
           )}
 
@@ -1045,9 +1225,10 @@ export default function EntityApp() {
           {focusNode?.kind !== "person" && getOwnersOf(relList, focusId).length > 0 && (
             <div className="hv-connector" />
           )}
+          </div>{/* end hv-above */}
 
           {/* ── FOCUS BOX (centre) ── */}
-          <div className="hv-focus-box">
+          <div className="hv-focus-box" ref={focusBoxRef}>
             {focusNode?.logo && (
               <img src={focusNode.logo} alt="" className="hv-focus-logo" />
             )}
@@ -1057,6 +1238,7 @@ export default function EntityApp() {
             )}
           </div>
 
+          <div className="hv-below">
           {/* ── connector line from focus down to owned ── */}
           {getOwnedBy(relList, focusId).length > 0 && (
             <div className="hv-connector" />
@@ -1064,18 +1246,23 @@ export default function EntityApp() {
 
           {/* ── OWNED BY (below the focus box) ── */}
           {getOwnedBy(relList, focusId).length > 0 && (
-            <div className="hv-owned-row">
+            <div className="hv-section">
+              <div className="hv-section-header">
+                <span className="hv-section-label">Owns</span>
+              </div>
+              <div className="hv-owned-row">
               {getOwnedBy(relList, focusId).map((item) => {
                 const ownedNode = getNode(nodeList, item.nodeId);
                 if (!ownedNode) return null;
                 const pct = item.rel?.percent;
-                const showPct = pct != null && Number.isFinite(Number(pct)) && Number(pct) !== 100;
+                const showPct = pct != null && Number.isFinite(Number(pct));
+                const isZero = showPct && Number(pct) === 0;
                 return (
                   <div
                     key={item.nodeId}
-                    className="hv-neighbor-box"
+                    className={`hv-neighbor-box${isZero ? " hv-neighbor-box--zero" : ""}`}
                     onClick={() => setFocusId(item.nodeId)}
-                    title="Click to focus"
+                    title={isZero ? "Non-economic / 0% interest" : "Click to focus"}
                   >
                     {ownedNode.logo && (
                       <img src={ownedNode.logo} alt="" className="hv-neighbor-logo" />
@@ -1088,9 +1275,8 @@ export default function EntityApp() {
                 );
               })}
             </div>
+            </div>
           )}
-
-          {/* ── RELATIONSHIPS (employees / employers) ── */}
           {(focusEmployees.length > 0 || focusEmployers.length > 0) && (
             <Card style={{ marginTop: 24, alignSelf: "center", minWidth: 280, maxWidth: 480 }}>
               <CardContent>
@@ -1115,6 +1301,7 @@ export default function EntityApp() {
               </CardContent>
             </Card>
           )}
+          </div>{/* end hv-below */}
         </div>
       )}
 
@@ -1229,18 +1416,160 @@ export default function EntityApp() {
         </div>
       )}
 
+      {viewMode !== "hierarchy" && (
       <div className="fab-container">
         <Button
           type="button"
           className="fab-add"
-          onClick={() => setOpenDialog({ type: "add-picker" })}
+          onClick={() => {
+            setNewNode({ name: "", kind: "entity", address: "", workPhone: "", cellPhone: "", emails: [""], photo: "", taxId: "", accountingUrl: "", hrUrl: "", logo: "" });
+            setOpenDialog({ type: "add-node" });
+          }}
         >
           <Plus size={16} />
-          <span>Add</span>
+          <span>Add Entity</span>
+        </Button>
+        <Button
+          type="button"
+          className="fab-add"
+          onClick={() => {
+            setNewNode({ name: "", kind: "person", address: "", workPhone: "", cellPhone: "", emails: [""], photo: "", taxId: "", accountingUrl: "", hrUrl: "", logo: "" });
+            setOpenDialog({ type: "add-node" });
+          }}
+        >
+          <Plus size={16} />
+          <span>Add Person</span>
         </Button>
       </div>
+      )}
 
-      <Dialog open={Boolean(openDialog)} onOpenChange={() => setOpenDialog(null)}>
+      <Dialog open={Boolean(openDialog)} onOpenChange={() => { setOpenDialog(null); setDupMatches([]); setOwnerSearch(""); setOwnerSearchOpen(false); }}>
+
+        {openDialog?.type === "edit-owners" && (() => {
+          const targetNode = getNode(nodeList, openDialog.targetId);
+          const ownerTotal = ownerEditorRows.reduce(
+            (s, r) => s + (r.percent !== "" && !isNaN(Number(r.percent)) ? Number(r.percent) : 0), 0
+          );
+          const overLimit = ownerTotal > 100;
+          const searchQ = ownerSearch.trim().toLowerCase();
+          const searchResults = searchQ
+            ? nodeList.filter(
+                (n) =>
+                  n.name?.toLowerCase().includes(searchQ) &&
+                  !ownerEditorRows.find((r) => r.nodeId === n.id) &&
+                  n.id !== openDialog.targetId
+              )
+            : [];
+          return (
+            <DialogContent style={{ minWidth: 520, maxWidth: 640 }}>
+              <DialogHeader>
+                <DialogTitle>Owners of {targetNode?.name ?? openDialog.targetId}</DialogTitle>
+              </DialogHeader>
+
+              <div className="owner-editor">
+                {ownerEditorRows.length === 0 && (
+                  <div className="owner-editor-empty">No owners yet — search below to add one.</div>
+                )}
+                {ownerEditorRows.map((row, idx) => (
+                  <div key={row.nodeId} className="owner-editor-row">
+                    <div className="owner-editor-name">{row.name}</div>
+                    <div className="owner-editor-pct-wrap">
+                      <input
+                        className="form-input owner-editor-pct-input"
+                        type="number"
+                        min="0"
+                        max="100"
+                        placeholder="%"
+                        value={row.percent}
+                        onChange={(e) =>
+                          setOwnerEditorRows((prev) =>
+                            prev.map((r, i) => i === idx ? { ...r, percent: e.target.value } : r)
+                          )
+                        }
+                      />
+                      <span className="owner-editor-pct-sign">%</span>
+                    </div>
+                    <button
+                      className="owner-editor-remove"
+                      title="Remove owner"
+                      onClick={() => setOwnerEditorRows((prev) => prev.filter((_, i) => i !== idx))}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+
+                <div className={`owner-editor-total ${overLimit ? "over" : ""}`}>
+                  Total: <strong>{ownerTotal}%</strong>
+                  {overLimit && <span className="owner-editor-over-msg"> — exceeds 100%</span>}
+                </div>
+
+                <div className="owner-search-section">
+                  <div className="owner-search-label">Add owner</div>
+                  <div className="owner-search-container">
+                    <Search size={14} className="owner-search-icon" />
+                    <input
+                      className="form-input owner-search-input"
+                      type="text"
+                      placeholder="Search entities and people…"
+                      value={ownerSearch}
+                      autoComplete="off"
+                      data-lpignore="true"
+                      onChange={(e) => { setOwnerSearch(e.target.value); setOwnerSearchOpen(true); }}
+                      onFocus={() => setOwnerSearchOpen(true)}
+                    />
+                  </div>
+                  {ownerSearchOpen && (searchResults.length > 0 || ownerSearch.trim()) && (
+                    <div className="owner-search-dropdown">
+                      {searchResults.map((n) => (
+                        <div
+                          key={n.id}
+                          className="owner-search-result"
+                          onMouseDown={() => {
+                            setOwnerEditorRows((prev) => [
+                              ...prev,
+                              { nodeId: n.id, name: n.name, percent: "", startDate: "", endDate: "", isNew: true },
+                            ]);
+                            setOwnerSearch("");
+                            setOwnerSearchOpen(false);
+                          }}
+                        >
+                          <span className="owner-search-result-kind">{n.kind === "person" ? "Person" : "Entity"}</span>
+                          {n.name}
+                        </div>
+                      ))}
+                      {ownerSearch.trim() && (
+                        <div className="owner-search-actions">
+                          <button
+                            className="owner-search-create"
+                            disabled={isCreatingOwnerNode}
+                            onMouseDown={() => createOwnerNode("entity")}
+                          >
+                            <Plus size={12} /> Create entity "{ownerSearch.trim()}"
+                          </button>
+                          <button
+                            className="owner-search-create"
+                            disabled={isCreatingOwnerNode}
+                            onMouseDown={() => createOwnerNode("person")}
+                          >
+                            <Plus size={12} /> Create person "{ownerSearch.trim()}"
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <DialogFooter>
+                <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
+                <Button type="button" disabled={isSavingOwners} onClick={saveOwnerEditor}>
+                  {isSavingOwners ? "Saving…" : "Save"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          );
+        })()}
         {openDialog?.type === "add-picker" && (
           <DialogContent>
             <DialogHeader>
@@ -1276,30 +1605,20 @@ export default function EntityApp() {
                   type="text"
                   placeholder="Name"
                   value={newNode.name}
-                  onChange={(e) =>
-                    setNewNode((prev) => ({ ...prev, name: e.target.value }))
-                  }
+                  onChange={(e) => {
+                    setNewNode((prev) => ({ ...prev, name: e.target.value }));
+                    setDupMatches([]);
+                  }}
+                  onBlur={(e) => checkDuplicateName(e.target.value)}
                   autoComplete="off"
                   data-lpignore="true"
                 />
-              </div>
-              <div className="form-row">
-                <label className="form-label">Kind</label>
-                <select
-                  className="form-select"
-                  value={newNode.kind}
-                  onChange={(e) =>
-                    setNewNode((prev) => ({
-                      ...prev,
-                      kind: e.target.value,
-                      emails: prev.emails?.length ? prev.emails : [""],
-                    }))
-                  }
-                  data-lpignore="true"
-                >
-                  <option value="entity">Entity</option>
-                  <option value="person">Person</option>
-                </select>
+                {dupMatches.length > 0 && (
+                  <div className="dup-warning">
+                    <strong>Possible duplicate{dupMatches.length > 1 ? "s" : ""}:</strong>{" "}
+                    {dupMatches.join(", ")}
+                  </div>
+                )}
               </div>
               {newNode.kind === "person" && (
                 <>
@@ -2592,6 +2911,7 @@ export default function EntityApp() {
           </DialogContent>
         )}
       </Dialog>
+      </div>{/* end app-content */}
     </div>
   );
 }

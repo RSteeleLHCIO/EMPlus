@@ -3,6 +3,8 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
 import {
   getNode,
   putNode,
@@ -18,6 +20,15 @@ import {
   batchPutRels,
   makeRelKey,
 } from "./dynamoClient.js";
+import {
+  getUser,
+  putUser,
+  countUsersByClient,
+} from "./authClient.js";
+
+const JWT_SECRET = process.env.JWT_SECRET || "changeme-set-JWT_SECRET-env-var";
+const JWT_EXPIRY = process.env.JWT_EXPIRY || "8h";
+const SETUP_SECRET = process.env.SETUP_SECRET || null;
 
 // ─── Pure business-logic helpers (no DynamoDB concerns) ──────────────────────
 
@@ -261,6 +272,83 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "dynamodb-api" });
 });
 
+// ─── AUTH ROUTES (no JWT required) ───────────────────────────────────────────
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { loginId, password } = req.body || {};
+    if (!loginId || !password) {
+      return res.status(400).json({ error: "loginId and password are required" });
+    }
+    const user = await getUser(String(loginId).toLowerCase().trim());
+    if (!user) return res.status(401).json({ error: "Invalid credentials" });
+    const match = await bcrypt.compare(password, user.passwordHash);
+    if (!match) return res.status(401).json({ error: "Invalid credentials" });
+    const token = jwt.sign(
+      { loginId: user.loginId, clientId: user.clientId, personId: user.personId || null },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRY }
+    );
+    res.json({ token, clientId: user.clientId, personId: user.personId || null });
+  } catch (err) {
+    console.error("/api/auth/login error", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bootstrap: register the first user for a client.
+// Requires header X-Setup-Secret matching SETUP_SECRET env var (if set),
+// OR the client must have zero existing users.
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { loginId, password, clientId, personId, setupSecret } = req.body || {};
+    if (!loginId || !password || !clientId) {
+      return res.status(400).json({ error: "loginId, password, clientId are required" });
+    }
+    // Security gate: either SETUP_SECRET matches, or no users exist yet for this client
+    if (SETUP_SECRET && setupSecret !== SETUP_SECRET) {
+      const existing = await countUsersByClient(clientId);
+      if (existing > 0) {
+        return res.status(403).json({ error: "Registration not permitted" });
+      }
+    }
+    const normalizedId = String(loginId).toLowerCase().trim();
+    const existing = await getUser(normalizedId);
+    if (existing) return res.status(409).json({ error: "loginId already exists" });
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = {
+      loginId: normalizedId,
+      clientId,
+      personId: personId || null,
+      passwordHash,
+      createdAt: new Date().toISOString(),
+    };
+    await putUser(user);
+    res.status(201).json({ loginId: user.loginId, clientId: user.clientId });
+  } catch (err) {
+    console.error("/api/auth/register error", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── JWT MIDDLEWARE (all /api/* routes below this require a valid token) ──────
+
+app.use("/api", (req, res, next) => {
+  // Skip auth routes
+  if (req.path.startsWith("/auth/")) return next();
+  if (req.path === "/health") return next();
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.auth = payload; // { loginId, clientId, personId }
+    next();
+  } catch {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+});
+
 // openCypher has been removed — backend now uses DynamoDB.
 app.post("/api/cypher", (_req, res) => {
   res.status(410).json({ error: "openCypher endpoint removed; backend now uses DynamoDB." });
@@ -268,11 +356,11 @@ app.post("/api/cypher", (_req, res) => {
 
 app.post("/api/graph", async (req, res) => {
   try {
-    const { focusId, asOf, client } = req.body || {};
+    const clientId = req.auth.clientId;
+    const { focusId, asOf } = req.body || {};
     if (!focusId || !asOf) {
       return res.status(400).json({ error: "focusId and asOf are required" });
     }
-    const clientId = client || "test";
     const focusKey = normalizeClientId(clientId, focusId);
 
     // Fetch focus node and all rels referencing it in parallel.
@@ -328,10 +416,7 @@ app.post("/api/graph", async (req, res) => {
 
 app.post("/api/directory", async (req, res) => {
   try {
-    const { client } = req.body || {};
-    if (!client) {
-      return res.status(400).json({ error: "client is required" });
-    }
+    const client = req.auth.clientId;
     const [nodeItems, relItems] = await Promise.all([
       queryNodes(client),
       queryRels(client),
@@ -348,12 +433,13 @@ app.post("/api/directory", async (req, res) => {
 
 app.post("/api/nodes", async (req, res) => {
   try {
+    const client = req.auth.clientId;
     const {
-      id, name, kind, client, address, workPhone, cellPhone, emails,
+      id, name, kind, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo,
     } = req.body || {};
-    if (!id || !name || !kind || !client) {
-      return res.status(400).json({ error: "id, name, kind, client are required" });
+    if (!id || !name || !kind) {
+      return res.status(400).json({ error: "id, name, kind are required" });
     }
     const normalizedId = normalizeClientId(client, id);
     const now = new Date().toISOString();
@@ -392,9 +478,10 @@ const importNodeRows = async (rows, client) => {
 
 app.post("/api/import/nodes-csv", async (req, res) => {
   try {
-    const { csv, client, defaultKind } = req.body || {};
-    if (!csv || !client) {
-      return res.status(400).json({ error: "csv and client are required" });
+    const client = req.auth.clientId;
+    const { csv, defaultKind } = req.body || {};
+    if (!csv) {
+      return res.status(400).json({ error: "csv is required" });
     }
     const { rows, skipped } = parseNodeCsv(csv, defaultKind || "entity", client);
     if (!rows.length) {
@@ -410,9 +497,8 @@ app.post("/api/import/nodes-csv", async (req, res) => {
 
 app.post("/api/import/nodes-csv/upload", upload.single("file"), async (req, res) => {
   try {
-    const client = req.body?.client;
+    const client = req.auth.clientId;
     const defaultKind = req.body?.defaultKind || "entity";
-    if (!client) return res.status(400).json({ error: "client is required" });
     if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
 
     const csv = req.file.buffer.toString("utf-8");
@@ -473,9 +559,10 @@ const importOwnershipRows = async (resolved, client) => {
 
 app.post("/api/import/ownerships-csv", async (req, res) => {
   try {
-    const { csv, client } = req.body || {};
-    if (!csv || !client) {
-      return res.status(400).json({ error: "csv and client are required" });
+    const client = req.auth.clientId;
+    const { csv } = req.body || {};
+    if (!csv) {
+      return res.status(400).json({ error: "csv is required" });
     }
     const { rows, skipped } = parseOwnershipCsv(csv);
     if (!rows.length) {
@@ -495,8 +582,7 @@ app.post("/api/import/ownerships-csv", async (req, res) => {
 
 app.post("/api/import/ownerships-csv/upload", upload.single("file"), async (req, res) => {
   try {
-    const client = req.body?.client;
-    if (!client) return res.status(400).json({ error: "client is required" });
+    const client = req.auth.clientId;
     if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
 
     const csv = req.file.buffer.toString("utf-8");
@@ -519,12 +605,13 @@ app.post("/api/import/ownerships-csv/upload", upload.single("file"), async (req,
 app.put("/api/nodes/:id", async (req, res) => {
   try {
     const id = req.params.id;
+    const client = req.auth.clientId;
     const {
-      name, kind, client, newId, address, workPhone, cellPhone, emails,
+      name, kind, newId, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo,
     } = req.body || {};
-    if (!id || !name || !kind || !client) {
-      return res.status(400).json({ error: "id, name, kind, client are required" });
+    if (!id || !name || !kind) {
+      return res.status(400).json({ error: "id, name, kind are required" });
     }
     const normalizedId = normalizeClientId(client, id);
     const normalizedNewId = newId ? normalizeClientId(client, newId) : null;
@@ -574,9 +661,9 @@ app.put("/api/nodes/:id", async (req, res) => {
 app.delete("/api/nodes/:id", async (req, res) => {
   try {
     const id = req.params.id;
-    const client = req.body?.client || req.query?.client;
-    if (!id || !client) {
-      return res.status(400).json({ error: "id and client are required" });
+    const client = req.auth.clientId;
+    if (!id) {
+      return res.status(400).json({ error: "id is required" });
     }
     const normalizedId = normalizeClientId(client, id);
     // Detach-delete: remove all relationships first, then the node.
@@ -593,9 +680,10 @@ app.delete("/api/nodes/:id", async (req, res) => {
 
 app.post("/api/relationships/owns", async (req, res) => {
   try {
-    const { from, to, percent, startDate, endDate, client } = req.body || {};
-    if (!from || !to || !client) {
-      return res.status(400).json({ error: "from, to, client are required" });
+    const client = req.auth.clientId;
+    const { from, to, percent, startDate, endDate } = req.body || {};
+    if (!from || !to) {
+      return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
@@ -617,9 +705,10 @@ app.post("/api/relationships/owns", async (req, res) => {
 
 app.put("/api/relationships/owns", async (req, res) => {
   try {
-    const { from, to, percent, startDate, endDate, client } = req.body || {};
-    if (!from || !to || !client) {
-      return res.status(400).json({ error: "from, to, client are required" });
+    const client = req.auth.clientId;
+    const { from, to, percent, startDate, endDate } = req.body || {};
+    if (!from || !to) {
+      return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
@@ -641,9 +730,10 @@ app.put("/api/relationships/owns", async (req, res) => {
 
 app.delete("/api/relationships/owns", async (req, res) => {
   try {
-    const { from, to, client } = req.body || {};
-    if (!from || !to || !client) {
-      return res.status(400).json({ error: "from, to, client are required" });
+    const client = req.auth.clientId;
+    const { from, to } = req.body || {};
+    if (!from || !to) {
+      return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
@@ -659,9 +749,10 @@ app.delete("/api/relationships/owns", async (req, res) => {
 
 app.post("/api/relationships/employs", async (req, res) => {
   try {
-    const { from, to, role, startDate, endDate, client } = req.body || {};
-    if (!from || !to || !client) {
-      return res.status(400).json({ error: "from, to, client are required" });
+    const client = req.auth.clientId;
+    const { from, to, role, startDate, endDate } = req.body || {};
+    if (!from || !to) {
+      return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
@@ -683,9 +774,10 @@ app.post("/api/relationships/employs", async (req, res) => {
 
 app.put("/api/relationships/employs", async (req, res) => {
   try {
-    const { from, to, role, startDate, endDate, client } = req.body || {};
-    if (!from || !to || !client) {
-      return res.status(400).json({ error: "from, to, client are required" });
+    const client = req.auth.clientId;
+    const { from, to, role, startDate, endDate } = req.body || {};
+    if (!from || !to) {
+      return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
@@ -707,9 +799,10 @@ app.put("/api/relationships/employs", async (req, res) => {
 
 app.delete("/api/relationships/employs", async (req, res) => {
   try {
-    const { from, to, client } = req.body || {};
-    if (!from || !to || !client) {
-      return res.status(400).json({ error: "from, to, client are required" });
+    const client = req.auth.clientId;
+    const { from, to } = req.body || {};
+    if (!from || !to) {
+      return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
