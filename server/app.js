@@ -247,16 +247,14 @@ const deleteRelsForNode = async (clientId, nodeId) => {
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
-if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
-  app.use(
-    cors({
-      origin: true,
-      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      allowedHeaders: ["Content-Type", "Authorization"],
-    })
-  );
-  app.options("*", cors());
-}
+app.use(
+  cors({
+    origin: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+app.options("*", cors());
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
