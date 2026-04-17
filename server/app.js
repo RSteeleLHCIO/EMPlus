@@ -305,21 +305,23 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-// Bootstrap: register the first user for a client.
-// Requires header X-Setup-Secret matching SETUP_SECRET env var (if set),
-// OR the client must have zero existing users.
+// Bootstrap: register the FIRST user for a brand-new client.
+// Requires SETUP_SECRET when set (guards against unauthorized client creation).
+// Rejects the request if the client already has users — use POST /api/auth/users instead.
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { loginId, password, clientId, personId, setupSecret } = req.body || {};
     if (!loginId || !password || !clientId) {
       return res.status(400).json({ error: "loginId, password, clientId are required" });
     }
-    // Security gate: either SETUP_SECRET matches, or no users exist yet for this client
+    // Block if this client already has users — they should use the in-app Add User feature
+    const existingCount = await countUsersByClient(clientId);
+    if (existingCount > 0) {
+      return res.status(403).json({ error: "Client already exists. Add users via the in-app Settings menu." });
+    }
+    // Require SETUP_SECRET for new-client provisioning
     if (SETUP_SECRET && setupSecret !== SETUP_SECRET) {
-      const existing = await countUsersByClient(clientId);
-      if (existing > 0) {
-        return res.status(403).json({ error: "Registration not permitted" });
-      }
+      return res.status(403).json({ error: "Setup secret required to provision a new client" });
     }
     const normalizedId = String(loginId).toLowerCase().trim();
     const existing = await getUser(normalizedId);
@@ -1036,6 +1038,34 @@ app.delete("/api/export-reports/:reportId", async (req, res) => {
     res.json({ reportId });
   } catch (err) {
     console.error("/api/export-reports DELETE error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/users — add a user to the currently authenticated client.
+// JWT required; the new user is scoped to req.auth.clientId automatically.
+app.post("/api/auth/users", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const { loginId, password, personId } = req.body || {};
+    if (!loginId || !password) {
+      return res.status(400).json({ error: "loginId and password are required" });
+    }
+    const normalizedId = String(loginId).toLowerCase().trim();
+    const existing = await getUser(normalizedId);
+    if (existing) return res.status(409).json({ error: "loginId already exists" });
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = {
+      loginId: normalizedId,
+      clientId: client,
+      personId: personId || null,
+      passwordHash,
+      createdAt: new Date().toISOString(),
+    };
+    await putUser(user);
+    res.status(201).json({ loginId: user.loginId, clientId: user.clientId });
+  } catch (err) {
+    console.error("/api/auth/users error", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });

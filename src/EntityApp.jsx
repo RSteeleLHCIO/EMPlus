@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { CalendarDays, Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen } from "lucide-react";
+import { CalendarDays, Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen, UserPlus } from "lucide-react";
 import { generateEntityPdf, generateEntityBook } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { Calendar } from "./components/ui/calendar";
@@ -577,6 +577,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [exportOpen, setExportOpen] = useState(false);
   const [exportReports, setExportReports] = useState([]);
   const [exportReportsLoaded, setExportReportsLoaded] = useState(false);
+  const [addUserOpen, setAddUserOpen] = useState(false);
+  const [addUserDraft, setAddUserDraft] = useState({ loginId: "", password: "", confirm: "" });
+  const [addUserBusy, setAddUserBusy] = useState(false);
+  const [addUserError, setAddUserError] = useState("");
+  const [addUserSuccess, setAddUserSuccess] = useState("");
   const [collapsedOwnerNodes, setCollapsedOwnerNodes] = useState(() => new Set());
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
 
@@ -1540,6 +1545,19 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 >
                   <BookOpen size={15} />
                   Data Dictionary
+                </button>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    setAddUserDraft({ loginId: "", password: "", confirm: "" });
+                    setAddUserError("");
+                    setAddUserSuccess("");
+                    setAddUserOpen(true);
+                  }}
+                >
+                  <UserPlus size={15} />
+                  Add User
                 </button>
                 <div className="settings-menu-divider" />
                 <button
@@ -3337,6 +3355,98 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         apiRequest={apiRequest}
         clientName={toSentenceCase(clientId)}
       />
+
+      {/* ── Add User dialog ── */}
+      <Dialog open={addUserOpen} onOpenChange={(v) => { if (!v) setAddUserOpen(false); }}>
+        <DialogContent style={{ maxWidth: 440 }}>
+          <DialogHeader style={{ marginBottom: 16, marginLeft: 0 }}>
+            <DialogTitle>Add User</DialogTitle>
+          </DialogHeader>
+          {addUserSuccess ? (
+            <div style={{ padding: "16px 0" }}>
+              <div style={{ color: "#16a34a", fontWeight: 600, marginBottom: 8 }}>User created!</div>
+              <div style={{ fontSize: 13, color: "#374151" }}>
+                Login ID: <strong>{addUserSuccess}</strong>
+              </div>
+              <DialogFooter style={{ marginTop: 24 }}>
+                <Button onClick={() => setAddUserOpen(false)}>Close</Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <>
+              <div className="form-grid">
+                <div className="form-row">
+                  <label className="form-label">Login ID</label>
+                  <input
+                    className="form-input"
+                    type="text"
+                    value={addUserDraft.loginId}
+                    onChange={(e) => setAddUserDraft((p) => ({ ...p, loginId: e.target.value }))}
+                    autoComplete="off"
+                    data-lpignore="true"
+                    placeholder="e.g. alice"
+                  />
+                </div>
+                <div className="form-row">
+                  <label className="form-label">Password</label>
+                  <input
+                    className="form-input"
+                    type="password"
+                    value={addUserDraft.password}
+                    onChange={(e) => setAddUserDraft((p) => ({ ...p, password: e.target.value }))}
+                    autoComplete="new-password"
+                  />
+                </div>
+                <div className="form-row">
+                  <label className="form-label">Confirm password</label>
+                  <input
+                    className="form-input"
+                    type="password"
+                    value={addUserDraft.confirm}
+                    onChange={(e) => setAddUserDraft((p) => ({ ...p, confirm: e.target.value }))}
+                    autoComplete="new-password"
+                  />
+                </div>
+              </div>
+              {addUserError && (
+                <div style={{ color: "#dc2626", fontSize: 13, marginTop: 8 }}>{addUserError}</div>
+              )}
+              <DialogFooter style={{ marginTop: 24 }}>
+                <Button variant="secondary" onClick={() => setAddUserOpen(false)}>Cancel</Button>
+                <Button
+                  type="button"
+                  disabled={addUserBusy}
+                  onClick={async () => {
+                    const { loginId, password, confirm, setupSecret } = addUserDraft;
+                    if (!loginId.trim()) { setAddUserError("Login ID is required."); return; }
+                    if (!password) { setAddUserError("Password is required."); return; }
+                    if (password !== confirm) { setAddUserError("Passwords do not match."); return; }
+                    setAddUserError("");
+                    setAddUserBusy(true);
+                    try {
+                      const data = await apiRequest("/api/auth/users", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          loginId: loginId.trim().toLowerCase(),
+                          password,
+                        }),
+                      });
+                      setAddUserSuccess(data.loginId);
+                    } catch (err) {
+                      setAddUserError(err.message);
+                    } finally {
+                      setAddUserBusy(false);
+                    }
+                  }}
+                >
+                  {addUserBusy ? "Creating…" : "Create User"}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
       </div>{/* end app-content */}
     </div>
   );
