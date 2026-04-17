@@ -1,8 +1,16 @@
-import React from "react";
+import React, { useEffect } from "react";
 import "../../ui.css";
 
 // Very small dialog shim. When `open` is falsy, render nothing.
 export function Dialog({ open, onOpenChange, children }) {
+    useEffect(() => {
+        if (open) {
+            const prev = document.body.style.overflow;
+            document.body.style.overflow = "hidden";
+            return () => { document.body.style.overflow = prev; };
+        }
+    }, [open]);
+
     if (!open) return null;
     // Clicking the overlay will close the dialog if `onOpenChange` provided.
     return (

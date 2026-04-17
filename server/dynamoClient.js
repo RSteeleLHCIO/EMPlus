@@ -17,6 +17,7 @@ const ddb = DynamoDBDocumentClient.from(rawClient, {
 
 const NODES_TABLE = process.env.DYNAMODB_TABLE_NODES || "EMPlusNodes";
 const RELS_TABLE = process.env.DYNAMODB_TABLE_RELS || "EMPlusRels";
+const DD_TABLE = process.env.DYNAMODB_TABLE_DD_FIELDS || "EMPlusDDFields";
 
 // Produces the sort key used for a relationship item.
 // e.g. makeRelKey("owns", "test|entity:a", "test|entity:b") => "OWNS#test|entity:a#test|entity:b"
@@ -144,4 +145,31 @@ export async function batchPutRels(items) {
       })
     );
   }
+}
+
+// ─── Data Dictionary ──────────────────────────────────────────────────────────
+
+export async function getDDField(clientId, fieldId) {
+  const result = await ddb.send(
+    new GetCommand({ TableName: DD_TABLE, Key: { clientId, fieldId } })
+  );
+  return result.Item || null;
+}
+
+export async function putDDField(item) {
+  await ddb.send(new PutCommand({ TableName: DD_TABLE, Item: item }));
+}
+
+export async function deleteDDField(clientId, fieldId) {
+  await ddb.send(
+    new DeleteCommand({ TableName: DD_TABLE, Key: { clientId, fieldId } })
+  );
+}
+
+export async function queryDDFields(clientId) {
+  return paginatedQuery({
+    TableName: DD_TABLE,
+    KeyConditionExpression: "clientId = :c",
+    ExpressionAttributeValues: { ":c": clientId },
+  });
 }

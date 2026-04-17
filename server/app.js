@@ -19,6 +19,10 @@ import {
   queryRelsByTo,
   batchPutRels,
   makeRelKey,
+  getDDField,
+  putDDField,
+  deleteDDField,
+  queryDDFields,
 } from "./dynamoClient.js";
 import {
   getUser,
@@ -177,7 +181,7 @@ const parseOwnershipCsv = (csvText) => {
 
 const buildNodeItem = (
   { id, name, kind, client, address, workPhone, cellPhone, emails, photo,
-    taxId, accountingUrl, hrUrl, logo, createdAt, updatedAt }
+    taxId, accountingUrl, hrUrl, logo, customFields, createdAt, updatedAt }
 ) => ({
   clientId: client,
   nodeId: id,          // DynamoDB sort key — mirrors id
@@ -194,6 +198,7 @@ const buildNodeItem = (
   accountingUrl: accountingUrl || "",
   hrUrl: hrUrl || "",
   logo: logo || "",
+  customFields: customFields || {},
   createdAt,
   updatedAt,
 });
@@ -436,7 +441,7 @@ app.post("/api/nodes", async (req, res) => {
     const client = req.auth.clientId;
     const {
       id, name, kind, address, workPhone, cellPhone, emails,
-      photo, taxId, accountingUrl, hrUrl, logo,
+      photo, taxId, accountingUrl, hrUrl, logo, customFields,
     } = req.body || {};
     if (!id || !name || !kind) {
       return res.status(400).json({ error: "id, name, kind are required" });
@@ -446,7 +451,7 @@ app.post("/api/nodes", async (req, res) => {
     const existing = await getNode(client, normalizedId);
     const item = buildNodeItem({
       id: normalizedId, name, kind, client, address, workPhone, cellPhone,
-      emails, photo, taxId, accountingUrl, hrUrl, logo,
+      emails, photo, taxId, accountingUrl, hrUrl, logo, customFields,
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     });
@@ -608,7 +613,7 @@ app.put("/api/nodes/:id", async (req, res) => {
     const client = req.auth.clientId;
     const {
       name, kind, newId, address, workPhone, cellPhone, emails,
-      photo, taxId, accountingUrl, hrUrl, logo,
+      photo, taxId, accountingUrl, hrUrl, logo, customFields,
     } = req.body || {};
     if (!id || !name || !kind) {
       return res.status(400).json({ error: "id, name, kind are required" });
@@ -626,7 +631,7 @@ app.put("/api/nodes/:id", async (req, res) => {
 
     const item = buildNodeItem({
       id: finalId, name, kind, client, address, workPhone, cellPhone,
-      emails, photo, taxId, accountingUrl, hrUrl, logo,
+      emails, photo, taxId, accountingUrl, hrUrl, logo, customFields,
       createdAt: existing.createdAt || now,
       updatedAt: now,
     });
@@ -810,6 +815,154 @@ app.delete("/api/relationships/employs", async (req, res) => {
     res.json({ from: fromId, to: toId });
   } catch (err) {
     console.error("/api/relationships/employs (delete) error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── DATA DICTIONARY ──────────────────────────────────────────────────────────
+
+const VALID_DATA_TYPES = new Set([
+  "string", "textarea", "number", "currency", "percentage",
+  "boolean", "date", "time", "phone", "email", "link", "address", "year",
+]);
+
+const VALID_APPLIES_TO = new Set(["entity", "person", "both"]);
+
+const toDDResponse = ({ clientId: _c, ...rest }) => rest;
+
+// GET /api/data-dictionary?client=<clientId>
+app.get("/api/data-dictionary", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const items = await queryDDFields(client);
+    res.json(items.map(toDDResponse));
+  } catch (err) {
+    console.error("/api/data-dictionary GET error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/data-dictionary
+app.post("/api/data-dictionary", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const { prompt, dataType, appliesTo, multiValue, validValues, phoneTypes } = req.body || {};
+    if (!prompt || !prompt.trim()) {
+      return res.status(400).json({ error: "prompt is required" });
+    }
+    if (!VALID_DATA_TYPES.has(dataType)) {
+      return res.status(400).json({ error: `invalid dataType: ${dataType}` });
+    }
+    if (!VALID_APPLIES_TO.has(appliesTo)) {
+      return res.status(400).json({ error: `invalid appliesTo: ${appliesTo}` });
+    }
+    const fieldId = `dd:${slugify(prompt.trim())}-${Date.now().toString(36)}`;
+    const now = new Date().toISOString();
+    const existingFields = await queryDDFields(client);
+    const item = {
+      clientId: client,
+      fieldId,
+      id: fieldId,
+      prompt: prompt.trim(),
+      dataType,
+      appliesTo: appliesTo || "both",
+      multiValue: !!multiValue,
+      validValues: Array.isArray(validValues) ? validValues.filter(Boolean) : [],
+      phoneTypes: Array.isArray(phoneTypes) ? phoneTypes.filter(Boolean) : [],
+      sortOrder: existingFields.length,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await putDDField(item);
+    res.status(201).json(toDDResponse(item));
+  } catch (err) {
+    console.error("/api/data-dictionary POST error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PUT /api/data-dictionary/:fieldId
+app.put("/api/data-dictionary/:fieldId", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const fieldId = req.params.fieldId;
+    const { prompt, dataType, appliesTo, multiValue, validValues, phoneTypes } = req.body || {};
+    if (!prompt || !prompt.trim()) {
+      return res.status(400).json({ error: "prompt is required" });
+    }
+    if (!VALID_DATA_TYPES.has(dataType)) {
+      return res.status(400).json({ error: `invalid dataType: ${dataType}` });
+    }
+    if (!VALID_APPLIES_TO.has(appliesTo)) {
+      return res.status(400).json({ error: `invalid appliesTo: ${appliesTo}` });
+    }
+    const existing = await getDDField(client, fieldId);
+    if (!existing) return res.status(404).json({ error: "field not found" });
+    const item = {
+      ...existing,
+      prompt: prompt.trim(),
+      dataType,
+      appliesTo: appliesTo || "both",
+      multiValue: !!multiValue,
+      validValues: Array.isArray(validValues) ? validValues.filter(Boolean) : [],
+      phoneTypes: Array.isArray(phoneTypes) ? phoneTypes.filter(Boolean) : [],
+      updatedAt: new Date().toISOString(),
+    };
+    await putDDField(item);
+    res.json(toDDResponse(item));
+  } catch (err) {
+    console.error("/api/data-dictionary PUT error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/data-dictionary/:fieldId
+app.delete("/api/data-dictionary/:fieldId", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const fieldId = req.params.fieldId;
+    const existing = await getDDField(client, fieldId);
+    if (!existing) return res.status(404).json({ error: "field not found" });
+    await deleteDDField(client, fieldId);
+    res.json({ fieldId });
+  } catch (err) {
+    console.error("/api/data-dictionary DELETE error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PUT /api/data-dictionary/:fieldId/reorder
+app.put("/api/data-dictionary/:fieldId/reorder", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const { fieldId } = req.params;
+    const { direction } = req.body || {};
+    if (direction !== "up" && direction !== "down") {
+      return res.status(400).json({ error: "direction must be 'up' or 'down'" });
+    }
+    const all = await queryDDFields(client);
+    // Normalize to consecutive integers so the swap is always predictable,
+    // even for legacy entries created before sortOrder was introduced.
+    const sorted = [...all]
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+      .map((f, i) => ({ ...f, sortOrder: i }));
+    const idx = sorted.findIndex((f) => f.fieldId === fieldId);
+    if (idx === -1) return res.status(404).json({ error: "field not found" });
+    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= sorted.length) {
+      return res.status(400).json({ error: "cannot move in that direction" });
+    }
+    const now = new Date().toISOString();
+    // Apply the swap and persist every item so all sortOrders are normalized.
+    const toSave = sorted.map((f, i) => {
+      if (i === idx) return { ...f, sortOrder: swapIdx, updatedAt: now };
+      if (i === swapIdx) return { ...f, sortOrder: idx, updatedAt: now };
+      return f;
+    });
+    await Promise.all(toSave.map((f) => putDDField(f)));
+    res.json(toSave.map(toDDResponse));
+  } catch (err) {
+    console.error("/api/data-dictionary reorder error", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });

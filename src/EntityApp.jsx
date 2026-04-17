@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { CalendarDays, Link, Users, Building2, Plus, Pencil, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass } from "lucide-react";
+import { CalendarDays, Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen } from "lucide-react";
 import { Calendar } from "./components/ui/calendar";
 import { Input } from "./components/ui/input";
 import {
@@ -12,6 +12,199 @@ import {
   DialogFooter,
 } from "./components/ui/dialog";
 import { Label } from "./components/ui/label";
+import { Switch } from "./components/ui/switch";
+
+const DATA_TYPES = [
+  { value: "string",     label: "Short text" },
+  { value: "textarea",   label: "Long text" },
+  { value: "number",     label: "Number" },
+  { value: "currency",   label: "Currency" },
+  { value: "percentage", label: "Percentage" },
+  { value: "boolean",    label: "Yes / No" },
+  { value: "date",       label: "Date" },
+  { value: "time",       label: "Time" },
+  { value: "phone",      label: "Phone number" },
+  { value: "email",      label: "Email address" },
+  { value: "link",       label: "URL / Link" },
+  { value: "address",    label: "Address" },
+  { value: "year",       label: "Year" },
+];
+
+const dataTypeToHtmlInput = (dt) => {
+  switch (dt) {
+    case "number": case "currency": case "percentage": case "year": return "number";
+    case "email": return "email";
+    case "link": return "url";
+    case "date": return "date";
+    case "time": return "time";
+    case "phone": return "tel";
+    default: return "text";
+  }
+};
+
+const renderDdField = (field, value, onChange) => {
+  const { fieldId, prompt, dataType, multiValue, validValues, phoneTypes } = field;
+
+  if (dataType === "phone") {
+    const types = phoneTypes?.length ? phoneTypes : ["Phone"];
+    // Normalize stored value to [{type, number}] array; handle legacy {[type]:number} objects
+    let entries;
+    if (Array.isArray(value) && value.length > 0) {
+      entries = value;
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+      entries = Object.entries(value).map(([t, n]) => ({ type: t, number: n }));
+    }
+    if (!entries || entries.length === 0) entries = [{ type: types[0], number: "" }];
+
+    const updateEntry = (idx, key, val) =>
+      onChange(entries.map((e, i) => i === idx ? { ...e, [key]: val } : e));
+    const removeEntry = (idx) => {
+      const next = entries.filter((_, i) => i !== idx);
+      onChange(next.length > 0 ? next : [{ type: types[0], number: "" }]);
+    };
+    const addEntry = () => onChange([...entries, { type: types[0], number: "" }]);
+
+    return (
+      <div className="form-row">
+        <label className="form-label">{prompt}</label>
+        <div style={{ display: "grid", gap: 8 }}>
+          {entries.map((entry, idx) => (
+            <div key={idx} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {types.length > 1 && (
+                <select
+                  className="form-select"
+                  style={{ width: 110, flexShrink: 0 }}
+                  value={entry.type}
+                  onChange={(e) => updateEntry(idx, "type", e.target.value)}
+                >
+                  {types.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              )}
+              {types.length === 1 && (
+                <span style={{ fontSize: 12, color: "#6b7280", flexShrink: 0, minWidth: 50 }}>{types[0]}</span>
+              )}
+              <input
+                className="form-input"
+                style={{ flex: 1 }}
+                type="tel"
+                value={entry.number}
+                onChange={(e) => updateEntry(idx, "number", e.target.value)}
+                autoComplete="off"
+                data-lpignore="true"
+              />
+              {multiValue && entries.length > 1 && (
+                <button type="button" className="btn btn-outline" style={{ padding: "4px 8px", flexShrink: 0 }}
+                  onClick={() => removeEntry(idx)}>✕</button>
+              )}
+            </div>
+          ))}
+          {multiValue && (
+            <div><Button type="button" variant="outline" onClick={addEntry}>+ Add {prompt}</Button></div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (dataType === "boolean") {
+    return (
+      <div className="form-row">
+        <label className="form-label">{prompt}</label>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Switch
+            checked={value === "true" || value === true}
+            onCheckedChange={(v) => onChange(v ? "true" : "false")}
+          />
+          <span style={{ fontSize: 14, color: (value === "true" || value === true) ? "#374151" : "#6b7280" }}>
+            {(value === "true" || value === true) ? "Yes" : "No"}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  if (multiValue) {
+    const arrVal = Array.isArray(value) ? value : (value ? [value] : [""]);
+    return (
+      <div className="form-row">
+        <label className="form-label">{prompt}</label>
+        <div style={{ display: "grid", gap: 8 }}>
+          {arrVal.map((v, idx) => (
+            <div key={idx} style={{ display: "flex", gap: 8 }}>
+              {validValues?.length > 0 ? (
+                <select
+                  className="form-select"
+                  style={{ flex: 1 }}
+                  value={v}
+                  onChange={(e) => { const next = [...arrVal]; next[idx] = e.target.value; onChange(next); }}
+                >
+                  <option value=""></option>
+                  {validValues.map((vv) => <option key={vv} value={vv}>{vv}</option>)}
+                </select>
+              ) : (
+                <input
+                  className="form-input"
+                  style={{ flex: 1 }}
+                  type={dataTypeToHtmlInput(dataType)}
+                  value={v}
+                  onChange={(e) => { const next = [...arrVal]; next[idx] = e.target.value; onChange(next); }}
+                  autoComplete="off"
+                  data-lpignore="true"
+                />
+              )}
+              {arrVal.length > 1 && (
+                <Button type="button" variant="outline" onClick={() => onChange(arrVal.filter((_, i) => i !== idx))}>Remove</Button>
+              )}
+            </div>
+          ))}
+          <div>
+            <Button type="button" variant="outline" onClick={() => onChange([...arrVal, ""])}>Add {prompt}</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (validValues?.length > 0) {
+    return (
+      <div className="form-row">
+        <label className="form-label">{prompt}</label>
+        <select className="form-select" value={value || ""} onChange={(e) => onChange(e.target.value)}>
+          <option value=""></option>
+          {validValues.map((v) => <option key={v} value={v}>{v}</option>)}
+        </select>
+      </div>
+    );
+  }
+
+  if (dataType === "textarea" || dataType === "address") {
+    return (
+      <div className="form-row">
+        <label className="form-label">{prompt}</label>
+        <textarea
+          className="form-input"
+          style={{ minHeight: 70, resize: "vertical", fontFamily: "inherit" }}
+          value={value || ""}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="form-row">
+      <label className="form-label">{prompt}</label>
+      <input
+        className="form-input"
+        type={dataTypeToHtmlInput(dataType)}
+        value={value || ""}
+        onChange={(e) => onChange(e.target.value)}
+        autoComplete="off"
+        data-lpignore="true"
+      />
+    </div>
+  );
+};
 
 const initialNodes = [
   { id: "test|entity:A", name: "Entity A", kind: "entity", client: "test" },
@@ -192,11 +385,18 @@ const toIsoDate = (d) => {
 export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) {
   const [nodeList, setNodeList] = useState(initialNodes);
   const [relList, setRelList] = useState(initialRelationships);
-  const [viewMode, setViewMode] = useState("hierarchy");
+  const [homeScreen, setHomeScreen] = useState(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const s = localStorage.getItem("homeScreen");
+      return s ? JSON.parse(s) : null;
+    } catch { return null; }
+  });
+  const [viewMode, setViewMode] = useState(() => homeScreen?.viewMode ?? "hierarchy");
   const [focusId, setFocusId] = useState(() => {
     if (typeof window === "undefined") return "entity:A";
     try {
-      return localStorage.getItem("focusId") || "entity:A";
+      return homeScreen?.focusId || localStorage.getItem("focusId") || "entity:A";
     } catch {
       return "entity:A";
     }
@@ -206,7 +406,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const calendarButtonRef = useRef(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showDateSelection, setShowDateSelection] = useState(false);
+  const [homeAnimating, setHomeAnimating] = useState(false);
+  const [homeAnimOrigin, setHomeAnimOrigin] = useState("50% 50%");
   const settingsRef = useRef(null);
+  const homeButtonRef = useRef(null);
   const focusBoxRef = useRef(null);
   const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5174";
   const [remoteStatus, setRemoteStatus] = useState("idle");
@@ -286,15 +489,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [newNode, setNewNode] = useState({
     name: "",
     kind: "entity",
-    address: "",
-    workPhone: "",
-    cellPhone: "",
-    emails: [""],
-    photo: "",
-    taxId: "",
-    accountingUrl: "",
-    hrUrl: "",
-    logo: "",
+    customFields: {},
   });
   const [dupMatches, setDupMatches] = useState([]);
   const [dirSearch, setDirSearch] = useState("");
@@ -323,15 +518,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [nodeDraft, setNodeDraft] = useState({
     name: "",
     kind: "entity",
-    address: "",
-    workPhone: "",
-    cellPhone: "",
-    emails: [""],
-    photo: "",
-    taxId: "",
-    accountingUrl: "",
-    hrUrl: "",
-    logo: "",
+    customFields: {},
   });
 
   const [newOwnership, setNewOwnership] = useState({
@@ -371,6 +558,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   });
 
   const [openDialog, setOpenDialog] = useState(null);
+  const [prevDialog, setPrevDialog] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState(null);
   const [isAddingNode, setIsAddingNode] = useState(false);
   const [isAddingOwnership, setIsAddingOwnership] = useState(false);
@@ -383,6 +571,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [isCreatingOwnerNode, setIsCreatingOwnerNode] = useState(false);
   const [collapsedOwnerNodes, setCollapsedOwnerNodes] = useState(() => new Set());
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
+
+  const [dataDictionary, setDataDictionary] = useState([]);
+  const emptyDdDraft = { prompt: "", dataType: "string", appliesTo: "both", multiValue: false, validValuesText: "", phoneTypesText: "" };
+  const [ddEntryDraft, setDdEntryDraft] = useState(emptyDdDraft);
+  const [ddEntryId, setDdEntryId] = useState(null);
+  const [isSavingDdEntry, setIsSavingDdEntry] = useState(false);
 
   const focusNode = useMemo(() => getNode(nodeList, focusId), [nodeList, focusId]);
   const ownerships = useMemo(
@@ -660,6 +854,110 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     URL.revokeObjectURL(url);
   };
 
+  const loadDataDictionary = async () => {
+    try {
+      const data = await apiRequest(`/api/data-dictionary?client=${encodeURIComponent(clientId)}`);
+      setDataDictionary(Array.isArray(data) ? data : []);
+    } catch {
+      setDataDictionary([]);
+    }
+  };
+
+  const openNewDdEntry = () => {
+    setDdEntryId(null);
+    setDdEntryDraft(emptyDdDraft);
+    setOpenDialog({ type: "data-dictionary-entry" });
+  };
+
+  const openDdEntry = (entry) => {
+    setDdEntryId(entry.id);
+    setDdEntryDraft({
+      prompt: entry.prompt,
+      dataType: entry.dataType,
+      appliesTo: entry.appliesTo || "both",
+      multiValue: !!entry.multiValue,
+      validValuesText: (entry.validValues || []).join("\n"),
+      phoneTypesText: (entry.phoneTypes || []).join("\n"),
+    });
+    setOpenDialog({ type: "data-dictionary-entry" });
+  };
+
+  const saveDdEntry = async () => {
+    if (!ddEntryDraft.prompt.trim()) return;
+    setIsSavingDdEntry(true);
+    const validValues = ddEntryDraft.validValuesText
+      .split("\n")
+      .map((v) => v.trim())
+      .filter(Boolean);
+    const phoneTypes = ddEntryDraft.dataType === "phone"
+      ? ddEntryDraft.phoneTypesText.split("\n").map((v) => v.trim()).filter(Boolean)
+      : [];
+    const payload = {
+      client: clientId,
+      prompt: ddEntryDraft.prompt.trim(),
+      dataType: ddEntryDraft.dataType,
+      appliesTo: ddEntryDraft.appliesTo,
+      multiValue: ddEntryDraft.multiValue,
+      validValues,
+      phoneTypes,
+    };
+    try {
+      if (ddEntryId) {
+        const updated = await apiRequest(`/api/data-dictionary/${encodeURIComponent(ddEntryId)}`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+        setDataDictionary((prev) => prev.map((e) => e.id === ddEntryId ? updated : e));
+      } else {
+        const created = await apiRequest("/api/data-dictionary", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        setDataDictionary((prev) => [...prev, created]);
+      }
+      setOpenDialog({ type: "data-dictionary" });
+    } catch (err) {
+      setRemoteStatus("error");
+      setRemoteError(err.message);
+    } finally {
+      setIsSavingDdEntry(false);
+    }
+  };
+
+  const deleteDdEntry = (id) => {
+    setConfirmDialog({
+      title: "ERPlus says",
+      message: "Delete this field definition?",
+      onConfirm: async () => {
+        try {
+          await apiRequest(`/api/data-dictionary/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+            body: JSON.stringify({ client: clientId }),
+          });
+          setDataDictionary((prev) => prev.filter((e) => e.id !== id));
+          setConfirmDialog(null);
+        } catch (err) {
+          setRemoteStatus("error");
+          setRemoteError(err.message);
+          setConfirmDialog(null);
+        }
+      },
+    });
+  };
+
+  const reorderDdEntry = async (id, direction) => {
+    try {
+      const updated = await apiRequest(`/api/data-dictionary/${encodeURIComponent(id)}/reorder`, {
+        method: "PUT",
+        body: JSON.stringify({ direction }),
+      });
+      setDataDictionary(Array.isArray(updated) ? updated : []);
+    } catch (err) {
+      setRemoteStatus("error");
+      setRemoteError(err.message);
+    }
+  };
+
   const makeNodeId = (kind, name, currentId = "") => {
     const slug = slugify(name || "node");
     const rawId = `${kind}:${slug || "node"}`;
@@ -746,7 +1044,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         return next;
       });
       setRemoteStatus("connected");
-      setOpenDialog(null);
+      if (prevDialog) {
+        setOpenDialog(prevDialog);
+        setPrevDialog(null);
+      } else {
+        setOpenDialog(null);
+      }
     } catch (err) {
       setRemoteStatus("error");
       setRemoteError(err.message);
@@ -784,23 +1087,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   useEffect(() => {
     const node = getNode(nodeList, editNodeId);
     if (node) {
-      const emails = Array.isArray(node.emails)
-        ? node.emails
-        : node.email
-          ? [node.email]
-          : [""];
       setNodeDraft({
         name: node.name,
         kind: node.kind,
-        address: node.address || "",
-        workPhone: node.workPhone || "",
-        cellPhone: node.cellPhone || "",
-        emails: emails.length > 0 ? emails : [""],
-        photo: node.photo || "",
-        taxId: node.taxId || "",
-        accountingUrl: node.accountingUrl || "",
-        hrUrl: node.hrUrl || "",
-        logo: node.logo || "",
+        customFields: node.customFields || {},
       });
     }
   }, [editNodeId, nodeList]);
@@ -840,6 +1130,52 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     }
   }, [focusId]);
 
+  // Back-button interception: close dialogs, then go home, then let browser navigate away
+  const _backRef = useRef({});
+  _backRef.current = { openDialog, prevDialog, uploadOpen, confirmDialog, viewMode, homeScreen, focusId };
+  useEffect(() => {
+    history.pushState({ emplus: true }, "");
+    const handlePop = () => {
+      const s = _backRef.current;
+      let handled = false;
+      if (s.confirmDialog) {
+        setConfirmDialog(null);
+        handled = true;
+      } else if (s.openDialog) {
+        if (s.prevDialog) {
+          setOpenDialog(s.prevDialog);
+          setPrevDialog(null);
+          // Update ref immediately so the next back press sees the correct state
+          // without waiting for React to re-render
+          _backRef.current = { ...s, openDialog: s.prevDialog, prevDialog: null };
+        } else {
+          setOpenDialog(null);
+          _backRef.current = { ...s, openDialog: null };
+        }
+        setDupMatches([]);
+        setOwnerSearch("");
+        setOwnerSearchOpen(false);
+        handled = true;
+      } else if (s.uploadOpen) {
+        setUploadOpen(false);
+        handled = true;
+      } else if (s.homeScreen && (
+        s.viewMode !== s.homeScreen.viewMode ||
+        (s.homeScreen.focusId && s.focusId !== s.homeScreen.focusId)
+      )) {
+        setViewMode(s.homeScreen.viewMode);
+        if (s.homeScreen.focusId) setFocusId(s.homeScreen.focusId);
+        handled = true;
+      }
+      if (handled) {
+        history.pushState({ emplus: true }, "");
+      }
+    };
+    window.addEventListener("popstate", handlePop);
+    return () => window.removeEventListener("popstate", handlePop);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (!clientId) return;
     setFocusId((prev) => normalizeClientId(clientId, prev));
@@ -849,10 +1185,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     let active = true;
     if (apiBase) {
       loadDirectory({ isActive: () => active });
+      loadDataDictionary();
     }
     return () => {
       active = false;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiBase, clientId, focusId, loadDirectory]);
 
   const ownerTree = useMemo(
@@ -949,6 +1287,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   return (
     <div style={viewMode === "hierarchy" ? {} : { paddingBottom: 120 }} data-lpignore="true">
+      {homeAnimating && (
+        <div className="home-anim-overlay" style={{ transformOrigin: homeAnimOrigin }} />
+      )}
       <div className="app-header">
         <div style={{ maxWidth: "90%", margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
@@ -979,11 +1320,45 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           >
             {viewMode === "hierarchy" ? <LayoutList size={18} /> : <GitFork size={18} />}
           </Button>
-          {remoteStatus === "loading" && (
-            <Button type="button" variant="outline" className="btn-icon btn-loading" aria-label="Loading…" title="Loading…" disabled>
-              <Hourglass size={18} />
-            </Button>
-          )}
+          <Button
+            ref={homeButtonRef}
+            type="button"
+            variant="outline"
+            className="btn-icon"
+            aria-label="Go home"
+            title="Home"
+            onClick={() => {
+              if (homeScreen) {
+                setViewMode(homeScreen.viewMode);
+                if (homeScreen.focusId) setFocusId(homeScreen.focusId);
+              } else {
+                setViewMode("hierarchy");
+              }
+            }}
+          >
+            <Home size={18} />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className="btn-icon"
+            aria-label="Export / Print"
+            title="Export / Print"
+            onClick={() => { /* TODO */ }}
+          >
+            <Download size={18} />
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className={`btn-icon${remoteStatus === "loading" ? " btn-loading" : ""}`}
+            aria-label="Loading…"
+            title="Loading…"
+            disabled
+            style={{ visibility: remoteStatus === "loading" ? "visible" : "hidden" }}
+          >
+            <Hourglass size={18} />
+          </Button>
           <div className="settings-anchor" ref={settingsRef}>
             <Button
               type="button"
@@ -1006,6 +1381,27 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 <button
                   className="settings-menu-item"
                   onClick={() => {
+                    const screen = {
+                      viewMode,
+                      focusId: viewMode === "hierarchy" ? focusId : null,
+                    };
+                    setHomeScreen(screen);
+                    try { localStorage.setItem("homeScreen", JSON.stringify(screen)); } catch {}
+                    const rect = homeButtonRef.current?.getBoundingClientRect();
+                    const ox = rect ? `${Math.round(rect.left + rect.width / 2)}px` : "90vw";
+                    const oy = rect ? `${Math.round(rect.top + rect.height / 2)}px` : "40px";
+                    setHomeAnimOrigin(`${ox} ${oy}`);
+                    setHomeAnimating(true);
+                    setTimeout(() => setHomeAnimating(false), 650);
+                    setSettingsOpen(false);
+                  }}
+                >
+                  <Home size={15} />
+                  Set as Home
+                </button>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => {
                     setUploadOpen(true);
                     setUploadStatus("idle");
                     setUploadError("");
@@ -1017,6 +1413,17 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 >
                   <Upload size={15} />
                   Import CSV
+                </button>
+                <button
+                  className="settings-menu-item"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    loadDataDictionary();
+                    setOpenDialog({ type: "data-dictionary" });
+                  }}
+                >
+                  <BookOpen size={15} />
+                  Data Dictionary
                 </button>
                 <div className="settings-menu-divider" />
                 <button
@@ -1242,7 +1649,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           </div>{/* end hv-above */}
 
           {/* ── FOCUS BOX (centre) ── */}
-          <div className="hv-focus-box" ref={focusBoxRef}>
+          <div className="hv-focus-box" ref={focusBoxRef} onClick={() => {
+            setEditNodeId(focusId);
+            setOpenDialog({ type: "edit-node" });
+          }}>
             {focusNode?.logo && (
               <img src={focusNode.logo} alt="" className="hv-focus-logo" />
             )}
@@ -1460,7 +1870,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           type="button"
           className="fab-add"
           onClick={() => {
-            setNewNode({ name: "", kind: "entity", address: "", workPhone: "", cellPhone: "", emails: [""], photo: "", taxId: "", accountingUrl: "", hrUrl: "", logo: "" });
+            setNewNode({ name: "", kind: "entity", customFields: {} });
             setOpenDialog({ type: "add-node" });
           }}
         >
@@ -1471,7 +1881,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           type="button"
           className="fab-add"
           onClick={() => {
-            setNewNode({ name: "", kind: "person", address: "", workPhone: "", cellPhone: "", emails: [""], photo: "", taxId: "", accountingUrl: "", hrUrl: "", logo: "" });
+            setNewNode({ name: "", kind: "person", customFields: {} });
             setOpenDialog({ type: "add-node" });
           }}
         >
@@ -1481,7 +1891,167 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       </div>
       )}
 
-      <Dialog open={Boolean(openDialog)} onOpenChange={() => { setOpenDialog(null); setDupMatches([]); setOwnerSearch(""); setOwnerSearchOpen(false); }}>
+      <Dialog open={Boolean(openDialog)} onOpenChange={() => { setOpenDialog(null); setPrevDialog(null); setDupMatches([]); setOwnerSearch(""); setOwnerSearchOpen(false); }}>
+
+        {openDialog?.type === "data-dictionary" && (
+          <DialogContent className="dialog-content--tall" style={{ width: "min(900px, 92vw)", maxWidth: "none" }}>
+            <DialogHeader style={{ marginBottom: 16, marginLeft: 0 }}>
+              <DialogTitle>Data Dictionary — {toSentenceCase(clientId)}</DialogTitle>
+            </DialogHeader>
+            <div className="dialog-body">
+              {dataDictionary.length === 0 ? (
+                <div style={{ color: "#6b7280", fontSize: 14, padding: "12px 0" }}>
+                  No fields defined yet. Use <strong>Add Field</strong> to create one.
+                </div>
+              ) : (
+                <div style={{ overflowX: "clip" }}>
+                  <table className="dd-table">
+                    <thead>
+                      <tr>
+                        <th>Prompt</th>
+                        <th>Type</th>
+                        <th>Applies To</th>
+                        <th>Multi-value</th>
+                        <th>Valid Values</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {/* Name — system field, always first, no edit/delete/reorder */}
+                      <tr>
+                        <td><em style={{ color: "#6b7280" }}>Name</em></td>
+                        <td style={{ color: "#6b7280" }}>Short text</td>
+                        <td style={{ color: "#6b7280" }}>Both</td>
+                        <td style={{ color: "#6b7280" }}>No</td>
+                        <td style={{ color: "#6b7280" }}></td>
+                        <td></td>
+                      </tr>
+                      {[...dataDictionary]
+                        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+                        .map((entry, idx, sorted) => (
+                        <tr key={entry.id}>
+                          <td>{entry.prompt}</td>
+                          <td>{DATA_TYPES.find((t) => t.value === entry.dataType)?.label ?? entry.dataType}</td>
+                          <td>
+                            {entry.appliesTo === "person" ? "Person" : entry.appliesTo === "entity" ? "Entity" : "Both"}
+                          </td>
+                          <td>{entry.multiValue ? "Yes" : "No"}</td>
+                          <td className="dd-valid-values">
+                            {(entry.validValues || []).length > 0
+                              ? entry.validValues.join(", ")
+                              : <span style={{ color: "#9ca3af" }}>Free-form</span>}
+                          </td>
+                          <td>
+                            <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                              <Button type="button" variant="outline" style={{ padding: "3px 7px", fontSize: 12, visibility: idx === 0 ? "hidden" : "visible" }} onClick={() => reorderDdEntry(entry.id, "up")}>↑</Button>
+                              <Button type="button" variant="outline" style={{ padding: "3px 7px", fontSize: 12, visibility: idx === sorted.length - 1 ? "hidden" : "visible" }} onClick={() => reorderDdEntry(entry.id, "down")}>↓</Button>
+                              <Button type="button" variant="outline" style={{ padding: "4px 8px" }} title="Edit" onClick={() => openDdEntry(entry)}><Pencil size={13} /></Button>
+                              <Button type="button" variant="outline" style={{ padding: "4px 8px" }} title="Delete" onClick={() => deleteDdEntry(entry.id)}><Trash2 size={13} /></Button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+            <DialogFooter style={{ justifyContent: "space-between", marginTop: 16 }}>
+              <Button type="button" variant="outline" onClick={openNewDdEntry}>
+                <Plus size={14} style={{ marginRight: 6 }} />
+                Add Field
+              </Button>
+              <Button variant="secondary" onClick={() => setOpenDialog(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        )}
+
+        {openDialog?.type === "data-dictionary-entry" && (
+          <DialogContent style={{ width: "min(600px, 92vw)", maxWidth: "none" }}>
+            <DialogHeader style={{ marginBottom: 16, marginLeft: 0 }}>
+              <DialogTitle>{ddEntryId ? "Edit Field" : "Add Field"}</DialogTitle>
+            </DialogHeader>
+            <div className="form-grid">
+              <div className="form-row">
+                <label className="form-label">Prompt</label>
+                <input
+                  className="form-input"
+                  type="text"
+                  value={ddEntryDraft.prompt}
+                  onChange={(e) => setDdEntryDraft((prev) => ({ ...prev, prompt: e.target.value }))}
+                  placeholder="e.g. Annual Revenue"
+                  autoComplete="off"
+                  data-lpignore="true"
+                />
+              </div>
+              <div className="form-row">
+                <label className="form-label">Data type</label>
+                <select
+                  className="form-select"
+                  value={ddEntryDraft.dataType}
+                  onChange={(e) => setDdEntryDraft((prev) => ({ ...prev, dataType: e.target.value }))}
+                >
+                  {DATA_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>{t.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-row">
+                <label className="form-label">Applies to</label>
+                <select
+                  className="form-select"
+                  value={ddEntryDraft.appliesTo}
+                  onChange={(e) => setDdEntryDraft((prev) => ({ ...prev, appliesTo: e.target.value }))}
+                >
+                  <option value="both">Entity &amp; Person</option>
+                  <option value="entity">Entity only</option>
+                  <option value="person">Person only</option>
+                </select>
+              </div>
+              <div className="form-row">
+                <label className="form-label">Multiple values</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <Switch
+                    checked={ddEntryDraft.multiValue}
+                    onCheckedChange={(v) => setDdEntryDraft((prev) => ({ ...prev, multiValue: v }))}
+                  />
+                  <span style={{ fontSize: 14, color: ddEntryDraft.multiValue ? "#374151" : "#6b7280" }}>
+                    {ddEntryDraft.multiValue ? "Stores a list of values" : "Stores a single value"}
+                  </span>
+                </div>
+              </div>
+              {ddEntryDraft.dataType === "phone" ? (
+                <div className="form-row">
+                  <label className="form-label">Phone types (one per line — e.g. Work, Cell, Home)</label>
+                  <textarea
+                    className="form-input"
+                    style={{ minHeight: 80, resize: "vertical", fontFamily: "inherit" }}
+                    value={ddEntryDraft.phoneTypesText}
+                    onChange={(e) => setDdEntryDraft((prev) => ({ ...prev, phoneTypesText: e.target.value }))}
+                    placeholder={"Work\nCell\nHome\nFax"}
+                  />
+                </div>
+              ) : (
+                <div className="form-row">
+                  <label className="form-label">Valid values (one per line — leave blank for free-form input)</label>
+                  <textarea
+                    className="form-input"
+                    style={{ minHeight: 90, resize: "vertical", fontFamily: "inherit" }}
+                    value={ddEntryDraft.validValuesText}
+                    onChange={(e) => setDdEntryDraft((prev) => ({ ...prev, validValuesText: e.target.value }))}
+                    placeholder={"Option A\nOption B\nOption C"}
+                  />
+                </div>
+              )}
+            </div>
+            <DialogFooter style={{ marginTop: 16 }}>
+              <Button variant="secondary" onClick={() => setOpenDialog({ type: "data-dictionary" })}>Cancel</Button>
+              <Button type="button" disabled={isSavingDdEntry || !ddEntryDraft.prompt.trim()} onClick={saveDdEntry}>
+                Save
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        )}
 
         {openDialog?.type === "edit-owners" && (() => {
           const targetNode = getNode(nodeList, openDialog.targetId);
@@ -1538,7 +2108,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 ))}
 
                 <div className={`owner-editor-total ${overLimit ? "over" : ""}`}>
-                  Total: <strong>{ownerTotal}%</strong>
+                  Total:&nbsp;<strong>{ownerTotal}%</strong>
                   {overLimit && <span className="owner-editor-over-msg"> — exceeds 100%</span>}
                 </div>
 
@@ -1600,7 +2170,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               </div>
 
               <DialogFooter>
-                <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
+                <Button variant="secondary" onClick={() => {
+                  if (prevDialog) { setOpenDialog(prevDialog); setPrevDialog(null); }
+                  else setOpenDialog(null);
+                }}>Cancel</Button>
                 <Button type="button" disabled={isSavingOwners} onClick={saveOwnerEditor}>
                   {isSavingOwners ? "Saving…" : "Save"}
                 </Button>
@@ -1631,11 +2204,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         )}
 
         {openDialog?.type === "add-node" && (
-          <DialogContent style={{ minWidth: 1000, maxWidth: "none" }}>
-            <DialogHeader>
-              <DialogTitle>Add node</DialogTitle>
+          <DialogContent className="dialog-content--tall" style={{ width: "min(1000px, 92vw)", maxWidth: "none" }}>
+            <DialogHeader style={{marginBottom: '24px', marginLeft: 0}}>
+              <DialogTitle>{"Add " + (newNode.kind === "person" ? "Person" : "Entity")}</DialogTitle>
             </DialogHeader>
+            <div className="dialog-body">
             <div className="form-grid">
+              {/* Name — always first, system field */}
               <div className="form-row">
                 <label className="form-label">Name</label>
                 <input
@@ -1658,183 +2233,34 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   </div>
                 )}
               </div>
-              {newNode.kind === "person" && (
-                <>
-                  <div className="form-row">
-                    <label className="form-label">Address</label>
-                    <input
-                      className="form-input"
-                      type="text"
-                      value={newNode.address}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, address: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Work phone</label>
-                    <input
-                      className="form-input"
-                      type="tel"
-                      value={newNode.workPhone}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, workPhone: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Cell phone</label>
-                    <input
-                      className="form-input"
-                      type="tel"
-                      value={newNode.cellPhone}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, cellPhone: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Email addresses</label>
-                    <div style={{ display: "grid", gap: 8 }}>
-                      {(newNode.emails ?? [""]).map((email, idx) => (
-                        <div key={idx} style={{ display: "flex", gap: 8 }}>
-                          <input
-                            className="form-input"
-                            type="email"
-                            value={email}
-                            style={{ flex: 1, minWidth: 0 }}
-                            onChange={(e) => {
-                              const next = [...(newNode.emails ?? [""])];
-                              next[idx] = e.target.value;
-                              setNewNode((prev) => ({ ...prev, emails: next }));
-                            }}
-                            autoComplete="off"
-                            data-lpignore="true"
-                          />
-                          {(newNode.emails ?? []).length > 1 && (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              onClick={() => {
-                                const next = [...(newNode.emails ?? [""])];
-                                next.splice(idx, 1);
-                                setNewNode((prev) => ({ ...prev, emails: next }));
-                              }}
-                            >
-                              Remove
-                            </Button>
-                          )}
-                        </div>
-                      ))}
-                      <div>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          onClick={() => {
-                            const next = [...(newNode.emails ?? [""]), ""];
-                            setNewNode((prev) => ({ ...prev, emails: next }));
-                          }}
-                        >
-                          Add email
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Photo URL</label>
-                    <input
-                      className="form-input"
-                      type="url"
-                      value={newNode.photo}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, photo: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                </>
-              )}
-              {newNode.kind === "entity" && (
-                <>
-                  <div className="form-row">
-                    <label className="form-label">Address</label>
-                    <input
-                      className="form-input"
-                      type="text"
-                      value={newNode.address}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, address: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Tax ID</label>
-                    <input
-                      className="form-input"
-                      type="text"
-                      value={newNode.taxId}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, taxId: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Accounting system URL</label>
-                    <input
-                      className="form-input"
-                      type="url"
-                      placeholder="https://"
-                      value={newNode.accountingUrl}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, accountingUrl: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">HR system URL</label>
-                    <input
-                      className="form-input"
-                      type="url"
-                      placeholder="https://"
-                      value={newNode.hrUrl}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, hrUrl: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Logo image URL</label>
-                    <input
-                      className="form-input"
-                      type="url"
-                      placeholder="https://"
-                      value={newNode.logo}
-                      onChange={(e) =>
-                        setNewNode((prev) => ({ ...prev, logo: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                </>
-              )}
+              {[...dataDictionary]
+                .filter((f) => f.appliesTo === "both" || f.appliesTo === newNode.kind)
+                .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+                .map((field) => (
+                  <React.Fragment key={field.fieldId}>
+                    {renderDdField(
+                      field,
+                      newNode.customFields?.[field.fieldId],
+                      (val) => setNewNode((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } }))
+                    )}
+                  </React.Fragment>
+                ))
+              }
             </div>
-            <DialogFooter>
+            </div>
+            <DialogFooter style={{ justifyContent: "space-between" }}>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={!nodeList.some((n) => n.id === makeNodeId(newNode.kind, newNode.name))}
+                onClick={() => {
+                  const id = makeNodeId(newNode.kind, newNode.name);
+                  openOwnerEditor(id);
+                }}
+              >
+                Owners
+              </Button>
+              <div style={{ display: "flex", gap: 8 }}>
               <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
               <Button
                 type="button"
@@ -1844,23 +2270,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   if (!newNode.name.trim()) return;
                   setIsAddingNode(true);
                   const id = makeNodeId(newNode.kind, newNode.name);
-                  const emails = (newNode.emails ?? [])
-                    .map((e) => e.trim())
-                    .filter(Boolean);
                   const payload = {
                     id,
                     name: newNode.name.trim(),
                     kind: newNode.kind,
                     client: clientId,
-                    address: newNode.address?.trim() || "",
-                    workPhone: newNode.workPhone?.trim() || "",
-                    cellPhone: newNode.cellPhone?.trim() || "",
-                    emails,
-                    photo: newNode.photo?.trim() || "",
-                    taxId: newNode.taxId?.trim() || "",
-                    accountingUrl: newNode.accountingUrl?.trim() || "",
-                    hrUrl: newNode.hrUrl?.trim() || "",
-                    logo: newNode.logo?.trim() || "",
+                    customFields: newNode.customFields || {},
                   };
                   try {
                     await apiRequest("/api/nodes", {
@@ -1869,19 +2284,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     });
                     setNodeList((prev) => [...prev, payload]);
                     if (!focusId) setFocusId(id);
-                    setNewNode({
-                      name: "",
-                      kind: newNode.kind,
-                      address: "",
-                      workPhone: "",
-                      cellPhone: "",
-                      emails: [""],
-                      photo: "",
-                      taxId: "",
-                      accountingUrl: "",
-                      hrUrl: "",
-                      logo: "",
-                    });
+                    setNewNode({ name: "", kind: newNode.kind, customFields: {} });
                     setRemoteStatus("connected");
                     setOpenDialog(null);
                   } catch (err) {
@@ -1894,12 +2297,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               >
                 Add
               </Button>
+              </div>
             </DialogFooter>
           </DialogContent>
         )}
 
         {openDialog?.type === "add-ownership" && (
-          <DialogContent style={{ minWidth: 1000, maxWidth: "none" }}>
+          <DialogContent style={{ width: "min(1000px, 92vw)", maxWidth: "none" }}>
             <DialogHeader>
               <DialogTitle>Add ownership</DialogTitle>
             </DialogHeader>
@@ -2189,11 +2593,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         )}
 
         {openDialog?.type === "edit-node" && (
-          <DialogContent style={{ minWidth: 1000, maxWidth: "none" }}>
-            <DialogHeader>
-              <DialogTitle>Edit node</DialogTitle>
+          <DialogContent className="dialog-content--tall" style={{ width: "min(1000px, 92vw)", maxWidth: "none" }}>
+            <DialogHeader  style={{marginBottom: '24px', marginLeft: 0}}>
+              <DialogTitle>{nodeDraft.name || "Edit Node"}</DialogTitle>
             </DialogHeader>
+            <div className="dialog-body">
             <div className="form-grid">
+              {/* Name — always first, system field */}
               <div className="form-row">
                 <label className="form-label">Name</label>
                 <input
@@ -2207,223 +2613,66 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   data-lpignore="true"
                 />
               </div>
-              <div className="form-row">
-                <label className="form-label">Kind</label>
-                <select
-                  className="form-select"
-                  value={nodeDraft.kind}
-                  onChange={(e) =>
-                    setNodeDraft((prev) => ({
-                      ...prev,
-                      kind: e.target.value,
-                      emails: prev.emails?.length ? prev.emails : [""],
-                    }))
-                  }
-                  data-lpignore="true"
-                >
-                  <option value="entity">Entity</option>
-                  <option value="person">Person</option>
-                </select>
-              </div>
-              {nodeDraft.kind === "person" && (
-                <>
-                  <div className="form-row">
-                    <label className="form-label">Address</label>
-                    <input
-                      className="form-input"
-                      type="text"
-                      value={nodeDraft.address}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, address: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Work phone</label>
-                    <input
-                      className="form-input"
-                      type="tel"
-                      value={nodeDraft.workPhone}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, workPhone: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Cell phone</label>
-                    <input
-                      className="form-input"
-                      type="tel"
-                      value={nodeDraft.cellPhone}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, cellPhone: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Email addresses</label>
-                    <div style={{ display: "grid", gap: 8 }}>
-                      {(nodeDraft.emails ?? [""]).map((email, idx) => (
-                        <div key={idx} style={{ display: "flex", gap: 8 }}>
-                          <input
-                            className="form-input"
-                            type="email"
-                            value={email}
-                            style={{ flex: 1, minWidth: 0 }}
-                            onChange={(e) => {
-                              const next = [...(nodeDraft.emails ?? [""])];
-                              next[idx] = e.target.value;
-                              setNodeDraft((prev) => ({ ...prev, emails: next }));
-                            }}
-                            autoComplete="off"
-                            data-lpignore="true"
-                          />
-                          {(nodeDraft.emails ?? []).length > 1 && (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              onClick={() => {
-                                const next = [...(nodeDraft.emails ?? [""])];
-                                next.splice(idx, 1);
-                                setNodeDraft((prev) => ({ ...prev, emails: next }));
-                              }}
-                            >
-                              Remove
-                            </Button>
-                          )}
-                        </div>
-                      ))}
-                      <div>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          onClick={() => {
-                            const next = [...(nodeDraft.emails ?? [""]), ""];
-                            setNodeDraft((prev) => ({ ...prev, emails: next }));
-                          }}
-                        >
-                          Add email
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Photo URL</label>
-                    <input
-                      className="form-input"
-                      type="url"
-                      value={nodeDraft.photo}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, photo: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                </>
-              )}
-              {nodeDraft.kind === "entity" && (
-                <>
-                  <div className="form-row">
-                    <label className="form-label">Address</label>
-                    <input
-                      className="form-input"
-                      type="text"
-                      value={nodeDraft.address}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, address: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Tax ID</label>
-                    <input
-                      className="form-input"
-                      type="text"
-                      value={nodeDraft.taxId}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, taxId: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Accounting system URL</label>
-                    <input
-                      className="form-input"
-                      type="url"
-                      placeholder="https://"
-                      value={nodeDraft.accountingUrl}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, accountingUrl: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">HR system URL</label>
-                    <input
-                      className="form-input"
-                      type="url"
-                      placeholder="https://"
-                      value={nodeDraft.hrUrl}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, hrUrl: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                  <div className="form-row">
-                    <label className="form-label">Logo image URL</label>
-                    <input
-                      className="form-input"
-                      type="url"
-                      placeholder="https://"
-                      value={nodeDraft.logo}
-                      onChange={(e) =>
-                        setNodeDraft((prev) => ({ ...prev, logo: e.target.value }))
-                      }
-                      autoComplete="off"
-                      data-lpignore="true"
-                    />
-                  </div>
-                </>
-              )}
+              {[...dataDictionary]
+                .filter((f) => f.appliesTo === "both" || f.appliesTo === nodeDraft.kind)
+                .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+                .map((field) => (
+                  <React.Fragment key={field.fieldId}>
+                    {renderDdField(
+                      field,
+                      nodeDraft.customFields?.[field.fieldId],
+                      (val) => setNodeDraft((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } }))
+                    )}
+                  </React.Fragment>
+                ))
+              }
+            </div>
             </div>
             <DialogFooter
               style={{
                 justifyContent: "space-between",
-                width: "100%",
                 paddingLeft: 24,
                 paddingRight: 24,
                 marginLeft: 0,
                 marginRight: 0,
+                marginTop: 24
               }}
             >
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  if (!editNodeId) return;
-                  setFocusId(editNodeId);
-                  setViewMode("hierarchy");
-                  setOpenDialog(null);
-                }}
-              >
-                Focus
-              </Button>
-              <div style={{ display: "flex", paddingRight: 48, justifyContent: "flex-end", gap: 8 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    if (!editNodeId) return;
+                    setFocusId(editNodeId);
+                    setViewMode("hierarchy");
+                    setOpenDialog(null);
+                  }}
+                >
+                  Focus
+                </Button>
+                {nodeDraft.kind !== "person" && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    if (!editNodeId) return;
+                    setPrevDialog(openDialog);
+                    openOwnerEditor(editNodeId);
+                  }}
+                >
+                  Owners
+                </Button>
+                )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => { /* TODO */ }}
+                >
+                  Export
+                </Button>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
                 <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
                 <Button
                   type="button"
@@ -2469,23 +2718,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       nodeDraft.name,
                       editNodeId
                     );
-                    const emails = (nodeDraft.emails ?? [])
-                      .map((e) => e.trim())
-                      .filter(Boolean);
                     const payload = {
                       name: nodeDraft.name.trim(),
                       kind: nodeDraft.kind,
                       client: clientId,
                       newId: newId !== editNodeId ? newId : null,
-                      address: nodeDraft.address?.trim() || "",
-                      workPhone: nodeDraft.workPhone?.trim() || "",
-                      cellPhone: nodeDraft.cellPhone?.trim() || "",
-                      emails,
-                      photo: nodeDraft.photo?.trim() || "",
-                      taxId: nodeDraft.taxId?.trim() || "",
-                      accountingUrl: nodeDraft.accountingUrl?.trim() || "",
-                      hrUrl: nodeDraft.hrUrl?.trim() || "",
-                      logo: nodeDraft.logo?.trim() || "",
+                      customFields: nodeDraft.customFields || {},
                     };
                     apiRequest(`/api/nodes/${editNodeId}`, {
                       method: "PUT",
@@ -2500,15 +2738,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                   id: newId,
                                   name: nodeDraft.name.trim(),
                                   kind: nodeDraft.kind,
-                                  address: payload.address,
-                                  workPhone: payload.workPhone,
-                                  cellPhone: payload.cellPhone,
-                                  emails: payload.emails,
-                                  photo: payload.photo,
-                                  taxId: payload.taxId,
-                                  accountingUrl: payload.accountingUrl,
-                                  hrUrl: payload.hrUrl,
-                                  logo: payload.logo,
+                                  customFields: payload.customFields,
                                   client: n.client || clientId,
                                 }
                               : n
@@ -2544,7 +2774,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         )}
 
         {openDialog?.type === "edit-ownership" && (
-          <DialogContent style={{ minWidth: 1000, maxWidth: "none" }}>
+          <DialogContent style={{ width: "min(1000px, 92vw)", maxWidth: "none" }}>
             <DialogHeader>
               <DialogTitle>Edit ownership</DialogTitle>
             </DialogHeader>

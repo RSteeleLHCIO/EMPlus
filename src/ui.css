@@ -123,6 +123,40 @@ body {
     pointer-events: none;
 }
 
+@keyframes suck-to-home {
+    0% {
+        transform: scale(1);
+        opacity: 1;
+        filter: blur(0px) brightness(1);
+    }
+    30% {
+        opacity: 0.85;
+        filter: blur(1px) brightness(1.15);
+    }
+    80% {
+        opacity: 0.5;
+        filter: blur(6px) brightness(1.4);
+    }
+    100% {
+        transform: scale(0);
+        opacity: 0;
+        filter: blur(16px) brightness(2);
+    }
+}
+
+.home-anim-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    pointer-events: none;
+    background: linear-gradient(135deg,
+        rgba(16, 185, 129, 0.75) 0%,
+        rgba(59, 130, 246, 0.65) 50%,
+        rgba(139, 92, 246, 0.7) 100%);
+    backdrop-filter: blur(0px);
+    animation: suck-to-home 0.6s cubic-bezier(0.6, 0, 0.98, 0.6) forwards;
+}
+
 /* Mode selector dropdown (History metric picker) */
 .mode-select {
     height: 36px;
@@ -240,7 +274,10 @@ body {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.3);
-    z-index: 50;
+    z-index: 110;
+    padding: 16px;
+    box-sizing: border-box;
+    overflow: hidden;
 }
 
 .dialog-content {
@@ -292,6 +329,26 @@ body {
     padding: 12px 0 0 0;
     border-top: 1px solid #e5e7eb;
     background: transparent;
+}
+
+/* Tall three-zone dialog layout */
+.dialog-content--tall {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 100px);
+    max-height: calc(100vh - 100px);
+    overflow: hidden;
+}
+
+.dialog-content--tall .dialog-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    padding-bottom: 8px;
+    padding-right: 16px;
 }
 
 input[type="date"],
@@ -818,6 +875,54 @@ input[type="text"] {
     margin: 4px 0;
 }
 
+/* ── Data Dictionary table ── */
+.dd-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.dd-table thead {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: #f9fafb;
+}
+
+.dd-table th {
+    text-align: left;
+    padding: 6px 10px;
+    background: #f9fafb;
+    border-bottom: 2px solid #e5e7eb;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #6b7280;
+    white-space: nowrap;
+}
+
+.dd-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid #f3f4f6;
+    vertical-align: middle;
+    color: #111827;
+}
+
+.dd-table tr:last-child td {
+    border-bottom: none;
+}
+
+.dd-table tr:hover td {
+    background: #f9fafb;
+}
+
+.dd-valid-values {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* ── App header (fixed) ── */
 .app-header {
     position: fixed;
@@ -1008,6 +1113,9 @@ input[type="text"] {
     padding: 10px 0 6px;
     font-size: 13px;
     color: var(--muted-foreground, #64748b);
+    display: flex;
+    justify-content: flex-end;
+    padding-right: 64px; /* align with column of percentages */
 }
 
 .owner-editor-total.over {
@@ -1341,6 +1449,13 @@ input[type="time"].no-native-picker {
     border-radius: 180px;
     box-shadow: 0 4px 16px rgba(37, 99, 235, 0.13);
     text-align: center;
+    cursor: pointer;
+    transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.hv-focus-box:hover {
+    border-color: #1d4ed8;
+    box-shadow: 0 6px 24px rgba(37, 99, 235, 0.22);
 }
 
 .hv-focus-logo {
