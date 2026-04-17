@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
 import { CalendarDays, Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen } from "lucide-react";
+import { generateEntityPdf, generateEntityBook } from "./utils/generateEntityPdf";
+import ExportDialog from "./components/ExportDialog";
 import { Calendar } from "./components/ui/calendar";
 import { Input } from "./components/ui/input";
 import {
@@ -405,10 +407,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [showCalendarPopup, setShowCalendarPopup] = useState(false);
   const calendarButtonRef = useRef(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [showDateSelection, setShowDateSelection] = useState(false);
   const [homeAnimating, setHomeAnimating] = useState(false);
   const [homeAnimOrigin, setHomeAnimOrigin] = useState("50% 50%");
   const settingsRef = useRef(null);
+  const exportMenuRef = useRef(null);
   const homeButtonRef = useRef(null);
   const focusBoxRef = useRef(null);
   const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5174";
@@ -569,6 +573,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [ownerSearchOpen, setOwnerSearchOpen] = useState(false);
   const [isSavingOwners, setIsSavingOwners] = useState(false);
   const [isCreatingOwnerNode, setIsCreatingOwnerNode] = useState(false);
+  const [isPdfExporting, setIsPdfExporting] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportReports, setExportReports] = useState([]);
+  const [exportReportsLoaded, setExportReportsLoaded] = useState(false);
   const [collapsedOwnerNodes, setCollapsedOwnerNodes] = useState(() => new Set());
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
 
@@ -1278,6 +1286,17 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return () => document.removeEventListener("mousedown", handler);
   }, [settingsOpen]);
 
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const handler = (e) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) {
+        setExportMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [exportMenuOpen]);
+
   const niceDate = selectedDate.toLocaleDateString(undefined, {
     weekday: "short",
     month: "short",
@@ -1338,16 +1357,113 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           >
             <Home size={18} />
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            className="btn-icon"
-            aria-label="Export / Print"
-            title="Export / Print"
-            onClick={() => { /* TODO */ }}
-          >
-            <Download size={18} />
-          </Button>
+          <div className="settings-anchor" ref={exportMenuRef}>
+            <Button
+              type="button"
+              variant="outline"
+              className="btn-icon"
+              aria-label="Export"
+              title={viewMode === "hierarchy" ? "Export PDF" : "Export"}
+              disabled={viewMode === "hierarchy" && isPdfExporting}
+              onClick={async () => {
+                if (viewMode === "hierarchy") {
+                  if (isPdfExporting) return;
+                  setIsPdfExporting(true);
+                  try {
+                    await generateEntityPdf({
+                      nodeId: focusId,
+                      nodeList,
+                      relList,
+                      dataDictionary,
+                      clientName: toSentenceCase(clientId),
+                    });
+                  } finally {
+                    setIsPdfExporting(false);
+                  }
+                } else {
+                  setExportMenuOpen((prev) => !prev);
+                }
+              }}
+            >
+              <Download size={18} />
+            </Button>
+            {exportMenuOpen && viewMode !== "hierarchy" && (
+              <div className="settings-menu">
+                <button
+                  className="settings-menu-item"
+                  onClick={async () => {
+                    setExportMenuOpen(false);
+                    if (!exportReportsLoaded) {
+                      try {
+                        const data = await apiRequest(`/api/export-reports?client=${encodeURIComponent(clientId)}`);
+                        setExportReports(Array.isArray(data) ? data : []);
+                      } catch {
+                        setExportReports([]);
+                      }
+                      setExportReportsLoaded(true);
+                    }
+                    setExportOpen(true);
+                  }}
+                >
+                  <Download size={15} />
+                  Export to Excel
+                </button>
+                <div className="settings-menu-divider" />
+                <button
+                  className="settings-menu-item"
+                  onClick={async () => {
+                    setExportMenuOpen(false);
+                    setIsPdfExporting(true);
+                    try {
+                      const exportNodes = dirSearch.trim()
+                        ? [...filteredEntityNodes, ...filteredPersonNodes]
+                        : nodeList;
+                      await generateEntityBook({
+                        nodes: exportNodes,
+                        nodeList,
+                        relList,
+                        dataDictionary,
+                        clientName: toSentenceCase(clientId),
+                        pageType: "hierarchy",
+                        fileName: `${toSentenceCase(clientId)}-entity-book-hierarchy`,
+                      });
+                    } finally {
+                      setIsPdfExporting(false);
+                    }
+                  }}
+                >
+                  <BookOpen size={15} />
+                  Entity Book — Hierarchy pages
+                </button>
+                <button
+                  className="settings-menu-item"
+                  onClick={async () => {
+                    setExportMenuOpen(false);
+                    setIsPdfExporting(true);
+                    try {
+                      const exportNodes = dirSearch.trim()
+                        ? [...filteredEntityNodes, ...filteredPersonNodes]
+                        : nodeList;
+                      await generateEntityBook({
+                        nodes: exportNodes,
+                        nodeList,
+                        relList,
+                        dataDictionary,
+                        clientName: toSentenceCase(clientId),
+                        pageType: "info",
+                        fileName: `${toSentenceCase(clientId)}-entity-book-data`,
+                      });
+                    } finally {
+                      setIsPdfExporting(false);
+                    }
+                  }}
+                >
+                  <BookOpen size={15} />
+                  Entity Book — Data pages
+                </button>
+              </div>
+            )}
+          </div>
           <Button
             type="button"
             variant="outline"
@@ -2667,9 +2783,24 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => { /* TODO */ }}
+                  disabled={isPdfExporting}
+                  onClick={async () => {
+                    if (!editNodeId || isPdfExporting) return;
+                    setIsPdfExporting(true);
+                    try {
+                      await generateEntityPdf({
+                        nodeId: editNodeId,
+                        nodeList,
+                        relList,
+                        dataDictionary,
+                        clientName: toSentenceCase(clientId),
+                      });
+                    } finally {
+                      setIsPdfExporting(false);
+                    }
+                  }}
                 >
-                  Export
+                  {isPdfExporting ? "Exporting…" : "Export"}
                 </Button>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -3179,6 +3310,33 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           </DialogContent>
         )}
       </Dialog>
+
+      <ExportDialog
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        exportNodes={
+          viewMode === "directory" && dirSearch.trim()
+            ? [...filteredEntityNodes, ...filteredPersonNodes]
+            : nodeList
+        }
+        nodeList={nodeList}
+        relList={relList}
+        dataDictionary={dataDictionary}
+        savedReports={exportReports}
+        onReportSaved={(report) =>
+          setExportReports((prev) => {
+            const idx = prev.findIndex((r) => r.reportId === report.reportId);
+            return idx >= 0
+              ? prev.map((r) => (r.reportId === report.reportId ? report : r))
+              : [...prev, report];
+          })
+        }
+        onReportDeleted={(reportId) =>
+          setExportReports((prev) => prev.filter((r) => r.reportId !== reportId))
+        }
+        apiRequest={apiRequest}
+        clientName={toSentenceCase(clientId)}
+      />
       </div>{/* end app-content */}
     </div>
   );

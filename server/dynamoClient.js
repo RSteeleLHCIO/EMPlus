@@ -173,3 +173,33 @@ export async function queryDDFields(clientId) {
     ExpressionAttributeValues: { ":c": clientId },
   });
 }
+
+// ─── Export Reports ───────────────────────────────────────────────────────────
+
+export const EXPORT_REPORTS_TABLE =
+  process.env.DYNAMODB_TABLE_EXPORT_REPORTS || "EMPlusExportReports";
+
+export async function getExportReport(clientId, reportId) {
+  const result = await ddb.send(
+    new GetCommand({ TableName: EXPORT_REPORTS_TABLE, Key: { clientId, reportId } })
+  );
+  return result.Item || null;
+}
+
+export async function putExportReport(item) {
+  await ddb.send(new PutCommand({ TableName: EXPORT_REPORTS_TABLE, Item: item }));
+}
+
+export async function deleteExportReport(clientId, reportId) {
+  await ddb.send(
+    new DeleteCommand({ TableName: EXPORT_REPORTS_TABLE, Key: { clientId, reportId } })
+  );
+}
+
+export async function queryExportReports(clientId) {
+  return paginatedQuery({
+    TableName: EXPORT_REPORTS_TABLE,
+    KeyConditionExpression: "clientId = :c",
+    ExpressionAttributeValues: { ":c": clientId },
+  });
+}

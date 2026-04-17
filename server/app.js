@@ -23,6 +23,10 @@ import {
   putDDField,
   deleteDDField,
   queryDDFields,
+  getExportReport,
+  putExportReport,
+  deleteExportReport,
+  queryExportReports,
 } from "./dynamoClient.js";
 import {
   getUser,
@@ -963,6 +967,75 @@ app.put("/api/data-dictionary/:fieldId/reorder", async (req, res) => {
     res.json(toSave.map(toDDResponse));
   } catch (err) {
     console.error("/api/data-dictionary reorder error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── EXPORT REPORTS ───────────────────────────────────────────────────────────
+
+const toExportReportResponse = ({ clientId: _c, ...rest }) => rest;
+
+const slugifyReportName = (name) =>
+  String(name || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "") || "report";
+
+// GET /api/export-reports — list all saved export reports for this client
+app.get("/api/export-reports", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const items = await queryExportReports(client);
+    res.json(items.map(toExportReportResponse));
+  } catch (err) {
+    console.error("/api/export-reports GET error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PUT /api/export-reports/:reportId — upsert (create or overwrite by name-slug key)
+app.put("/api/export-reports/:reportId", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const { reportId } = req.params;
+    const { name, fieldIds } = req.body || {};
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: "name is required" });
+    }
+    if (!Array.isArray(fieldIds)) {
+      return res.status(400).json({ error: "fieldIds must be an array" });
+    }
+    const now = new Date().toISOString();
+    const existing = await getExportReport(client, reportId);
+    const item = {
+      clientId: client,
+      reportId,
+      id: reportId,
+      name: name.trim(),
+      fieldIds,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+    await putExportReport(item);
+    res.json(toExportReportResponse(item));
+  } catch (err) {
+    console.error("/api/export-reports PUT error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/export-reports/:reportId
+app.delete("/api/export-reports/:reportId", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const { reportId } = req.params;
+    const existing = await getExportReport(client, reportId);
+    if (!existing) return res.status(404).json({ error: "report not found" });
+    await deleteExportReport(client, reportId);
+    res.json({ reportId });
+  } catch (err) {
+    console.error("/api/export-reports DELETE error", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
