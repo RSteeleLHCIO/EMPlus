@@ -5,6 +5,8 @@ import multer from "multer";
 import { parse } from "csv-parse/sync";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import { randomBytes } from "crypto";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   getNode,
   putNode,
@@ -266,7 +268,14 @@ const deleteRelsForNode = async (clientId, nodeId) => {
 // ─── Express app ──────────────────────────────────────────────────────────────
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+// ─── S3 (optional — only active when S3_BUCKET_UPLOADS env var is set) ───────
+const S3_BUCKET = process.env.S3_BUCKET_UPLOADS || null;
+const s3 = S3_BUCKET
+  ? new S3Client({ region: process.env.AWS_REGION || "us-east-1" })
+  : null;
+
 app.use(
   cors({
     origin: true,
@@ -278,7 +287,7 @@ app.options("*", cors());
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "dynamodb-api" });
+  res.json({ ok: true, service: "dynamodb-api", version: "2026-04-18.1243p", features: ["alpha version 1"] });
 });
 
 // ─── AUTH ROUTES (no JWT required) ───────────────────────────────────────────
@@ -345,8 +354,8 @@ app.post("/api/auth/register", async (req, res) => {
 // ─── JWT MIDDLEWARE (all /api/* routes below this require a valid token) ──────
 
 app.use("/api", (req, res, next) => {
-  // Skip auth routes
-  if (req.path.startsWith("/auth/")) return next();
+  // Skip only the unauthenticated auth endpoints
+  if (req.path === "/auth/login" || req.path === "/auth/register") return next();
   if (req.path === "/health") return next();
   const authHeader = req.headers["authorization"] || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -825,11 +834,94 @@ app.delete("/api/relationships/employs", async (req, res) => {
   }
 });
 
+// ─── FILE UPLOAD ──────────────────────────────────────────────────────────────
+
+// POST /api/upload — upload a file to S3 as a public-read object and return its
+// permanent public URL.  The object key contains 32 random hex chars so the URL
+// is not guessable.  Requires S3_BUCKET_UPLOADS env var; returns 501 if not set.
+//
+// Bucket prerequisites (set once in the AWS console or via CLI):
+//   • "Block all public access" → OFF
+//   • Bucket policy granting s3:GetObject on arn:aws:s3:::BUCKET/uploads/*
+app.post("/api/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!s3 || !S3_BUCKET) {
+      return res.status(501).json({ error: "File upload not configured (set S3_BUCKET_UPLOADS env var)" });
+    }
+    if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
+
+    // Derive a safe extension from the original file name.
+    const original = req.file.originalname || "upload";
+    const ext = original.includes(".")
+      ? original.split(".").pop().replace(/[^a-zA-Z0-9]/g, "").toLowerCase().slice(0, 10)
+      : "bin";
+    const key = `uploads/${req.auth.clientId}/${randomBytes(16).toString("hex")}.${ext}`;
+    const region = process.env.AWS_REGION || "us-east-1";
+
+    // Derive content type — prefer multer's detection but fall back by extension
+    const MIME_BY_EXT = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", pdf: "application/pdf" };
+    const contentType = (req.file.mimetype && req.file.mimetype !== "application/octet-stream")
+      ? req.file.mimetype
+      : (MIME_BY_EXT[ext] || "application/octet-stream");
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: key,
+        Body: req.file.buffer,
+        ContentType: contentType,
+      })
+    );
+
+    // Permanent public URL — never expires.
+    const url = `https://${S3_BUCKET}.s3.${region}.amazonaws.com/${key}`;
+    res.json({ url, key });
+  } catch (err) {
+    console.error("/api/upload error", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── IMAGE PROXY ─────────────────────────────────────────────────────────────
+
+// GET /api/proxy-image?url=<encoded-s3-url>
+// Fetches a file from our own S3 bucket server-side and returns it to the
+// client.  This lets html2canvas render cross-origin S3 images without needing
+// a CORS policy on the bucket.  Only URLs that start with our configured bucket
+// hostname are allowed to prevent open-proxy abuse.
+app.get("/api/proxy-image", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url is required" });
+
+    if (!S3_BUCKET || !url.startsWith(`https://${S3_BUCKET}.s3.`)) {
+      return res.status(403).json({ error: "URL not permitted" });
+    }
+
+    const upstream = await fetch(url);
+    if (!upstream.ok) return res.status(upstream.status).json({ error: "Upstream error" });
+
+    const buffer = await upstream.arrayBuffer();
+    const upstreamType = upstream.headers.get("content-type") || "";
+    const ext = url.split(".").pop().split("?")[0].toLowerCase();
+    const MIME_BY_EXT = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" };
+    const mimeType = upstreamType.startsWith("image/") ? upstreamType : (MIME_BY_EXT[ext] || "image/jpeg");
+    const b64 = Buffer.from(buffer).toString("base64");
+    const dataUrl = `data:${mimeType};base64,${b64}`;
+
+    // Return as JSON — avoids API Gateway binary encoding issues entirely
+    res.json({ dataUrl });
+  } catch (err) {
+    console.error("/api/proxy-image error", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── DATA DICTIONARY ──────────────────────────────────────────────────────────
 
 const VALID_DATA_TYPES = new Set([
   "string", "textarea", "number", "currency", "percentage",
-  "boolean", "date", "time", "phone", "email", "link", "address", "year",
+  "boolean", "date", "time", "phone", "email", "link", "file", "address", "year",
 ]);
 
 const VALID_APPLIES_TO = new Set(["entity", "person", "both"]);
@@ -1039,6 +1131,41 @@ app.delete("/api/export-reports/:reportId", async (req, res) => {
   } catch (err) {
     console.error("/api/export-reports DELETE error", err);
     res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// GET /api/auth/me — return the current user's profile (no password hash).
+app.get("/api/auth/me", async (req, res) => {
+  try {
+    const user = await getUser(req.auth.loginId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    const { passwordHash, ...profile } = user;
+    res.json(profile);
+  } catch (err) {
+    console.error("/api/auth/me GET error", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/auth/me — update editable profile fields.
+app.patch("/api/auth/me", async (req, res) => {
+  try {
+    const user = await getUser(req.auth.loginId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    const { name, email, cellPhone, workPhone } = req.body || {};
+    const updated = {
+      ...user,
+      ...(name      !== undefined && { name:      String(name).trim() }),
+      ...(email     !== undefined && { email:     String(email).trim() }),
+      ...(cellPhone !== undefined && { cellPhone: String(cellPhone).trim() }),
+      ...(workPhone !== undefined && { workPhone: String(workPhone).trim() }),
+    };
+    await putUser(updated);
+    const { passwordHash, ...profile } = updated;
+    res.json(profile);
+  } catch (err) {
+    console.error("/api/auth/me PATCH error", err);
+    res.status(500).json({ error: err.message });
   }
 });
 

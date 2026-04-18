@@ -18,6 +18,7 @@ import { Building2, Users } from "lucide-react";
 import { renderToStaticMarkup } from "react-dom/server";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
+import { formatPhone } from "./helpers";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -67,14 +68,12 @@ const formatFieldValue = (field, value) => {
   if (dataType === "percentage") return `${value}%`;
   if (dataType === "phone") {
     if (Array.isArray(value)) {
-      return value.map((e) => `${e.type}: ${e.number}`).filter((s) => s.trim() !== ": ").join(", ");
+      return value.map((e) => `${e.type}: ${formatPhone(e.number)}`).filter((s) => s.trim() !== ": ").join(", ");
     }
     if (value && typeof value === "object") {
-      return Object.entries(value)
-        .map(([t, n]) => `${t}: ${n}`)
-        .join(", ");
+      return Object.entries(value).map(([t, n]) => `${t}: ${formatPhone(n)}`).join(", ");
     }
-    return String(value);
+    return formatPhone(String(value));
   }
   if (Array.isArray(value)) return value.join(", ");
   return String(value);
@@ -397,6 +396,71 @@ export function EntityInfoPageContent({ nodeId, nodeList, relList, dataDictionar
   );
 }
 
+// ─── Image pre-fetching (bypasses S3 CORS for html2canvas) ──────────────────
+
+// Resizes a JPEG data URL to a compact thumbnail using an Image+canvas.
+// Data URLs are always same-origin, so canvas.toDataURL() never throws SecurityError.
+const resizeDataUrl = (dataUrl, maxPx = 200) =>
+  new Promise((resolve) => {
+    const img = new Image();
+    img.onerror = () => { console.error("[resizeDataUrl] img load failed"); resolve(dataUrl); };
+    img.onload = () => {
+      const scale = Math.min(1, maxPx / Math.max(img.width, img.height, 1));
+      const w = Math.max(1, Math.round(img.width * scale));
+      const h = Math.max(1, Math.round(img.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      try {
+        resolve(canvas.toDataURL("image/jpeg", 0.88));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.src = dataUrl;
+  });
+
+const patchNodeImages = async (nodeList, apiBase, token) => {
+  if (!apiBase) return nodeList;
+  const urls = new Set();
+  nodeList.forEach((n) => {
+    if (n.photo && /^https?:\/\//.test(n.photo)) urls.add(n.photo);
+    if (n.logo  && /^https?:\/\//.test(n.logo))  urls.add(n.logo);
+  });
+  if (urls.size === 0) return nodeList;
+
+  const cache = new Map();
+  await Promise.all(
+    [...urls].map(async (url) => {
+      try {
+        const proxyUrl = `${apiBase}/api/proxy-image?url=${encodeURIComponent(url)}`;
+        const res = await fetch(
+          proxyUrl,
+          {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            cache: "no-store",
+          }
+        );
+        if (!res.ok) return;
+        const { dataUrl } = await res.json();
+        if (!dataUrl) return;
+        const b64 = await resizeDataUrl(dataUrl, 200);
+        cache.set(url, b64);
+      } catch (err) {
+        console.error("[patchNodeImages] error for", url, err);
+      }
+    })
+  );
+
+  if (cache.size === 0) return nodeList;
+  return nodeList.map((n) => ({
+    ...n,
+    photo: cache.has(n.photo) ? cache.get(n.photo) : n.photo,
+    logo:  cache.has(n.logo)  ? cache.get(n.logo)  : n.logo,
+  }));
+};
+
 // ─── generateEntityPdf ───────────────────────────────────────────────────────
 
 /**
@@ -422,11 +486,16 @@ export async function generateEntityPdf({
   dataDictionary,
   clientName,
   download = true,
+  apiBase,
+  token,
 }) {
   const node = getNode(nodeList, nodeId);
   const fileName = `${node?.name || nodeId}.pdf`
     .replace(/[^\w\s.-]/g, "")
     .replace(/\s+/g, "_");
+
+  // Pre-fetch all S3 images to base64 so html2canvas never sees a cross-origin src
+  const patchedNodeList = await patchNodeImages(nodeList, apiBase, token);
 
   // Helper: render a React element into an off-screen div, capture it, return canvas
   const captureComponent = async (element, width = 794) => {
@@ -451,9 +520,19 @@ export async function generateEntityPdf({
       setTimeout(resolve, 100);
     });
 
+    // Wait for every <img> to finish decoding its (now inline) data URL
+    const imgEls = Array.from(container.querySelectorAll("img"));
+    await Promise.all(
+      imgEls.map((img) =>
+        img.complete
+          ? Promise.resolve()
+          : new Promise((r) => { img.onload = r; img.onerror = r; })
+      )
+    );
+
     const canvas = await html2canvas(container, {
       scale: 2,
-      useCORS: true,
+      useCORS: false,
       backgroundColor: "#ffffff",
     });
 
@@ -467,7 +546,7 @@ export async function generateEntityPdf({
   const canvas1 = await captureComponent(
     <HierarchyPageContent
       nodeId={nodeId}
-      nodeList={nodeList}
+      nodeList={patchedNodeList}
       relList={relList}
       clientName={clientName}
       asOf={new Date()}
@@ -478,7 +557,7 @@ export async function generateEntityPdf({
   const canvas2 = await captureComponent(
     <EntityInfoPageContent
       nodeId={nodeId}
-      nodeList={nodeList}
+      nodeList={patchedNodeList}
       relList={relList}
       dataDictionary={dataDictionary}
       clientName={clientName}
@@ -540,10 +619,15 @@ export async function generateEntityBook({
   clientName,
   pageType = "hierarchy",
   fileName,
+  apiBase,
+  token,
 }) {
   if (!nodes || nodes.length === 0) return;
 
   const { createRoot } = await import("react-dom/client");
+
+  // Pre-fetch all S3 images to base64 so html2canvas never sees a cross-origin src
+  const patchedNodeList = await patchNodeImages(nodeList, apiBase, token);
 
   const captureComponent = async (element, width = 794) => {
     const container = document.createElement("div");
@@ -561,9 +645,18 @@ export async function generateEntityBook({
       root.render(element);
       setTimeout(resolve, 100);
     });
+    // Wait for every <img> to finish decoding its (now inline) data URL
+    const imgEls = Array.from(container.querySelectorAll("img"));
+    await Promise.all(
+      imgEls.map((img) =>
+        img.complete
+          ? Promise.resolve()
+          : new Promise((r) => { img.onload = r; img.onerror = r; })
+      )
+    );
     const canvas = await html2canvas(container, {
       scale: 2,
-      useCORS: true,
+      useCORS: false,
       backgroundColor: "#ffffff",
     });
     root.unmount();
@@ -590,7 +683,7 @@ export async function generateEntityBook({
       pageType === "hierarchy" ? (
         <HierarchyPageContent
           nodeId={node.id}
-          nodeList={nodeList}
+          nodeList={patchedNodeList}
           relList={relList}
           clientName={clientName}
           asOf={asOf}
@@ -598,7 +691,7 @@ export async function generateEntityBook({
       ) : (
         <EntityInfoPageContent
           nodeId={node.id}
-          nodeList={nodeList}
+          nodeList={patchedNodeList}
           relList={relList}
           dataDictionary={dataDictionary}
           clientName={clientName}

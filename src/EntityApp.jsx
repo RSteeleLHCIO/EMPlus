@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { CalendarDays, Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen, UserPlus } from "lucide-react";
+import { CalendarDays, Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen, User, UserPlus } from "lucide-react";
 import { generateEntityPdf, generateEntityBook } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
+import { normalizePhone, formatPhone } from "./utils/helpers";
 import { Calendar } from "./components/ui/calendar";
 import { Input } from "./components/ui/input";
 import {
@@ -28,6 +29,7 @@ const DATA_TYPES = [
   { value: "phone",      label: "Phone number" },
   { value: "email",      label: "Email address" },
   { value: "link",       label: "URL / Link" },
+  { value: "file",       label: "File / Image" },
   { value: "address",    label: "Address" },
   { value: "year",       label: "Year" },
 ];
@@ -44,8 +46,276 @@ const dataTypeToHtmlInput = (dt) => {
   }
 };
 
-const renderDdField = (field, value, onChange) => {
+// ── Phone input: formats for display, normalises to E.164 on blur ─────────────────
+const PhoneInputRow = ({ value, onCommit, style }) => {
+  const [raw, setRaw] = React.useState(() => formatPhone(value));
+  React.useEffect(() => { setRaw(formatPhone(value)); }, [value]);
+  return (
+    <input
+      className="form-input"
+      style={style}
+      type="tel"
+      value={raw}
+      onChange={(e) => setRaw(e.target.value)}
+      onBlur={() => {
+        const normalized = normalizePhone(raw);
+        onCommit(normalized);
+        setRaw(formatPhone(normalized));
+      }}
+      autoComplete="off"
+      data-lpignore="true"
+    />
+  );
+};
+
+// ── External URL field — user types/pastes a URL, favicon shown as preview ──
+const DdLinkField = ({ prompt, value, onChange }) => {
+  const faviconUrl = (url) => {
+    try {
+      const { hostname } = new URL(url);
+      return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=64`;
+    } catch {
+      return null;
+    }
+  };
+  const favicon = value ? faviconUrl(value) : null;
+
+  return (
+    <div className="form-row">
+      <label className="form-label">{prompt}</label>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <input
+          className="form-input"
+          type="url"
+          value={value || ""}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="https://…"
+          autoComplete="off"
+          data-lpignore="true"
+        />
+        {value && (
+          <a href={value} target="_blank" rel="noopener noreferrer"
+            style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#2563eb", wordBreak: "break-all", textDecoration: "none" }}>
+            {favicon && (
+              <img src={favicon} alt="" width={16} height={16}
+                style={{ flexShrink: 0, borderRadius: 2 }}
+                onError={(e) => { e.currentTarget.style.display = "none"; }}
+              />
+            )}
+            <span style={{ textDecoration: "underline" }}>{value}</span>
+          </a>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ── Uploaded file field — URL hidden from user; shows thumbnail + Replace btn ──
+const DdFileField = ({ prompt, value, onChange, apiBase, token }) => {
+  const [uploading, setUploading] = React.useState(false);
+  const [imgError, setImgError] = React.useState(false);
+  const fileInputRef = React.useRef(null);
+
+  React.useEffect(() => { setImgError(false); }, [value]);
+
+  const isImage = (url) => /\.(png|jpe?g|gif|webp|svg|bmp)(\?|$)/i.test(url || "");
+  const isVideo = (url) => /\.(mp4|webm|ogv)(\?|$)/i.test(url || "");
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`${apiBase}/api/upload`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const { url } = await res.json();
+      onChange(url);
+    } catch (err) {
+      console.error("Upload error", err);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  // Derive a display name from the S3 key (last path segment without the hex prefix).
+  const displayName = (url) => {
+    try {
+      const seg = new URL(url).pathname.split("/").pop() || "file";
+      // Strip the 32-char hex random prefix: "<hex>.<ext>" → ".<ext>"
+      return seg.replace(/^[0-9a-f]{32}\./, "");
+    } catch {
+      return "file";
+    }
+  };
+
+  return (
+    <div className="form-row">
+      <label className="form-label">{prompt}</label>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {value && isImage(value) && !imgError && (
+          <a href={value} target="_blank" rel="noopener noreferrer">
+            <img
+              src={value}
+              alt={prompt}
+              style={{ maxWidth: 220, maxHeight: 150, borderRadius: 4, border: "1px solid #e5e7eb", display: "block" }}
+              onError={() => setImgError(true)}
+            />
+          </a>
+        )}
+        {value && isVideo(value) && (
+          <video src={value}
+            style={{ maxWidth: 220, maxHeight: 150, borderRadius: 4, border: "1px solid #e5e7eb" }}
+            controls
+          />
+        )}
+        {value && !isImage(value) && !isVideo(value) && (
+          <a href={value} target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 12, color: "#2563eb", textDecoration: "underline" }}>
+            {displayName(value)}
+          </a>
+        )}
+        {value && isImage(value) && imgError && (
+          <a href={value} target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 12, color: "#2563eb", textDecoration: "underline" }}>
+            {displayName(value)}
+          </a>
+        )}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <button
+            type="button"
+            title={uploading ? "Uploading…" : value ? "Replace file" : "Upload file"}
+            style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "5px 10px", border: "1px solid #d1d5db", borderRadius: 6,
+              background: "#fff", cursor: uploading ? "not-allowed" : "pointer",
+              fontSize: 13, color: "#374151",
+            }}
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+          >
+            <Upload size={14} />
+            {uploading ? "Uploading…" : value ? "Replace" : "Upload file"}
+          </button>
+          {value && (
+            <button
+              type="button"
+              title="Remove"
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "5px 10px", border: "1px solid #fca5a5", borderRadius: 6,
+                background: "#fff", cursor: "pointer", fontSize: 13, color: "#dc2626",
+              }}
+              onClick={() => onChange("")}
+            >
+              <X size={14} /> Remove
+            </button>
+          )}
+        </div>
+        <input ref={fileInputRef} type="file" style={{ display: "none" }} onChange={handleFileChange} />
+      </div>
+    </div>
+  );
+};
+
+// ── Built-in photo / logo upload (persons → photo, entities → logo) ──────────
+const NodeImageField = ({ kind, value, onChange, apiBase, token }) => {
+  const [uploading, setUploading] = React.useState(false);
+  const [imgError, setImgError] = React.useState(false);
+  const fileInputRef = React.useRef(null);
+  React.useEffect(() => { setImgError(false); }, [value]);
+
+  const label = kind === "person" ? "Photo" : "Logo";
+  const accept = "image/png, image/jpeg, image/gif, image/webp, image/svg+xml";
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch(`${apiBase}/api/upload`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      });
+      if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+      const { url } = await res.json();
+      onChange(url);
+    } catch (err) {
+      console.error("NodeImageField upload error", err);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const imgStyle = kind === "person"
+    ? { width: 72, height: 72, borderRadius: "50%", objectFit: "cover", border: "1px solid #e5e7eb" }
+    : { width: 72, height: 72, objectFit: "contain", border: "1px solid #e5e7eb", borderRadius: 4, background: "#f9fafb" };
+
+  return (
+    <div className="form-row">
+      <label className="form-label">{label}</label>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        {value && !imgError
+          ? <img src={value} alt={label} style={imgStyle} onError={() => setImgError(true)} />
+          : <div style={{ ...imgStyle, display: "flex", alignItems: "center", justifyContent: "center", color: "#d1d5db" }}>
+              {kind === "person" ? <User size={32} /> : <Building2 size={32} />}
+            </div>
+        }
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <button
+            type="button"
+            style={{
+              display: "flex", alignItems: "center", gap: 6,
+              padding: "5px 10px", border: "1px solid #d1d5db", borderRadius: 6,
+              background: "#fff", cursor: uploading ? "not-allowed" : "pointer",
+              fontSize: 13, color: "#374151",
+            }}
+            disabled={uploading}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Upload size={14} />
+            {uploading ? "Uploading…" : value ? `Replace ${label}` : `Upload ${label}`}
+          </button>
+          {value && (
+            <button
+              type="button"
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "5px 10px", border: "1px solid #fca5a5", borderRadius: 6,
+                background: "#fff", cursor: "pointer", fontSize: 13, color: "#dc2626",
+              }}
+              onClick={() => onChange("")}
+            >
+              <X size={14} /> Remove
+            </button>
+          )}
+        </div>
+        <input ref={fileInputRef} type="file" accept={accept} style={{ display: "none" }} onChange={handleFileChange} />
+      </div>
+    </div>
+  );
+};
+
+const renderDdField = (field, value, onChange, { apiBase, token } = {}) => {
   const { fieldId, prompt, dataType, multiValue, validValues, phoneTypes } = field;
+
+  if (dataType === "link") {
+    return <DdLinkField key={fieldId} prompt={prompt} value={value} onChange={onChange} />;
+  }
+
+  if (dataType === "file") {
+    return <DdFileField key={fieldId} prompt={prompt} value={value} onChange={onChange} apiBase={apiBase} token={token} />;
+  }
 
   if (dataType === "phone") {
     const types = phoneTypes?.length ? phoneTypes : ["Phone"];
@@ -85,14 +355,10 @@ const renderDdField = (field, value, onChange) => {
               {types.length === 1 && (
                 <span style={{ fontSize: 12, color: "#6b7280", flexShrink: 0, minWidth: 50 }}>{types[0]}</span>
               )}
-              <input
-                className="form-input"
-                style={{ flex: 1 }}
-                type="tel"
+              <PhoneInputRow
                 value={entry.number}
-                onChange={(e) => updateEntry(idx, "number", e.target.value)}
-                autoComplete="off"
-                data-lpignore="true"
+                onCommit={(val) => updateEntry(idx, "number", val)}
+                style={{ flex: 1 }}
               />
               {multiValue && entries.length > 1 && (
                 <button type="button" className="btn btn-outline" style={{ padding: "4px 8px", flexShrink: 0 }}
@@ -493,6 +759,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [newNode, setNewNode] = useState({
     name: "",
     kind: "entity",
+    photo: "",
+    logo: "",
     customFields: {},
   });
   const [dupMatches, setDupMatches] = useState([]);
@@ -582,6 +850,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [addUserBusy, setAddUserBusy] = useState(false);
   const [addUserError, setAddUserError] = useState("");
   const [addUserSuccess, setAddUserSuccess] = useState("");
+  const [accountInfoOpen, setAccountInfoOpen] = useState(false);
+  const [accountInfoDraft, setAccountInfoDraft] = useState({ name: "", email: "", cellPhone: "", workPhone: "" });
+  const [accountInfoBusy, setAccountInfoBusy] = useState(false);
+  const [accountInfoError, setAccountInfoError] = useState("");
+  const [serverInfoOpen, setServerInfoOpen] = useState(false);
+  const [serverInfoData, setServerInfoData] = useState(null);
+  const [serverInfoBusy, setServerInfoBusy] = useState(false);
   const [collapsedOwnerNodes, setCollapsedOwnerNodes] = useState(() => new Set());
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
 
@@ -1103,6 +1378,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       setNodeDraft({
         name: node.name,
         kind: node.kind,
+        photo: node.photo || "",
+        logo: node.logo || "",
         customFields: node.customFields || {},
       });
     }
@@ -1381,6 +1658,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       relList,
                       dataDictionary,
                       clientName: toSentenceCase(clientId),
+                      apiBase,
+                      token,
                     });
                   } finally {
                     setIsPdfExporting(false);
@@ -1431,6 +1710,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         clientName: toSentenceCase(clientId),
                         pageType: "hierarchy",
                         fileName: `${toSentenceCase(clientId)}-entity-book-hierarchy`,
+                        apiBase,
+                        token,
                       });
                     } finally {
                       setIsPdfExporting(false);
@@ -1457,6 +1738,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         clientName: toSentenceCase(clientId),
                         pageType: "info",
                         fileName: `${toSentenceCase(clientId)}-entity-book-data`,
+                        apiBase,
+                        token,
                       });
                     } finally {
                       setIsPdfExporting(false);
@@ -1548,6 +1831,28 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 </button>
                 <button
                   className="settings-menu-item"
+                  onClick={async () => {
+                    setSettingsOpen(false);
+                    try {
+                      const data = await apiRequest("/api/auth/me");
+                      setAccountInfoDraft({
+                        name: data.name || "",
+                        email: data.email || "",
+                        cellPhone: data.cellPhone || "",
+                        workPhone: data.workPhone || "",
+                      });
+                    } catch {
+                      setAccountInfoDraft({ name: "", email: "", cellPhone: "", workPhone: "" });
+                    }
+                    setAccountInfoError("");
+                    setAccountInfoOpen(true);
+                  }}
+                >
+                  <User size={15} />
+                  Account Info
+                </button>
+                <button
+                  className="settings-menu-item"
                   onClick={() => {
                     setSettingsOpen(false);
                     setAddUserDraft({ loginId: "", password: "", confirm: "" });
@@ -1558,6 +1863,27 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 >
                   <UserPlus size={15} />
                   Add User
+                </button>
+                <div className="settings-menu-divider" />
+                <button
+                  className="settings-menu-item"
+                  onClick={async () => {
+                    setSettingsOpen(false);
+                    setServerInfoData(null);
+                    setServerInfoOpen(true);
+                    setServerInfoBusy(true);
+                    try {
+                      const data = await apiRequest("/api/health");
+                      setServerInfoData(data);
+                    } catch (err) {
+                      setServerInfoData({ error: err.message });
+                    } finally {
+                      setServerInfoBusy(false);
+                    }
+                  }}
+                >
+                  <Settings size={15} />
+                  Server Info
                 </button>
                 <div className="settings-menu-divider" />
                 <button
@@ -2004,7 +2330,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           type="button"
           className="fab-add"
           onClick={() => {
-            setNewNode({ name: "", kind: "entity", customFields: {} });
+            setNewNode({ name: "", kind: "entity", photo: "", logo: "", customFields: {} });
             setOpenDialog({ type: "add-node" });
           }}
         >
@@ -2015,7 +2341,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           type="button"
           className="fab-add"
           onClick={() => {
-            setNewNode({ name: "", kind: "person", customFields: {} });
+            setNewNode({ name: "", kind: "person", photo: "", logo: "", customFields: {} });
             setOpenDialog({ type: "add-node" });
           }}
         >
@@ -2060,6 +2386,15 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         <td style={{ color: "#6b7280" }}></td>
                         <td></td>
                       </tr>
+                      {/* Photo / Logo — built-in image field, not editable or moveable */}
+                      <tr>
+                        <td><em style={{ color: "#6b7280" }}>Photo / Logo</em></td>
+                        <td style={{ color: "#6b7280" }}>File / Image</td>
+                        <td style={{ color: "#6b7280" }}>Both</td>
+                        <td style={{ color: "#6b7280" }}>No</td>
+                        <td style={{ color: "#6b7280" }}></td>
+                        <td></td>
+                      </tr>
                       {[...dataDictionary]
                         .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
                         .map((entry, idx, sorted) => (
@@ -2071,9 +2406,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           </td>
                           <td>{entry.multiValue ? "Yes" : "No"}</td>
                           <td className="dd-valid-values">
-                            {(entry.validValues || []).length > 0
-                              ? entry.validValues.join(", ")
-                              : <span style={{ color: "#9ca3af" }}>Free-form</span>}
+                            {entry.dataType === "link"
+                              ? <span style={{ color: "#9ca3af" }}>URL</span>
+                              : entry.dataType === "file"
+                              ? <span style={{ color: "#9ca3af" }}>File / Image</span>
+                              : (entry.validValues || []).length > 0
+                                ? entry.validValues.join(", ")
+                                : <span style={{ color: "#9ca3af" }}>Free-form</span>}
                           </td>
                           <td>
                             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -2142,18 +2481,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   <option value="person">Person only</option>
                 </select>
               </div>
-              <div className="form-row">
-                <label className="form-label">Multiple values</label>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <Switch
-                    checked={ddEntryDraft.multiValue}
-                    onCheckedChange={(v) => setDdEntryDraft((prev) => ({ ...prev, multiValue: v }))}
-                  />
-                  <span style={{ fontSize: 14, color: ddEntryDraft.multiValue ? "#374151" : "#6b7280" }}>
-                    {ddEntryDraft.multiValue ? "Stores a list of values" : "Stores a single value"}
-                  </span>
+              {ddEntryDraft.dataType !== "link" && ddEntryDraft.dataType !== "file" && (
+                <div className="form-row">
+                  <label className="form-label">Multiple values</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <Switch
+                      checked={ddEntryDraft.multiValue}
+                      onCheckedChange={(v) => setDdEntryDraft((prev) => ({ ...prev, multiValue: v }))}
+                    />
+                    <span style={{ fontSize: 14, color: ddEntryDraft.multiValue ? "#374151" : "#6b7280" }}>
+                      {ddEntryDraft.multiValue ? "Stores a list of values" : "Stores a single value"}
+                    </span>
+                  </div>
                 </div>
-              </div>
+              )}
               {ddEntryDraft.dataType === "phone" ? (
                 <div className="form-row">
                   <label className="form-label">Phone types (one per line — e.g. Work, Cell, Home)</label>
@@ -2165,7 +2506,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     placeholder={"Work\nCell\nHome\nFax"}
                   />
                 </div>
-              ) : (
+              ) : ddEntryDraft.dataType !== "link" && ddEntryDraft.dataType !== "file" ? (
                 <div className="form-row">
                   <label className="form-label">Valid values (one per line — leave blank for free-form input)</label>
                   <textarea
@@ -2176,7 +2517,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     placeholder={"Option A\nOption B\nOption C"}
                   />
                 </div>
-              )}
+              ) : null}
             </div>
             <DialogFooter style={{ marginTop: 16 }}>
               <Button variant="secondary" onClick={() => setOpenDialog({ type: "data-dictionary" })}>Cancel</Button>
@@ -2367,6 +2708,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   </div>
                 )}
               </div>
+              {/* Photo / Logo — built-in system field */}
+              <NodeImageField
+                kind={newNode.kind}
+                value={newNode.kind === "person" ? newNode.photo : newNode.logo}
+                onChange={(url) => setNewNode((prev) => ({ ...prev, [prev.kind === "person" ? "photo" : "logo"]: url }))}
+                apiBase={apiBase}
+                token={token}
+              />
               {[...dataDictionary]
                 .filter((f) => f.appliesTo === "both" || f.appliesTo === newNode.kind)
                 .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
@@ -2375,7 +2724,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     {renderDdField(
                       field,
                       newNode.customFields?.[field.fieldId],
-                      (val) => setNewNode((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } }))
+                      (val) => setNewNode((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
+                      { apiBase, token }
                     )}
                   </React.Fragment>
                 ))
@@ -2409,6 +2759,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     name: newNode.name.trim(),
                     kind: newNode.kind,
                     client: clientId,
+                    photo: newNode.kind === "person" ? (newNode.photo || "") : "",
+                    logo: newNode.kind === "entity" ? (newNode.logo || "") : "",
                     customFields: newNode.customFields || {},
                   };
                   try {
@@ -2418,7 +2770,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     });
                     setNodeList((prev) => [...prev, payload]);
                     if (!focusId) setFocusId(id);
-                    setNewNode({ name: "", kind: newNode.kind, customFields: {} });
+                    setNewNode({ name: "", kind: newNode.kind, photo: "", logo: "", customFields: {} });
                     setRemoteStatus("connected");
                     setOpenDialog(null);
                   } catch (err) {
@@ -2747,6 +3099,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   data-lpignore="true"
                 />
               </div>
+              {/* Photo / Logo — built-in system field */}
+              <NodeImageField
+                kind={nodeDraft.kind}
+                value={nodeDraft.kind === "person" ? nodeDraft.photo : nodeDraft.logo}
+                onChange={(url) => setNodeDraft((prev) => ({ ...prev, [prev.kind === "person" ? "photo" : "logo"]: url }))}
+                apiBase={apiBase}
+                token={token}
+              />
               {[...dataDictionary]
                 .filter((f) => f.appliesTo === "both" || f.appliesTo === nodeDraft.kind)
                 .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
@@ -2755,7 +3115,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     {renderDdField(
                       field,
                       nodeDraft.customFields?.[field.fieldId],
-                      (val) => setNodeDraft((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } }))
+                      (val) => setNodeDraft((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
+                      { apiBase, token }
                     )}
                   </React.Fragment>
                 ))
@@ -2812,6 +3173,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         relList,
                         dataDictionary,
                         clientName: toSentenceCase(clientId),
+                        apiBase,
+                        token,
                       });
                     } finally {
                       setIsPdfExporting(false);
@@ -2872,6 +3235,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       kind: nodeDraft.kind,
                       client: clientId,
                       newId: newId !== editNodeId ? newId : null,
+                      photo: nodeDraft.kind === "person" ? (nodeDraft.photo || "") : "",
+                      logo: nodeDraft.kind === "entity" ? (nodeDraft.logo || "") : "",
                       customFields: nodeDraft.customFields || {},
                     };
                     apiRequest(`/api/nodes/${editNodeId}`, {
@@ -2887,6 +3252,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                   id: newId,
                                   name: nodeDraft.name.trim(),
                                   kind: nodeDraft.kind,
+                                  photo: payload.photo,
+                                  logo: payload.logo,
                                   customFields: payload.customFields,
                                   client: n.client || clientId,
                                 }
@@ -3356,6 +3723,84 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         clientName={toSentenceCase(clientId)}
       />
 
+      {/* ── Account Info dialog ── */}
+      <Dialog open={accountInfoOpen} onOpenChange={(v) => { if (!v) setAccountInfoOpen(false); }}>
+        <DialogContent style={{ maxWidth: 440 }}>
+          <DialogHeader style={{ marginBottom: 16, marginLeft: 0 }}>
+            <DialogTitle>Account Info</DialogTitle>
+          </DialogHeader>
+          <div className="form-grid">
+            <div className="form-row">
+              <label className="form-label">Name</label>
+              <input
+                className="form-input"
+                type="text"
+                value={accountInfoDraft.name}
+                onChange={(e) => setAccountInfoDraft((p) => ({ ...p, name: e.target.value }))}
+                autoComplete="name"
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">E-Mail</label>
+              <input
+                className="form-input"
+                type="email"
+                value={accountInfoDraft.email}
+                onChange={(e) => setAccountInfoDraft((p) => ({ ...p, email: e.target.value }))}
+                autoComplete="email"
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">Cell Phone</label>
+              <input
+                className="form-input"
+                type="tel"
+                value={accountInfoDraft.cellPhone}
+                onChange={(e) => setAccountInfoDraft((p) => ({ ...p, cellPhone: e.target.value }))}
+                autoComplete="tel"
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">Work Phone</label>
+              <input
+                className="form-input"
+                type="tel"
+                value={accountInfoDraft.workPhone}
+                onChange={(e) => setAccountInfoDraft((p) => ({ ...p, workPhone: e.target.value }))}
+                autoComplete="tel"
+              />
+            </div>
+          </div>
+          {accountInfoError && (
+            <div style={{ color: "#dc2626", fontSize: 13, marginTop: 8 }}>{accountInfoError}</div>
+          )}
+          <DialogFooter style={{ marginTop: 24 }}>
+            <Button variant="secondary" onClick={() => setAccountInfoOpen(false)}>Cancel</Button>
+            <Button
+              type="button"
+              disabled={accountInfoBusy}
+              onClick={async () => {
+                setAccountInfoError("");
+                setAccountInfoBusy(true);
+                try {
+                  await apiRequest("/api/auth/me", {
+                    method: "PATCH",
+                    body: JSON.stringify(accountInfoDraft),
+                  });
+                  setAccountInfoOpen(false);
+                } catch (err) {
+                  setAccountInfoError(err.message);
+                } finally {
+                  setAccountInfoBusy(false);
+                }
+              }}
+            >
+              {accountInfoBusy ? "Saving…" : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* ── Add User dialog ── */}
       <Dialog open={addUserOpen} onOpenChange={(v) => { if (!v) setAddUserOpen(false); }}>
         <DialogContent style={{ maxWidth: 440 }}>
@@ -3444,6 +3889,34 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               </DialogFooter>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={serverInfoOpen} onOpenChange={(v) => { if (!v) setServerInfoOpen(false); }}>
+        <DialogContent style={{ width: "min(480px, 92vw)", maxWidth: "none" }}>
+          <DialogHeader style={{ marginBottom: 16 }}>
+            <DialogTitle>Server Info</DialogTitle>
+          </DialogHeader>
+          <div style={{ fontSize: 14 }}>
+            {serverInfoBusy && <div style={{ color: "#6b7280" }}>Checking…</div>}
+            {!serverInfoBusy && serverInfoData && (
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <tbody>
+                  {Object.entries(serverInfoData).map(([k, v]) => (
+                    <tr key={k} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                      <td style={{ padding: "6px 12px 6px 0", fontWeight: 600, color: "#374151", whiteSpace: "nowrap", verticalAlign: "top" }}>{k}</td>
+                      <td style={{ padding: "6px 0", color: "#111827", wordBreak: "break-all" }}>
+                        {Array.isArray(v) ? v.join(", ") : String(v)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          <DialogFooter style={{ marginTop: 20 }}>
+            <Button variant="secondary" onClick={() => setServerInfoOpen(false)}>Close</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
