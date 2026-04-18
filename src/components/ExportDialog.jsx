@@ -20,6 +20,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "./ui/button";
+import { formatPhone } from "../utils/helpers";
 import {
   Dialog,
   DialogContent,
@@ -59,12 +60,12 @@ const formatFieldValue = (field, value) => {
   if (dataType === "percentage") return `${value}%`;
   if (dataType === "phone") {
     if (Array.isArray(value)) {
-      return value.map((e) => `${e.type}: ${e.number}`).filter((s) => s.trim() !== ": ").join(", ");
+      return value.map((e) => `${e.type}: ${formatPhone(e.number)}`).filter((s) => s.trim() !== ": ").join(", ");
     }
     if (value && typeof value === "object") {
-      return Object.entries(value).map(([t, n]) => `${t}: ${n}`).join(", ");
+      return Object.entries(value).map(([t, n]) => `${t}: ${formatPhone(n)}`).join(", ");
     }
-    return String(value);
+    return formatPhone(String(value));
   }
   if (Array.isArray(value)) return value.join(", ");
   return String(value);
