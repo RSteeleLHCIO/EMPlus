@@ -29,10 +29,13 @@ import {
   putExportReport,
   deleteExportReport,
   queryExportReports,
+  getClient,
+  putClient,
 } from "./dynamoClient.js";
 import {
   getUser,
   putUser,
+  listUsersByClient,
   countUsersByClient,
 } from "./authClient.js";
 
@@ -279,7 +282,7 @@ const s3 = S3_BUCKET
 app.use(
   cors({
     origin: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
@@ -287,7 +290,7 @@ app.options("*", cors());
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "dynamodb-api", version: "2026-04-18.1243p", features: ["alpha version 1"] });
+  res.json({ ok: true, service: "dynamodb-api", version: "2026-04-18.1419p", features: ["client management"] });
 });
 
 // ─── AUTH ROUTES (no JWT required) ───────────────────────────────────────────
@@ -307,7 +310,7 @@ app.post("/api/auth/login", async (req, res) => {
       JWT_SECRET,
       { expiresIn: JWT_EXPIRY }
     );
-    res.json({ token, clientId: user.clientId, personId: user.personId || null });
+    res.json({ token, clientId: user.clientId, personId: user.personId || null, role: user.role || "user" });
   } catch (err) {
     console.error("/api/auth/login error", err);
     res.status(500).json({ error: err.message });
@@ -340,13 +343,38 @@ app.post("/api/auth/register", async (req, res) => {
       loginId: normalizedId,
       clientId,
       personId: personId || null,
+      role: "admin", // bootstrap user is always an admin
       passwordHash,
       createdAt: new Date().toISOString(),
     };
     await putUser(user);
-    res.status(201).json({ loginId: user.loginId, clientId: user.clientId });
+    res.status(201).json({ loginId: user.loginId, clientId: user.clientId, role: user.role });
   } catch (err) {
     console.error("/api/auth/register error", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/auth/promote — break-glass: elevate a user to admin using SETUP_SECRET.
+// Declared before JWT middleware intentionally — no token required.
+app.post("/api/auth/promote", async (req, res) => {
+  try {
+    if (!SETUP_SECRET) {
+      return res.status(403).json({ error: "SETUP_SECRET is not configured on this server" });
+    }
+    const { loginId, setupSecret } = req.body || {};
+    if (!loginId || !setupSecret) {
+      return res.status(400).json({ error: "loginId and setupSecret are required" });
+    }
+    if (setupSecret !== SETUP_SECRET) {
+      return res.status(403).json({ error: "Invalid setup secret" });
+    }
+    const user = await getUser(String(loginId).toLowerCase().trim());
+    if (!user) return res.status(404).json({ error: "User not found" });
+    await putUser({ ...user, role: "admin" });
+    res.json({ loginId: user.loginId, role: "admin" });
+  } catch (err) {
+    console.error("/api/auth/promote error", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -368,6 +396,20 @@ app.use("/api", (req, res, next) => {
     return res.status(401).json({ error: "Invalid or expired token" });
   }
 });
+
+// ─── Admin middleware ────────────────────────────────────────────────────────
+// Use as a route-level middleware: app.get("/api/foo", requireAdmin, handler)
+const requireAdmin = async (req, res, next) => {
+  try {
+    const user = await getUser(req.auth.loginId);
+    if (!user || user.role !== "admin") {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+    next();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
 
 // openCypher has been removed — backend now uses DynamoDB.
 app.post("/api/cypher", (_req, res) => {
@@ -1135,11 +1177,15 @@ app.delete("/api/export-reports/:reportId", async (req, res) => {
 });
 
 // GET /api/auth/me — return the current user's profile (no password hash).
+// Also includes clientName from the client record so all users can display it.
 app.get("/api/auth/me", async (req, res) => {
   try {
     const user = await getUser(req.auth.loginId);
     if (!user) return res.status(404).json({ error: "User not found" });
     const { passwordHash, ...profile } = user;
+    // Attach clientName so the UI can use it without a separate admin-only request
+    const clientRecord = await getClient(req.auth.clientId).catch(() => null);
+    if (clientRecord?.clientName) profile.clientName = clientRecord.clientName;
     res.json(profile);
   } catch (err) {
     console.error("/api/auth/me GET error", err);
@@ -1152,13 +1198,14 @@ app.patch("/api/auth/me", async (req, res) => {
   try {
     const user = await getUser(req.auth.loginId);
     if (!user) return res.status(404).json({ error: "User not found" });
-    const { name, email, cellPhone, workPhone } = req.body || {};
+    const { name, email, cellPhone, workPhone, homeScreen } = req.body || {};
     const updated = {
       ...user,
-      ...(name      !== undefined && { name:      String(name).trim() }),
-      ...(email     !== undefined && { email:     String(email).trim() }),
-      ...(cellPhone !== undefined && { cellPhone: String(cellPhone).trim() }),
-      ...(workPhone !== undefined && { workPhone: String(workPhone).trim() }),
+      ...(name       !== undefined && { name:       String(name).trim() }),
+      ...(email      !== undefined && { email:      String(email).trim() }),
+      ...(cellPhone  !== undefined && { cellPhone:  String(cellPhone).trim() }),
+      ...(workPhone  !== undefined && { workPhone:  String(workPhone).trim() }),
+      ...(homeScreen !== undefined && { homeScreen: homeScreen }),
     };
     await putUser(updated);
     const { passwordHash, ...profile } = updated;
@@ -1170,11 +1217,11 @@ app.patch("/api/auth/me", async (req, res) => {
 });
 
 // POST /api/auth/users — add a user to the currently authenticated client.
-// JWT required; the new user is scoped to req.auth.clientId automatically.
-app.post("/api/auth/users", async (req, res) => {
+// JWT required; admin role required; new user is scoped to req.auth.clientId.
+app.post("/api/auth/users", requireAdmin, async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { loginId, password, personId } = req.body || {};
+    const { loginId, password, personId, role } = req.body || {};
     if (!loginId || !password) {
       return res.status(400).json({ error: "loginId and password are required" });
     }
@@ -1182,17 +1229,95 @@ app.post("/api/auth/users", async (req, res) => {
     const existing = await getUser(normalizedId);
     if (existing) return res.status(409).json({ error: "loginId already exists" });
     const passwordHash = await bcrypt.hash(password, 10);
+    const newRole = role === "admin" ? "admin" : "user";
     const user = {
       loginId: normalizedId,
       clientId: client,
       personId: personId || null,
+      role: newRole,
       passwordHash,
       createdAt: new Date().toISOString(),
     };
     await putUser(user);
-    res.status(201).json({ loginId: user.loginId, clientId: user.clientId });
+    res.status(201).json({ loginId: user.loginId, clientId: user.clientId, role: user.role });
   } catch (err) {
     console.error("/api/auth/users error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// GET /api/auth/users — list all users for this client (admin only).
+app.get("/api/auth/users", requireAdmin, async (req, res) => {
+  try {
+    const users = await listUsersByClient(req.auth.clientId);
+    const response = users.map(({ passwordHash: _, ...u }) => u);
+    res.json(response);
+  } catch (err) {
+    console.error("/api/auth/users GET error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/auth/users/:loginId — change a user's role (admin only).
+// Only users belonging to req.auth.clientId may be updated.
+app.patch("/api/auth/users/:loginId", requireAdmin, async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const targetId = String(req.params.loginId).toLowerCase().trim();
+    const { role } = req.body || {};
+    if (role !== "admin" && role !== "user") {
+      return res.status(400).json({ error: "role must be \"admin\" or \"user\"" });
+    }
+    const user = await getUser(targetId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.clientId !== client) return res.status(403).json({ error: "User belongs to a different client" });
+    await putUser({ ...user, role });
+    res.json({ loginId: user.loginId, clientId: user.clientId, role });
+  } catch (err) {
+    console.error("/api/auth/users/:loginId PATCH error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── CLIENT INFO ──────────────────────────────────────────────────────────────
+
+// GET /api/client — return this client's info record (admin only).
+app.get("/api/client", requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.auth.clientId;
+    const record = await getClient(clientId);
+    if (!record) return res.json({});
+    const { clientId: _c, ...response } = record;
+    res.json(response);
+  } catch (err) {
+    console.error("/api/client GET error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/client — create or update this client's info record (admin only).
+app.patch("/api/client", requireAdmin, async (req, res) => {
+  try {
+    const clientId = req.auth.clientId;
+    const { clientName, address, billingContact, billingEmail, billingPhone, notes } = req.body || {};
+    const existing = await getClient(clientId);
+    const now = new Date().toISOString();
+    const updated = {
+      clientId,
+      ...(existing || { createdAt: now }),
+      ...(clientName     !== undefined && { clientName:     String(clientName).trim() }),
+      ...(address        !== undefined && { address:        String(address).trim() }),
+      ...(billingContact !== undefined && { billingContact: String(billingContact).trim() }),
+      ...(billingEmail   !== undefined && { billingEmail:   String(billingEmail).trim() }),
+      ...(billingPhone   !== undefined && { billingPhone:   String(billingPhone).trim() }),
+      ...(notes          !== undefined && { notes:          String(notes).trim() }),
+      updatedAt: now,
+    };
+    await putClient(updated);
+    const { clientId: _c, ...response } = updated;
+    res.json(response);
+  } catch (err) {
+    console.error("/api/client PATCH error", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });

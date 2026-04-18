@@ -203,3 +203,19 @@ export async function queryExportReports(clientId) {
     ExpressionAttributeValues: { ":c": clientId },
   });
 }
+
+// ─── Clients ─────────────────────────────────────────────────────────────────
+// One record per client (PK = clientId, no sort key).
+
+export const CLIENTS_TABLE = process.env.DYNAMODB_TABLE_CLIENTS || "EMPlusClients";
+
+export async function getClient(clientId) {
+  const result = await ddb.send(
+    new GetCommand({ TableName: CLIENTS_TABLE, Key: { clientId } })
+  );
+  return result.Item || null;
+}
+
+export async function putClient(item) {
+  await ddb.send(new PutCommand({ TableName: CLIENTS_TABLE, Item: item }));
+}
