@@ -1,11 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { CalendarDays, Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen, User, UserPlus } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen, User, UserPlus } from "lucide-react";
 import { generateEntityPdf, generateEntityBook } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone } from "./utils/helpers";
-import { Calendar } from "./components/ui/calendar";
 import { Input } from "./components/ui/input";
 import {
   Dialog,
@@ -660,6 +659,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       return s ? JSON.parse(s) : null;
     } catch { return null; }
   });
+  // homeScreen is loaded from the server after login (see effect below)
   const [viewMode, setViewMode] = useState(() => homeScreen?.viewMode ?? "hierarchy");
   const [focusId, setFocusId] = useState(() => {
     if (typeof window === "undefined") return "entity:A";
@@ -669,12 +669,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       return "entity:A";
     }
   });
-  const [selectedDate, setSelectedDate] = useState(new Date());
-  const [showCalendarPopup, setShowCalendarPopup] = useState(false);
-  const calendarButtonRef = useRef(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
-  const [showDateSelection, setShowDateSelection] = useState(false);
   const [homeAnimating, setHomeAnimating] = useState(false);
   const [homeAnimOrigin, setHomeAnimOrigin] = useState("50% 50%");
   const settingsRef = useRef(null);
@@ -845,7 +841,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [exportOpen, setExportOpen] = useState(false);
   const [exportReports, setExportReports] = useState([]);
   const [exportReportsLoaded, setExportReportsLoaded] = useState(false);
-  const [addUserOpen, setAddUserOpen] = useState(false);
+  const [manageUsersOpen, setManageUsersOpen] = useState(false);
+  const [manageUsersList, setManageUsersList] = useState([]);
+  const [manageUsersLoading, setManageUsersLoading] = useState(false);
+  const [manageUsersError, setManageUsersError] = useState("");
+  const [manageUsersUpdating, setManageUsersUpdating] = useState(() => new Set());
   const [addUserDraft, setAddUserDraft] = useState({ loginId: "", password: "", confirm: "" });
   const [addUserBusy, setAddUserBusy] = useState(false);
   const [addUserError, setAddUserError] = useState("");
@@ -854,6 +854,17 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [accountInfoDraft, setAccountInfoDraft] = useState({ name: "", email: "", cellPhone: "", workPhone: "" });
   const [accountInfoBusy, setAccountInfoBusy] = useState(false);
   const [accountInfoError, setAccountInfoError] = useState("");
+  const [myLoginId, setMyLoginId] = useState("");
+  const [myRole, setMyRole] = useState(() => {
+    try { return localStorage.getItem("myRole") || "user"; } catch { return "user"; }
+  });
+  const [clientDisplayName, setClientDisplayName] = useState(() => {
+    try { return localStorage.getItem("clientDisplayName") || ""; } catch { return ""; }
+  });
+  const [clientInfoOpen, setClientInfoOpen] = useState(false);
+  const [clientInfoDraft, setClientInfoDraft] = useState({ clientName: "", address: "", billingContact: "", billingEmail: "", billingPhone: "", notes: "" });
+  const [clientInfoBusy, setClientInfoBusy] = useState(false);
+  const [clientInfoError, setClientInfoError] = useState("");
   const [serverInfoOpen, setServerInfoOpen] = useState(false);
   const [serverInfoData, setServerInfoData] = useState(null);
   const [serverInfoBusy, setServerInfoBusy] = useState(false);
@@ -1476,12 +1487,32 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     if (apiBase) {
       loadDirectory({ isActive: () => active });
       loadDataDictionary();
+      // Load persisted homeScreen from user record (overrides localStorage)
+      apiRequest("/api/auth/me").then((data) => {
+        if (!active) return;
+        if (data?.loginId) {
+          setMyLoginId(data.loginId);
+        }
+        if (data?.role) {
+          setMyRole(data.role);
+          try { localStorage.setItem("myRole", data.role); } catch {}
+        }
+        if (data?.clientName) {
+          setClientDisplayName(data.clientName);
+          try { localStorage.setItem("clientDisplayName", data.clientName); } catch {}
+        }
+        if (!data?.homeScreen) return;
+        setHomeScreen(data.homeScreen);
+        try { localStorage.setItem("homeScreen", JSON.stringify(data.homeScreen)); } catch {}
+        setViewMode(data.homeScreen.viewMode ?? "hierarchy");
+        if (data.homeScreen.focusId) setFocusId(data.homeScreen.focusId);
+      }).catch(() => {});
     }
     return () => {
       active = false;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiBase, clientId, focusId, loadDirectory]);
+  }, [apiBase, clientId]);
 
   const ownerTree = useMemo(
     () => buildTree(focusId, (id) => getOwnersOf(relList, id)),
@@ -1579,12 +1610,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return () => document.removeEventListener("mousedown", handler);
   }, [exportMenuOpen]);
 
-  const niceDate = selectedDate.toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
 
   return (
     <div style={viewMode === "hierarchy" ? {} : { paddingBottom: 120 }} data-lpignore="true">
@@ -1594,23 +1619,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       <div className="app-header">
         <div style={{ maxWidth: "90%", margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 600 }}>{toSentenceCase(clientId)}</div>
+          <div style={{ fontSize: 22, fontWeight: 600 }}>{clientDisplayName || toSentenceCase(clientId)}</div>
           <div style={{ fontSize: 22, fontWeight: 600 }}>Entity Dashboard</div>
-          {showDateSelection && <div className="header-date">{niceDate}</div>}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {showDateSelection && (
-            <Button
-              type="button"
-              variant="outline"
-              className="btn-icon"
-              aria-label="Select date"
-              ref={calendarButtonRef}
-              onClick={() => setShowCalendarPopup((prev) => !prev)}
-            >
-              <CalendarDays />
-            </Button>
-          )}
           <Button
             type="button"
             variant="outline"
@@ -1657,7 +1669,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       nodeList,
                       relList,
                       dataDictionary,
-                      clientName: toSentenceCase(clientId),
+                      clientName: clientDisplayName || toSentenceCase(clientId),
                       apiBase,
                       token,
                     });
@@ -1707,9 +1719,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         nodeList,
                         relList,
                         dataDictionary,
-                        clientName: toSentenceCase(clientId),
+                        clientName: clientDisplayName || toSentenceCase(clientId),
                         pageType: "hierarchy",
-                        fileName: `${toSentenceCase(clientId)}-entity-book-hierarchy`,
+                        fileName: `${clientDisplayName || toSentenceCase(clientId)}-entity-book-hierarchy`,
                         apiBase,
                         token,
                       });
@@ -1735,9 +1747,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         nodeList,
                         relList,
                         dataDictionary,
-                        clientName: toSentenceCase(clientId),
+                        clientName: clientDisplayName || toSentenceCase(clientId),
                         pageType: "info",
-                        fileName: `${toSentenceCase(clientId)}-entity-book-data`,
+                        fileName: `${clientDisplayName || toSentenceCase(clientId)}-entity-book-data`,
                         apiBase,
                         token,
                       });
@@ -1777,13 +1789,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               <div className="settings-menu">
                 <button
                   className="settings-menu-item"
-                  onClick={() => { setShowDateSelection((prev) => !prev); setSettingsOpen(false); }}
-                >
-                  <CalendarDays size={15} />
-                  {showDateSelection ? "Hide date selection" : "Show date selection"}
-                </button>
-                <button
-                  className="settings-menu-item"
                   onClick={() => {
                     const screen = {
                       viewMode,
@@ -1791,6 +1796,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     };
                     setHomeScreen(screen);
                     try { localStorage.setItem("homeScreen", JSON.stringify(screen)); } catch {}
+                    // Persist to user record so it survives across sessions/devices
+                    apiRequest("/api/auth/me", {
+                      method: "PATCH",
+                      body: JSON.stringify({ homeScreen: screen }),
+                    }).catch(() => {});
                     const rect = homeButtonRef.current?.getBoundingClientRect();
                     const ox = rect ? `${Math.round(rect.left + rect.width / 2)}px` : "90vw";
                     const oy = rect ? `${Math.round(rect.top + rect.height / 2)}px` : "40px";
@@ -1851,19 +1861,57 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   <User size={15} />
                   Account Info
                 </button>
-                <button
-                  className="settings-menu-item"
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    setAddUserDraft({ loginId: "", password: "", confirm: "" });
-                    setAddUserError("");
-                    setAddUserSuccess("");
-                    setAddUserOpen(true);
-                  }}
-                >
-                  <UserPlus size={15} />
-                  Add User
-                </button>
+                {myRole === "admin" && (
+                  <button
+                    className="settings-menu-item"
+                    onClick={async () => {
+                      setSettingsOpen(false);
+                      try {
+                        const data = await apiRequest("/api/client");
+                        setClientInfoDraft({
+                          clientName: data.clientName || "",
+                          address: data.address || "",
+                          billingContact: data.billingContact || "",
+                          billingEmail: data.billingEmail || "",
+                          billingPhone: data.billingPhone || "",
+                          notes: data.notes || "",
+                        });
+                      } catch {
+                        setClientInfoDraft({ clientName: "", address: "", billingContact: "", billingEmail: "", billingPhone: "", notes: "" });
+                      }
+                      setClientInfoError("");
+                      setClientInfoOpen(true);
+                    }}
+                  >
+                    <Building2 size={15} />
+                    Client Info
+                  </button>
+                )}
+                {myRole === "admin" && (
+                  <button
+                    className="settings-menu-item"
+                    onClick={async () => {
+                      setSettingsOpen(false);
+                      setAddUserDraft({ loginId: "", password: "", confirm: "" });
+                      setAddUserError("");
+                      setAddUserSuccess("");
+                      setManageUsersError("");
+                      setManageUsersOpen(true);
+                      setManageUsersLoading(true);
+                      try {
+                        const data = await apiRequest("/api/auth/users");
+                        setManageUsersList(Array.isArray(data) ? data : []);
+                      } catch (err) {
+                        setManageUsersError(err.message);
+                      } finally {
+                        setManageUsersLoading(false);
+                      }
+                    }}
+                  >
+                    <UserPlus size={15} />
+                    Manage Users
+                  </button>
+                )}
                 <div className="settings-menu-divider" />
                 <button
                   className="settings-menu-item"
@@ -1901,29 +1949,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       </div>{/* end app-header */}
 
       <div className="app-content">
-
-      {showCalendarPopup && (
-        <>
-          <div
-            className="calendar-popup-overlay"
-            onClick={() => setShowCalendarPopup(false)}
-          />
-          <div className="calendar-popup">
-            <Calendar
-              mode="single"
-              selected={selectedDate}
-              onSelect={(d) => {
-                if (d) {
-                  setSelectedDate(d);
-                  setShowCalendarPopup(false);
-                }
-              }}
-              disabled={(date) => date > new Date()}
-              initialFocus
-            />
-          </div>
-        </>
-      )}
 
       <Dialog open={uploadOpen} onOpenChange={() => setUploadOpen(false)}>
         <DialogContent style={{ maxWidth: 520 }}>
@@ -2356,7 +2381,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         {openDialog?.type === "data-dictionary" && (
           <DialogContent className="dialog-content--tall" style={{ width: "min(900px, 92vw)", maxWidth: "none" }}>
             <DialogHeader style={{ marginBottom: 16, marginLeft: 0 }}>
-              <DialogTitle>Data Dictionary — {toSentenceCase(clientId)}</DialogTitle>
+              <DialogTitle>Data Dictionary — {clientDisplayName || toSentenceCase(clientId)}</DialogTitle>
             </DialogHeader>
             <div className="dialog-body">
               {dataDictionary.length === 0 ? (
@@ -3172,7 +3197,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         nodeList,
                         relList,
                         dataDictionary,
-                        clientName: toSentenceCase(clientId),
+                        clientName: clientDisplayName || toSentenceCase(clientId),
                         apiBase,
                         token,
                       });
@@ -3720,7 +3745,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           setExportReports((prev) => prev.filter((r) => r.reportId !== reportId))
         }
         apiRequest={apiRequest}
-        clientName={toSentenceCase(clientId)}
+        clientName={clientDisplayName || toSentenceCase(clientId)}
       />
 
       {/* ── Account Info dialog ── */}
@@ -3801,68 +3826,133 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         </DialogContent>
       </Dialog>
 
-      {/* ── Add User dialog ── */}
-      <Dialog open={addUserOpen} onOpenChange={(v) => { if (!v) setAddUserOpen(false); }}>
-        <DialogContent style={{ maxWidth: 440 }}>
+      {/* ── Manage Users dialog (admin only) ── */}
+      <Dialog open={manageUsersOpen} onOpenChange={(v) => { if (!v) setManageUsersOpen(false); }}>
+        <DialogContent style={{ width: "min(560px, 95vw)", maxWidth: "none" }}>
           <DialogHeader style={{ marginBottom: 16, marginLeft: 0 }}>
-            <DialogTitle>Add User</DialogTitle>
+            <DialogTitle>Manage Users</DialogTitle>
           </DialogHeader>
-          {addUserSuccess ? (
-            <div style={{ padding: "16px 0" }}>
-              <div style={{ color: "#16a34a", fontWeight: 600, marginBottom: 8 }}>User created!</div>
-              <div style={{ fontSize: 13, color: "#374151" }}>
-                Login ID: <strong>{addUserSuccess}</strong>
+
+          {/* ─ User list ─ */}
+          {manageUsersLoading && <div style={{ color: "#6b7280", fontSize: 14 }}>Loading…</div>}
+          {!manageUsersLoading && manageUsersError && (
+            <div style={{ color: "#dc2626", fontSize: 13, marginBottom: 12 }}>{manageUsersError}</div>
+          )}
+          {!manageUsersLoading && manageUsersList.length > 0 && (
+            <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 20, fontSize: 14 }}>
+              <thead>
+                <tr style={{ borderBottom: "2px solid #e5e7eb" }}>
+                  <th style={{ textAlign: "left", padding: "4px 8px 6px 0", color: "#374151", fontWeight: 600 }}>Login ID</th>
+                  <th style={{ textAlign: "left", padding: "4px 8px 6px", color: "#374151", fontWeight: 600 }}>Role</th>
+                  <th style={{ padding: "4px 0 6px" }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {manageUsersList.map((u) => {
+                  const isSelf = u.loginId === myLoginId;
+                  const isUpdating = manageUsersUpdating.has(u.loginId);
+                  return (
+                    <tr key={u.loginId} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                      <td style={{ padding: "7px 8px 7px 0", color: isSelf ? "#6b7280" : "#111827" }}>
+                        {u.loginId}{isSelf && <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 6 }}>(you)</span>}
+                      </td>
+                      <td style={{ padding: "7px 8px", color: u.role === "admin" ? "#7c3aed" : "#6b7280" }}>
+                        {u.role === "admin" ? "Admin" : "User"}
+                      </td>
+                      <td style={{ padding: "7px 0", textAlign: "right" }}>
+                        {!isSelf && (
+                          <button
+                            style={{
+                              fontSize: 12, padding: "3px 10px", borderRadius: 4, cursor: isUpdating ? "default" : "pointer",
+                              border: "1px solid #d1d5db", background: isUpdating ? "#f9fafb" : "#fff",
+                              color: isUpdating ? "#9ca3af" : "#374151",
+                            }}
+                            disabled={isUpdating}
+                            onClick={async () => {
+                              const newRole = u.role === "admin" ? "user" : "admin";
+                              setManageUsersUpdating((prev) => new Set([...prev, u.loginId]));
+                              try {
+                                await apiRequest(`/api/auth/users/${encodeURIComponent(u.loginId)}`, {
+                                  method: "PATCH",
+                                  body: JSON.stringify({ role: newRole }),
+                                });
+                                setManageUsersList((prev) =>
+                                  prev.map((x) => x.loginId === u.loginId ? { ...x, role: newRole } : x)
+                                );
+                              } catch (err) {
+                                setManageUsersError(err.message);
+                              } finally {
+                                setManageUsersUpdating((prev) => { const s = new Set(prev); s.delete(u.loginId); return s; });
+                              }
+                            }}
+                          >
+                            {isUpdating ? "Saving…" : u.role === "admin" ? "Make User" : "Make Admin"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+
+          {/* ─ Add user form ─ */}
+          <div style={{ borderTop: "1px solid #e5e7eb", paddingTop: 16 }}>
+            <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 12, color: "#374151" }}>Add New User</div>
+            {addUserSuccess ? (
+              <div style={{ marginBottom: 12 }}>
+                <span style={{ color: "#16a34a", fontWeight: 600 }}>Created: </span>
+                <span style={{ fontSize: 13 }}>{addUserSuccess}</span>
+                <button
+                  style={{ marginLeft: 12, fontSize: 12, color: "#6b7280", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+                  onClick={() => { setAddUserSuccess(""); setAddUserDraft({ loginId: "", password: "", confirm: "" }); }}
+                >Add another</button>
               </div>
-              <DialogFooter style={{ marginTop: 24 }}>
-                <Button onClick={() => setAddUserOpen(false)}>Close</Button>
-              </DialogFooter>
-            </div>
-          ) : (
-            <>
-              <div className="form-grid">
-                <div className="form-row">
-                  <label className="form-label">Login ID</label>
-                  <input
-                    className="form-input"
-                    type="text"
-                    value={addUserDraft.loginId}
-                    onChange={(e) => setAddUserDraft((p) => ({ ...p, loginId: e.target.value }))}
-                    autoComplete="off"
-                    data-lpignore="true"
-                    placeholder="e.g. alice"
-                  />
+            ) : (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                  <div style={{ gridColumn: "1 / -1" }}>
+                    <label className="form-label" style={{ fontSize: 12 }}>Login ID</label>
+                    <input
+                      className="form-input"
+                      type="text"
+                      value={addUserDraft.loginId}
+                      onChange={(e) => setAddUserDraft((p) => ({ ...p, loginId: e.target.value }))}
+                      autoComplete="off"
+                      data-lpignore="true"
+                      placeholder="e.g. alice"
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label" style={{ fontSize: 12 }}>Password</label>
+                    <input
+                      className="form-input"
+                      type="password"
+                      value={addUserDraft.password}
+                      onChange={(e) => setAddUserDraft((p) => ({ ...p, password: e.target.value }))}
+                      autoComplete="new-password"
+                    />
+                  </div>
+                  <div>
+                    <label className="form-label" style={{ fontSize: 12 }}>Confirm</label>
+                    <input
+                      className="form-input"
+                      type="password"
+                      value={addUserDraft.confirm}
+                      onChange={(e) => setAddUserDraft((p) => ({ ...p, confirm: e.target.value }))}
+                      autoComplete="new-password"
+                    />
+                  </div>
                 </div>
-                <div className="form-row">
-                  <label className="form-label">Password</label>
-                  <input
-                    className="form-input"
-                    type="password"
-                    value={addUserDraft.password}
-                    onChange={(e) => setAddUserDraft((p) => ({ ...p, password: e.target.value }))}
-                    autoComplete="new-password"
-                  />
-                </div>
-                <div className="form-row">
-                  <label className="form-label">Confirm password</label>
-                  <input
-                    className="form-input"
-                    type="password"
-                    value={addUserDraft.confirm}
-                    onChange={(e) => setAddUserDraft((p) => ({ ...p, confirm: e.target.value }))}
-                    autoComplete="new-password"
-                  />
-                </div>
-              </div>
-              {addUserError && (
-                <div style={{ color: "#dc2626", fontSize: 13, marginTop: 8 }}>{addUserError}</div>
-              )}
-              <DialogFooter style={{ marginTop: 24 }}>
-                <Button variant="secondary" onClick={() => setAddUserOpen(false)}>Cancel</Button>
+                {addUserError && (
+                  <div style={{ color: "#dc2626", fontSize: 13, marginBottom: 8 }}>{addUserError}</div>
+                )}
                 <Button
                   type="button"
                   disabled={addUserBusy}
                   onClick={async () => {
-                    const { loginId, password, confirm, setupSecret } = addUserDraft;
+                    const { loginId, password, confirm } = addUserDraft;
                     if (!loginId.trim()) { setAddUserError("Login ID is required."); return; }
                     if (!password) { setAddUserError("Password is required."); return; }
                     if (password !== confirm) { setAddUserError("Passwords do not match."); return; }
@@ -3871,12 +3961,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     try {
                       const data = await apiRequest("/api/auth/users", {
                         method: "POST",
-                        body: JSON.stringify({
-                          loginId: loginId.trim().toLowerCase(),
-                          password,
-                        }),
+                        body: JSON.stringify({ loginId: loginId.trim().toLowerCase(), password }),
                       });
                       setAddUserSuccess(data.loginId);
+                      setManageUsersList((prev) => [...prev, { loginId: data.loginId, role: data.role || "user" }]);
                     } catch (err) {
                       setAddUserError(err.message);
                     } finally {
@@ -3886,9 +3974,113 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 >
                   {addUserBusy ? "Creating…" : "Create User"}
                 </Button>
-              </DialogFooter>
-            </>
+              </>
+            )}
+          </div>
+
+          <DialogFooter style={{ marginTop: 20 }}>
+            <Button variant="secondary" onClick={() => setManageUsersOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Client Info dialog (admin only) ── */}
+      <Dialog open={clientInfoOpen} onOpenChange={(v) => { if (!v) setClientInfoOpen(false); }}>
+        <DialogContent className="dialog-content--tall" style={{ width: "60vw", maxWidth: "none", minWidth: 360 }}>
+          <DialogHeader style={{ marginBottom: 16, marginLeft: 0 }}>
+            <DialogTitle>Client Info</DialogTitle>
+          </DialogHeader>
+          <div className="dialog-body">
+          <div className="form-grid">
+            <div className="form-row">
+              <label className="form-label">Client ID</label>
+              <div style={{ fontSize: 14, color: "#6b7280", padding: "6px 0" }}>{clientId}</div>
+            </div>
+            <div className="form-row">
+              <label className="form-label">Client Name</label>
+              <input
+                className="form-input"
+                type="text"
+                value={clientInfoDraft.clientName}
+                onChange={(e) => setClientInfoDraft((p) => ({ ...p, clientName: e.target.value }))}
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">Address</label>
+              <textarea
+                className="form-input"
+                style={{ minHeight: 64, resize: "vertical", fontFamily: "inherit" }}
+                value={clientInfoDraft.address}
+                onChange={(e) => setClientInfoDraft((p) => ({ ...p, address: e.target.value }))}
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">Billing Contact</label>
+              <input
+                className="form-input"
+                type="text"
+                value={clientInfoDraft.billingContact}
+                onChange={(e) => setClientInfoDraft((p) => ({ ...p, billingContact: e.target.value }))}
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">Billing Email</label>
+              <input
+                className="form-input"
+                type="email"
+                value={clientInfoDraft.billingEmail}
+                onChange={(e) => setClientInfoDraft((p) => ({ ...p, billingEmail: e.target.value }))}
+                autoComplete="email"
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">Billing Phone</label>
+              <input
+                className="form-input"
+                type="tel"
+                value={clientInfoDraft.billingPhone}
+                onChange={(e) => setClientInfoDraft((p) => ({ ...p, billingPhone: e.target.value }))}
+                autoComplete="tel"
+              />
+            </div>
+            <div className="form-row">
+              <label className="form-label">Notes</label>
+              <textarea
+                className="form-input"
+                style={{ minHeight: 64, resize: "vertical", fontFamily: "inherit" }}
+                value={clientInfoDraft.notes}
+                onChange={(e) => setClientInfoDraft((p) => ({ ...p, notes: e.target.value }))}
+              />
+            </div>
+          </div>
+          {clientInfoError && (
+            <div style={{ color: "#dc2626", fontSize: 13, marginTop: 8 }}>{clientInfoError}</div>
           )}
+          </div>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setClientInfoOpen(false)}>Cancel</Button>
+            <Button
+              type="button"
+              disabled={clientInfoBusy}
+              onClick={async () => {
+                setClientInfoError("");
+                setClientInfoBusy(true);
+                try {
+                  await apiRequest("/api/client", {
+                    method: "PATCH",
+                    body: JSON.stringify(clientInfoDraft),
+                  });
+                  setClientInfoOpen(false);
+                } catch (err) {
+                  setClientInfoError(err.message);
+                } finally {
+                  setClientInfoBusy(false);
+                }
+              }}
+            >
+              {clientInfoBusy ? "Saving…" : "Save"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
