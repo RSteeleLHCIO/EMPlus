@@ -2,7 +2,7 @@ import React, { useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
-export default function LoginScreen({ onLogin }) {
+export default function LoginScreen({ onLogin, sessionExpired }) {
   const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -37,9 +37,24 @@ export default function LoginScreen({ onLogin }) {
         background: "#fff", borderRadius: 12, padding: "40px 48px",
         boxShadow: "0 2px 16px rgba(0,0,0,0.1)", width: 360,
       }}>
+        <div style={{ textAlign: "center", marginBottom: '16px' }}>
+          <img
+            src="/emplus-logo.png"
+            alt="EMPlus"
+            style={{ width: 200, height: "auto" }}
+          />
+        </div>
         <h2 style={{ margin: "0 0 24px", fontSize: 22, fontWeight: 700, color: "#1a1a2e" }}>
           Sign In
         </h2>
+        {sessionExpired && (
+          <div style={{
+            marginBottom: 16, padding: "10px 12px", background: "#fefce8",
+            border: "1px solid #fde68a", borderRadius: 8, color: "#92400e", fontSize: 13,
+          }}>
+            Your session has expired. Please sign in again.
+          </div>
+        )}
         <form onSubmit={handleSubmit}>
           <div style={{ marginBottom: 16 }}>
             <label style={{ display: "block", marginBottom: 6, fontSize: 13, fontWeight: 500, color: "#444" }}>

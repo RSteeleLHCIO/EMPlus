@@ -8,22 +8,25 @@ import "./ui.css";
 function Root() {
   const [token, setToken] = useState(() => sessionStorage.getItem("emplus_token"));
   const [clientId, setClientId] = useState(() => sessionStorage.getItem("emplus_clientId"));
+  const [sessionExpired, setSessionExpired] = useState(false);
 
   const handleLogin = (newToken, newClientId) => {
     sessionStorage.setItem("emplus_token", newToken);
     sessionStorage.setItem("emplus_clientId", newClientId || "");
     setToken(newToken);
     setClientId(newClientId || "");
+    setSessionExpired(false);
   };
 
-  const handleSignOut = () => {
+  const handleSignOut = (expired = false) => {
     sessionStorage.removeItem("emplus_token");
     sessionStorage.removeItem("emplus_clientId");
     setToken(null);
     setClientId(null);
+    setSessionExpired(!!expired);
   };
 
-  if (!token) return <LoginScreen onLogin={handleLogin} />;
+  if (!token) return <LoginScreen onLogin={handleLogin} sessionExpired={sessionExpired} />;
   return <EntityApp token={token} clientId={clientId} onSignOut={handleSignOut} />;
 }
 

@@ -588,7 +588,9 @@ export async function generateEntityPdf({
   addCanvasPage(canvas2, false);
 
   if (download) {
-    pdf.save(fileName);
+    const blob = pdf.output('blob');
+    const url = URL.createObjectURL(blob);
+    return { url, fileName };
   } else {
     return pdf;
   }
@@ -705,6 +707,9 @@ export async function generateEntityBook({
   const safeName = (fileName || `${clientName || "entity-book"}-${pageType}`)
     .replace(/[^\w\s.-]/g, "")
     .replace(/\s+/g, "_");
-  pdf.save(`${safeName}.pdf`);
+  const outFileName = `${safeName}.pdf`;
+  const blob = pdf.output('blob');
+  const url = URL.createObjectURL(blob);
+  return { url, fileName: outFileName };
 }
 

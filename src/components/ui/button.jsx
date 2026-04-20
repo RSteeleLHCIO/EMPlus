@@ -1,7 +1,7 @@
 import React from "react";
 
 // Small button shim used by the preview. Accepts `variant` (primary|secondary|ghost)
-export function Button({ children, variant, className = "", type = "button", ...props }) {
+export const Button = React.forwardRef(function Button({ children, variant, className = "", type = "button", ...props }, ref) {
     const base = "btn";
     const vclass =
         variant === "ghost"
@@ -12,8 +12,8 @@ export function Button({ children, variant, className = "", type = "button", ...
                     ? "btn-outline"
                     : "btn-primary";
     return (
-        <button type={type} className={`${base} ${vclass} ${className}`.trim()} {...props}>
+        <button ref={ref} type={type} className={`${base} ${vclass} ${className}`.trim()} {...props}>
             {children}
         </button>
     );
-}
+});

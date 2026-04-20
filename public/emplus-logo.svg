@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" width="320" height="320">
+  <!-- Blue background oval / swoosh -->
+  <ellipse cx="160" cy="178" rx="128" ry="28" fill="none" stroke="#1565C0" stroke-width="6" stroke-linecap="round"
+    transform="rotate(-8 160 178)" />
+
+  <!-- Green swoosh (main arc) -->
+  <path d="M 40 190 Q 90 120 160 160 Q 230 200 280 145"
+    fill="none" stroke="#43A047" stroke-width="8" stroke-linecap="round" />
+
+  <!-- Document / spreadsheet icon (white with border) -->
+  <rect x="118" y="100" width="52" height="64" rx="4" fill="white" stroke="#bbb" stroke-width="1.5" />
+  <!-- Grid lines on doc -->
+  <line x1="128" y1="116" x2="160" y2="116" stroke="#ccc" stroke-width="1" />
+  <line x1="128" y1="124" x2="160" y2="124" stroke="#ccc" stroke-width="1" />
+  <line x1="128" y1="132" x2="160" y2="132" stroke="#ccc" stroke-width="1" />
+  <line x1="128" y1="140" x2="160" y2="140" stroke="#ccc" stroke-width="1" />
+  <line x1="140" y1="112" x2="140" y2="156" stroke="#ccc" stroke-width="1" />
+  <line x1="150" y1="112" x2="150" y2="156" stroke="#ccc" stroke-width="1" />
+  <!-- Bar chart on doc -->
+  <rect x="124" y="148" width="6" height="8" rx="1" fill="#43A047" />
+  <rect x="132" y="143" width="6" height="13" rx="1" fill="#43A047" />
+  <rect x="140" y="138" width="6" height="18" rx="1" fill="#2196F3" />
+  <rect x="148" y="145" width="6" height="11" rx="1" fill="#43A047" />
+
+  <!-- Pie chart (green/yellow wedges) -->
+  <circle cx="96" cy="148" r="22" fill="#43A047" />
+  <path d="M 96 148 L 96 126 A 22 22 0 0 1 117 156 Z" fill="#FFC107" />
+
+  <!-- Building 1 (gray, left) -->
+  <rect x="70" y="88" width="28" height="72" rx="2" fill="#90A4AE" />
+  <rect x="75" y="94" width="6" height="7" rx="1" fill="#B0BEC5" />
+  <rect x="85" y="94" width="6" height="7" rx="1" fill="#B0BEC5" />
+  <rect x="75" y="106" width="6" height="7" rx="1" fill="#B0BEC5" />
+  <rect x="85" y="106" width="6" height="7" rx="1" fill="#B0BEC5" />
+  <rect x="75" y="118" width="6" height="7" rx="1" fill="#B0BEC5" />
+  <rect x="85" y="118" width="6" height="7" rx="1" fill="#B0BEC5" />
+
+  <!-- Building 2 (blue, tall, center-left) -->
+  <rect x="104" y="60" width="32" height="100" rx="2" fill="#1565C0" />
+  <rect x="110" y="68" width="7" height="8" rx="1" fill="#42A5F5" />
+  <rect x="122" y="68" width="7" height="8" rx="1" fill="#42A5F5" />
+  <rect x="110" y="82" width="7" height="8" rx="1" fill="#42A5F5" />
+  <rect x="122" y="82" width="7" height="8" rx="1" fill="#42A5F5" />
+  <rect x="110" y="96" width="7" height="8" rx="1" fill="#42A5F5" />
+  <rect x="122" y="96" width="7" height="8" rx="1" fill="#42A5F5" />
+
+  <!-- Building 3 (green, right of center) -->
+  <rect x="170" y="74" width="28" height="86" rx="2" fill="#2E7D32" />
+  <rect x="175" y="82" width="6" height="7" rx="1" fill="#66BB6A" />
+  <rect x="185" y="82" width="6" height="7" rx="1" fill="#66BB6A" />
+  <rect x="175" y="94" width="6" height="7" rx="1" fill="#66BB6A" />
+  <rect x="185" y="94" width="6" height="7" rx="1" fill="#66BB6A" />
+  <rect x="175" y="106" width="6" height="7" rx="1" fill="#66BB6A" />
+  <rect x="185" y="106" width="6" height="7" rx="1" fill="#66BB6A" />
+
+  <!-- Person 1 (gray, slightly behind) -->
+  <circle cx="220" cy="106" r="14" fill="#78909C" />
+  <path d="M 196 148 Q 196 124 220 124 Q 244 124 244 148" fill="#78909C" />
+
+  <!-- Person 2 (blue, front) -->
+  <circle cx="204" cy="112" r="15" fill="#1565C0" />
+  <path d="M 178 156 Q 178 130 204 130 Q 230 130 230 156" fill="#1565C0" />
+
+  <!-- Yellow growth arrow -->
+  <path d="M 228 100 L 272 60" stroke="#FFC107" stroke-width="6" stroke-linecap="round" />
+  <polygon points="272,60 258,62 266,74" fill="#FFC107" />
+
+  <!-- EMPlus text -->
+  <text x="28" y="246" font-family="'Arial Black', Arial, sans-serif" font-weight="900" font-size="56" letter-spacing="-1">
+    <tspan fill="#1565C0">EM</tspan><tspan fill="#1565C0" font-size="52">Pl</tspan><tspan fill="#43A047" font-size="52">us</tspan>
+  </text>
+</svg>

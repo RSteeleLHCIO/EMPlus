@@ -141,6 +141,8 @@ const getVirtualValue = (fieldId, node, nodeList, relList) => {
 export default function ExportDialog({
   open,
   onClose,
+  onExportStart,
+  onExported,
   exportNodes,
   nodeList,
   relList,
@@ -240,6 +242,10 @@ export default function ExportDialog({
     setError("");
 
     const name = reportName.trim();
+    const pendingFileName = `${name || clientName || "export"}.xlsx`
+      .replace(/[^\w\s.-]/g, "")
+      .replace(/\s+/g, "_");
+    onExportStart?.({ fileName: pendingFileName });
 
     try {
       // 1. Save/overwrite the report definition if a name was given
@@ -284,12 +290,13 @@ export default function ExportDialog({
       const sheetName = (clientName || "Export").slice(0, 31);
       XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
 
-      const fileName = `${name || clientName || "export"}.xlsx`
-        .replace(/[^\w\s.-]/g, "")
-        .replace(/\s+/g, "_");
-      XLSX.writeFile(workbook, fileName);
+      const fileName = pendingFileName;
+      const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
 
       onClose();
+      onExported?.({ url, fileName });
     } catch (err) {
       setError(err.message || "Export failed");
     } finally {

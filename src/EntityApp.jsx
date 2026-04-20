@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Hourglass, Home, Download, BookOpen, User, UserPlus } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2 } from "lucide-react";
 import { generateEntityPdf, generateEntityBook } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone } from "./utils/helpers";
@@ -841,6 +841,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [exportOpen, setExportOpen] = useState(false);
   const [exportReports, setExportReports] = useState([]);
   const [exportReportsLoaded, setExportReportsLoaded] = useState(false);
+  const [exportResult, setExportResult] = useState(null); // { url, fileName }
+  const exportResultRef = useRef(null);
+  const setExportResultAndRevoke = (result) => {
+    if (exportResultRef.current?.url) URL.revokeObjectURL(exportResultRef.current.url);
+    exportResultRef.current = result;
+    setExportResult(result);
+  };
   const [manageUsersOpen, setManageUsersOpen] = useState(false);
   const [manageUsersList, setManageUsersList] = useState([]);
   const [manageUsersLoading, setManageUsersLoading] = useState(false);
@@ -931,6 +938,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       },
       ...restOptions,
     });
+    if (response.status === 401) {
+      if (onSignOut) onSignOut(true);
+      throw new Error("Session expired");
+    }
     if (!response.ok) {
       const text = await response.text();
       throw new Error(text || `API error ${response.status}`);
@@ -1618,9 +1629,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       )}
       <div className="app-header">
         <div style={{ maxWidth: "90%", margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <div>
-          <div style={{ fontSize: 22, fontWeight: 600 }}>{clientDisplayName || toSentenceCase(clientId)}</div>
-          <div style={{ fontSize: 22, fontWeight: 600 }}>Entity Dashboard</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 80, width: "auto", margin: "-10px" }} />
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 600, color: "#1a1a2e" }}>{clientDisplayName || toSentenceCase(clientId)}</div>
+            <div style={{ fontSize: 13, color: "#64748b" }}>Entity Dashboard</div>
+          </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <Button
@@ -1662,9 +1676,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               onClick={async () => {
                 if (viewMode === "hierarchy") {
                   if (isPdfExporting) return;
+                  const focusNode = nodeList.find((n) => n.id === focusId);
+                  const pendingFileName = `${focusNode?.name || focusId}.pdf`
+                    .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+                  setExportResultAndRevoke({ status: "exporting", fileName: pendingFileName });
                   setIsPdfExporting(true);
                   try {
-                    await generateEntityPdf({
+                    const result = await generateEntityPdf({
                       nodeId: focusId,
                       nodeList,
                       relList,
@@ -1673,6 +1691,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       apiBase,
                       token,
                     });
+                    if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
                   } finally {
                     setIsPdfExporting(false);
                   }
@@ -1710,11 +1729,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   onClick={async () => {
                     setExportMenuOpen(false);
                     setIsPdfExporting(true);
+                    const safeBase = `${clientDisplayName || toSentenceCase(clientId)}-entity-book-hierarchy`
+                      .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+                    setExportResultAndRevoke({ status: "exporting", fileName: `${safeBase}.pdf` });
                     try {
                       const exportNodes = dirSearch.trim()
                         ? [...filteredEntityNodes, ...filteredPersonNodes]
                         : nodeList;
-                      await generateEntityBook({
+                      const result = await generateEntityBook({
                         nodes: exportNodes,
                         nodeList,
                         relList,
@@ -1725,6 +1747,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         apiBase,
                         token,
                       });
+                      if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
                     } finally {
                       setIsPdfExporting(false);
                     }
@@ -1738,11 +1761,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   onClick={async () => {
                     setExportMenuOpen(false);
                     setIsPdfExporting(true);
+                    const safeBase2 = `${clientDisplayName || toSentenceCase(clientId)}-entity-book-data`
+                      .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+                    setExportResultAndRevoke({ status: "exporting", fileName: `${safeBase2}.pdf` });
                     try {
                       const exportNodes = dirSearch.trim()
                         ? [...filteredEntityNodes, ...filteredPersonNodes]
                         : nodeList;
-                      await generateEntityBook({
+                      const result = await generateEntityBook({
                         nodes: exportNodes,
                         nodeList,
                         relList,
@@ -1753,6 +1779,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         apiBase,
                         token,
                       });
+                      if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
                     } finally {
                       setIsPdfExporting(false);
                     }
@@ -1764,17 +1791,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               </div>
             )}
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            className={`btn-icon${remoteStatus === "loading" ? " btn-loading" : ""}`}
-            aria-label="Loading…"
-            title="Loading…"
-            disabled
-            style={{ visibility: remoteStatus === "loading" ? "visible" : "hidden" }}
-          >
-            <Hourglass size={18} />
-          </Button>
           <div className="settings-anchor" ref={settingsRef}>
             <Button
               type="button"
@@ -2145,6 +2161,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             {focusNode?.kind === "person" && focusNode?.photo && (
               <img src={focusNode.photo} alt="" className="hv-focus-photo" />
             )}
+            {(() => {
+              const ownerCount = focusNode?.kind !== "person" ? getOwnersOf(relList, focusId).length : 0;
+              const ownedCount = getOwnedBy(relList, focusId).length;
+              return (ownerCount > 0 || ownedCount > 0) ? (
+                <div className="hv-focus-counts">
+                  {ownerCount > 0 && (
+                    <span>{ownerCount} {ownerCount === 1 ? "Owner" : "Owners"}</span>
+                  )}
+                  {ownedCount > 0 && (
+                    <span>Owns {ownedCount} {ownedCount === 1 ? "entity" : "entities"}</span>
+                  )}
+                </div>
+              ) : null;
+            })()}
           </div>
 
           <div className="hv-below">
@@ -3190,9 +3220,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   disabled={isPdfExporting}
                   onClick={async () => {
                     if (!editNodeId || isPdfExporting) return;
+                    const editNode = nodeList.find((n) => n.id === editNodeId);
+                    const pendingFileName = `${editNode?.name || editNodeId}.pdf`
+                      .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+                    setExportResultAndRevoke({ status: "exporting", fileName: pendingFileName });
                     setIsPdfExporting(true);
                     try {
-                      await generateEntityPdf({
+                      const result = await generateEntityPdf({
                         nodeId: editNodeId,
                         nodeList,
                         relList,
@@ -3201,12 +3235,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         apiBase,
                         token,
                       });
+                      if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
                     } finally {
                       setIsPdfExporting(false);
                     }
                   }}
                 >
-                  {isPdfExporting ? "Exporting…" : "Export"}
+                  Export
                 </Button>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -3724,6 +3759,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       <ExportDialog
         open={exportOpen}
         onClose={() => setExportOpen(false)}
+        onExported={(result) => setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName })}
+        onExportStart={({ fileName }) => setExportResultAndRevoke({ status: "exporting", fileName })}
         exportNodes={
           viewMode === "directory" && dirSearch.trim()
             ? [...filteredEntityNodes, ...filteredPersonNodes]
@@ -3747,6 +3784,69 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         apiRequest={apiRequest}
         clientName={clientDisplayName || toSentenceCase(clientId)}
       />
+
+      {/* ── Export progress modal ── */}
+      <Dialog
+        open={!!exportResult}
+        onOpenChange={(v) => {
+          if (!v && exportResult?.status === "ready") {
+            if (exportResult.url) URL.revokeObjectURL(exportResult.url);
+            exportResultRef.current = null;
+            setExportResult(null);
+          }
+        }}
+      >
+        <DialogContent style={{ maxWidth: 400 }}>
+          <DialogHeader style={{ marginBottom: 12, marginLeft: 0 }}>
+            <DialogTitle>
+              {exportResult?.status === "ready" ? "Export ready" : "Exporting…"}
+            </DialogTitle>
+          </DialogHeader>
+
+          {exportResult?.status !== "ready" ? (
+            /* ── In-progress pill ── */
+            <div className="export-progress-pill">
+              <Loader2 size={14} className="export-spin" style={{ flexShrink: 0 }} />
+              <span>Building {exportResult?.fileName || "…"}</span>
+            </div>
+          ) : (
+            /* ── Ready state ── */
+            <>
+              <p style={{ fontSize: 13, color: "#374151", marginBottom: 12, wordBreak: "break-all" }}>
+                <strong>{exportResult.fileName}</strong>
+              </p>
+              <DialogFooter style={{ gap: 8 }}>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    if (exportResult.url) URL.revokeObjectURL(exportResult.url);
+                    exportResultRef.current = null;
+                    setExportResult(null);
+                  }}
+                >
+                  Close
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => window.open(exportResult.url)}
+                >
+                  View
+                </Button>
+                <Button
+                  onClick={() => {
+                    const a = document.createElement("a");
+                    a.href = exportResult.url;
+                    a.download = exportResult.fileName;
+                    a.click();
+                  }}
+                >
+                  Download
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* ── Account Info dialog ── */}
       <Dialog open={accountInfoOpen} onOpenChange={(v) => { if (!v) setAccountInfoOpen(false); }}>
