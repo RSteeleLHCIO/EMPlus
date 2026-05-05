@@ -486,6 +486,8 @@ export async function generateEntityPdf({
   dataDictionary,
   clientName,
   download = true,
+  isCancelled = () => false,
+  onProgress = null,
   apiBase,
   token,
 }) {
@@ -554,6 +556,8 @@ export async function generateEntityPdf({
     pageWidth
   );
 
+  if (isCancelled()) return null;
+
   const canvas2 = await captureComponent(
     <EntityInfoPageContent
       nodeId={nodeId}
@@ -586,6 +590,7 @@ export async function generateEntityPdf({
 
   addCanvasPage(canvas1, true);
   addCanvasPage(canvas2, false);
+  onProgress?.(1, 1);
 
   if (download) {
     const blob = pdf.output('blob');
@@ -705,6 +710,133 @@ export async function generateEntityBook({
   }
 
   const safeName = (fileName || `${clientName || "entity-book"}-${pageType}`)
+    .replace(/[^\w\s.-]/g, "")
+    .replace(/\s+/g, "_");
+  const outFileName = `${safeName}.pdf`;
+  const blob = pdf.output('blob');
+  const url = URL.createObjectURL(blob);
+  return { url, fileName: outFileName };
+}
+
+// ─── generateEntityBookInterleaved ───────────────────────────────────────────
+
+/**
+ * Like generateEntityBook, but renders hierarchy and/or detail pages
+ * interleaved: {hierarchy₁}{detail₁}{hierarchy₂}{detail₂}…
+ *
+ * @param {object} opts
+ * @param {Array}   opts.nodes            – ordered list of node objects to include
+ * @param {Array}   opts.nodeList         – full node list (for relationship lookups)
+ * @param {Array}   opts.relList          – full relationship list
+ * @param {Array}   opts.dataDictionary   – DD field definitions
+ * @param {string}  opts.clientName       – shown in each page header
+ * @param {boolean} [opts.includeHierarchy=true]  – include hierarchy page per node
+ * @param {boolean} [opts.includeDetail=true]     – include detail page per node
+ * @param {string}  [opts.fileName]       – override the output file name
+ */
+export async function generateEntityBookInterleaved({
+  nodes,
+  nodeList,
+  relList,
+  dataDictionary,
+  clientName,
+  includeHierarchy = true,
+  includeDetail = true,
+  isCancelled = () => false,
+  onProgress = null,
+  fileName,
+  apiBase,
+  token,
+}) {
+  if (!nodes || nodes.length === 0) return;
+  if (!includeHierarchy && !includeDetail) return;
+
+  const total = nodes.length;
+
+  const { createRoot } = await import("react-dom/client");
+  const patchedNodeList = await patchNodeImages(nodeList, apiBase, token);
+
+  const captureComponent = async (element, width = 794) => {
+    const container = document.createElement("div");
+    container.style.cssText = `
+      position: fixed;
+      left: -9999px;
+      top: 0;
+      width: ${width}px;
+      background: #ffffff;
+      font-family: Inter, system-ui, Arial, sans-serif;
+    `;
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await new Promise((resolve) => {
+      root.render(element);
+      setTimeout(resolve, 100);
+    });
+    const imgEls = Array.from(container.querySelectorAll("img"));
+    await Promise.all(
+      imgEls.map((img) =>
+        img.complete
+          ? Promise.resolve()
+          : new Promise((r) => { img.onload = r; img.onerror = r; })
+      )
+    );
+    const canvas = await html2canvas(container, {
+      scale: 2,
+      useCORS: false,
+      backgroundColor: "#ffffff",
+    });
+    root.unmount();
+    document.body.removeChild(container);
+    return canvas;
+  };
+
+  const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+  const pdfWidth = pdf.internal.pageSize.getWidth();
+  const pdfHeight = pdf.internal.pageSize.getHeight();
+  const asOf = new Date();
+  let isFirst = true;
+
+  const addCanvasPage = (canvas) => {
+    if (!isFirst) pdf.addPage();
+    isFirst = false;
+    const imgData = canvas.toDataURL("image/jpeg", 0.92);
+    const canvasAspect = canvas.height / canvas.width;
+    const imgH = pdfWidth * canvasAspect;
+    pdf.addImage(imgData, "JPEG", 0, 0, pdfWidth, Math.min(imgH, pdfHeight));
+  };
+
+  for (let entityIdx = 0; entityIdx < nodes.length; entityIdx++) {
+    const node = nodes[entityIdx];
+    if (isCancelled()) return null;
+    if (includeHierarchy) {
+      const canvas = await captureComponent(
+        <HierarchyPageContent
+          nodeId={node.id}
+          nodeList={patchedNodeList}
+          relList={relList}
+          clientName={clientName}
+          asOf={asOf}
+        />
+      );
+      addCanvasPage(canvas);
+    }
+    if (includeDetail) {
+      const canvas = await captureComponent(
+        <EntityInfoPageContent
+          nodeId={node.id}
+          nodeList={patchedNodeList}
+          relList={relList}
+          dataDictionary={dataDictionary}
+          clientName={clientName}
+        />
+      );
+      addCanvasPage(canvas);
+    }
+    onProgress?.(entityIdx + 1, total);
+  }
+
+  const suffix = includeHierarchy && includeDetail ? "full" : includeHierarchy ? "hierarchy" : "detail";
+  const safeName = (fileName || `${clientName || "entity-book"}-${suffix}`)
     .replace(/[^\w\s.-]/g, "")
     .replace(/\s+/g, "_");
   const outFileName = `${safeName}.pdf`;

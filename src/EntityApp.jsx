@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2 } from "lucide-react";
-import { generateEntityPdf, generateEntityBook } from "./utils/generateEntityPdf";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Printer } from "lucide-react";
+import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone } from "./utils/helpers";
 import { Input } from "./components/ui/input";
@@ -649,6 +649,126 @@ const toIsoDate = (d) => {
   return `${yyyy}-${mm}-${dd}`;
 };
 
+// ── Directory stats strip ────────────────────────────────────────────────────
+function StatsStrip({ allEntityNodes, allPersonNodes, filteredEntityNodes, filteredPersonNodes, dataDictionary, isFiltered }) {
+  const INTERVAL_MS = 3000;
+
+  // Build rotating slides from built-in fields + DD showInStats fields
+  const slides = useMemo(() => {
+    const result = [];
+    const allNodes = [...allEntityNodes, ...allPersonNodes];
+    const filteredNodes = [...filteredEntityNodes, ...filteredPersonNodes];
+
+    const makeSlide = (label, nodes, getValue) => {
+      const counts = {};
+      let unset = 0;
+      for (const n of nodes) {
+        const v = getValue(n);
+        if (v) { counts[v] = (counts[v] || 0) + 1; }
+        else unset++;
+      }
+      if (nodes.length === 0) return null; // no nodes to report on
+      return { label, counts, unset };
+    };
+
+    // Built-in entity fields
+    const entitySlide1 = makeSlide("Operational Role", filteredEntityNodes, (n) => n.operationalRole);
+    if (entitySlide1) result.push(entitySlide1);
+    const entitySlide2 = makeSlide("Legal Status", filteredEntityNodes, (n) => n.legalStatus);
+    if (entitySlide2) result.push(entitySlide2);
+
+    // Built-in person field
+    const personSlide = makeSlide("Person Status", filteredPersonNodes, (n) => n.personStatus);
+    if (personSlide) result.push(personSlide);
+
+    // DD showInStats fields
+    const statsFields = [...dataDictionary]
+      .filter((f) => f.showInStats && (f.validValues || []).length > 0)
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    for (const field of statsFields) {
+      const nodes = field.appliesTo === "person" ? filteredPersonNodes
+                  : field.appliesTo === "entity" ? filteredEntityNodes
+                  : filteredNodes;
+      const slide = makeSlide(field.prompt, nodes, (n) => n.customFields?.[field.fieldId]);
+      if (slide) result.push(slide);
+    }
+    return result;
+  }, [allEntityNodes, allPersonNodes, filteredEntityNodes, filteredPersonNodes, dataDictionary]);
+
+  const [slideIdx, setSlideIdx] = useState(0);
+  const [visible, setVisible] = useState(true);
+  const pausedRef = useRef(false);
+  const timerRef = useRef(null);
+
+  // Reset to first slide when slides change
+  useEffect(() => { setSlideIdx(0); }, [slides]);
+
+  // Advance with crossfade
+  const advance = useCallback(() => {
+    if (slides.length < 2) return;
+    setVisible(false);
+    setTimeout(() => {
+      setSlideIdx((i) => (i + 1) % slides.length);
+      setVisible(true);
+    }, 150);
+  }, [slides.length]);
+
+  useEffect(() => {
+    if (slides.length < 2) return;
+    timerRef.current = setInterval(() => {
+      if (!pausedRef.current) advance();
+    }, INTERVAL_MS);
+    return () => clearInterval(timerRef.current);
+  }, [slides.length, advance]);
+
+  const totalEntities = allEntityNodes.length;
+  const totalPeople = allPersonNodes.length;
+  const shownEntities = filteredEntityNodes.length;
+  const shownPeople = filteredPersonNodes.length;
+
+  const line1 = isFiltered
+    ? `${shownEntities} of ${totalEntities} ${totalEntities === 1 ? "Entity" : "Entities"} · ${shownPeople} of ${totalPeople} ${totalPeople === 1 ? "Person" : "People"}`
+    : `${totalEntities} ${totalEntities === 1 ? "Entity" : "Entities"} · ${totalPeople} ${totalPeople === 1 ? "Person" : "People"}`;
+
+  const slide = slides[slideIdx];
+
+  return (
+    <div className="stats-strip">
+      {isFiltered && (
+        <div className="stats-filtered-badge">List is filtered</div>
+      )}
+      <div className="stats-line1">{line1}</div>
+      {slide && (
+        <div
+          className="stats-line2"
+          style={{ opacity: visible ? 1 : 0, transition: "opacity 150ms ease" }}
+          onMouseEnter={() => { pausedRef.current = true; }}
+          onMouseLeave={() => { pausedRef.current = false; }}
+          onTouchStart={() => { pausedRef.current = true; }}
+          onTouchEnd={() => { pausedRef.current = false; advance(); }}
+          onClick={() => advance()}
+          title="Tap to advance"
+        >
+          <span className="stats-slide-label">{slide.label}:</span>
+          {Object.entries(slide.counts).map(([val, count]) => (
+            <span key={val} className="stats-slide-value">{count} {val}</span>
+          ))}
+          {slide.unset > 0 && (
+            <span className="stats-slide-unset">{slide.unset} —</span>
+          )}
+          {slides.length > 1 && (
+            <span className="stats-dots">
+              {slides.map((_, i) => (
+                <span key={i} className={`stats-dot${i === slideIdx ? " stats-dot--active" : ""}`} />
+              ))}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) {
   const [nodeList, setNodeList] = useState(initialNodes);
   const [relList, setRelList] = useState(initialRelationships);
@@ -677,6 +797,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const exportMenuRef = useRef(null);
   const homeButtonRef = useRef(null);
   const focusBoxRef = useRef(null);
+  const hierarchyContainerRef = useRef(null);
   const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5174";
   const [remoteStatus, setRemoteStatus] = useState("idle");
   const [remoteError, setRemoteError] = useState("");
@@ -757,10 +878,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     kind: "entity",
     photo: "",
     logo: "",
+    operationalRole: "",
+    legalStatus: "",
+    personStatus: "",
     customFields: {},
   });
   const [dupMatches, setDupMatches] = useState([]);
-  const [dirSearch, setDirSearch] = useState("");
+  const [dirSearch, setDirSearch] = useState(() => {
+    if (typeof window === "undefined") return "";
+    try {
+      const s = localStorage.getItem("homeScreen");
+      const hs = s ? JSON.parse(s) : null;
+      return (hs?.viewMode === "directory" && hs?.dirFilter) ? hs.dirFilter : "";
+    } catch { return ""; }
+  });
 
   function checkDuplicateName(name) {
     const q = name.trim().toLowerCase();
@@ -841,8 +972,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [exportOpen, setExportOpen] = useState(false);
   const [exportReports, setExportReports] = useState([]);
   const [exportReportsLoaded, setExportReportsLoaded] = useState(false);
+  const [printDialogOpen, setPrintDialogOpen] = useState(false);
+  const [printHierarchy, setPrintHierarchy] = useState(true);
+  const [printDetail, setPrintDetail] = useState(true);
   const [exportResult, setExportResult] = useState(null); // { url, fileName }
   const exportResultRef = useRef(null);
+  const pdfCancelRef = useRef(false);
+  const [pdfProgress, setPdfProgress] = useState(null); // { current, total } | null
   const setExportResultAndRevoke = (result) => {
     if (exportResultRef.current?.url) URL.revokeObjectURL(exportResultRef.current.url);
     exportResultRef.current = result;
@@ -879,7 +1015,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
 
   const [dataDictionary, setDataDictionary] = useState([]);
-  const emptyDdDraft = { prompt: "", dataType: "string", appliesTo: "both", multiValue: false, validValuesText: "", phoneTypesText: "" };
+  const emptyDdDraft = { prompt: "", dataType: "string", appliesTo: "both", multiValue: false, validValuesText: "", phoneTypesText: "", showInStats: false };
   const [ddEntryDraft, setDdEntryDraft] = useState(emptyDdDraft);
   const [ddEntryId, setDdEntryId] = useState(null);
   const [isSavingDdEntry, setIsSavingDdEntry] = useState(false);
@@ -1188,6 +1324,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       multiValue: !!entry.multiValue,
       validValuesText: (entry.validValues || []).join("\n"),
       phoneTypesText: (entry.phoneTypes || []).join("\n"),
+      showInStats: !!entry.showInStats,
     });
     setOpenDialog({ type: "data-dictionary-entry" });
   };
@@ -1210,6 +1347,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       multiValue: ddEntryDraft.multiValue,
       validValues,
       phoneTypes,
+      showInStats: validValues.length > 0 ? ddEntryDraft.showInStats : false,
     };
     try {
       if (ddEntryId) {
@@ -1402,6 +1540,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         kind: node.kind,
         photo: node.photo || "",
         logo: node.logo || "",
+        operationalRole: node.operationalRole || "",
+        legalStatus: node.legalStatus || "",
+        personStatus: node.personStatus || "",
         customFields: node.customFields || {},
       });
     }
@@ -1517,6 +1658,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         try { localStorage.setItem("homeScreen", JSON.stringify(data.homeScreen)); } catch {}
         setViewMode(data.homeScreen.viewMode ?? "hierarchy");
         if (data.homeScreen.focusId) setFocusId(data.homeScreen.focusId);
+        if (data.homeScreen.viewMode === "directory") setDirSearch(data.homeScreen.dirFilter ?? "");
       }).catch(() => {});
     }
     return () => {
@@ -1594,10 +1736,21 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const directOwnerTotalOk = Math.abs(directOwnerTotal - 100) < 0.01;
 
   useEffect(() => {
-    if (viewMode === "hierarchy" && focusBoxRef.current) {
-      focusBoxRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  }, [focusId, viewMode]);
+    if (viewMode !== "hierarchy") return;
+    const center = (behavior) => {
+      if (!focusBoxRef.current || !hierarchyContainerRef.current) return;
+      const container = hierarchyContainerRef.current;
+      const box = focusBoxRef.current;
+      const containerRect = container.getBoundingClientRect();
+      const boxRect = box.getBoundingClientRect();
+      const delta = (boxRect.top + box.clientHeight / 2) - (containerRect.top + container.clientHeight / 2);
+      container.scrollTo({ top: container.scrollTop + delta, behavior });
+    };
+    requestAnimationFrame(() => center("smooth"));
+    // Re-center after images in the focus box have loaded (photos/logos load asynchronously)
+    const t = setTimeout(() => center("instant"), 300);
+    return () => clearTimeout(t);
+  }, [focusId, viewMode, nodeList]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -1630,23 +1783,60 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       <div className="app-header">
         <div style={{ maxWidth: "90%", margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 80, width: "auto", margin: "-10px" }} />
+          <button
+            type="button"
+            aria-label="Go home"
+            title="Home"
+            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", lineHeight: 0 }}
+            onClick={() => {
+              if (homeScreen) {
+                setViewMode(homeScreen.viewMode);
+                if (homeScreen.focusId) setFocusId(homeScreen.focusId);
+                if (homeScreen.viewMode === "directory") setDirSearch(homeScreen.dirFilter ?? "");
+              } else {
+                setViewMode("hierarchy");
+              }
+            }}
+          >
+            <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 80, width: "auto", margin: "-10px" }} />
+          </button>
           <div>
             <div style={{ fontSize: 18, fontWeight: 600, color: "#1a1a2e" }}>{clientDisplayName || toSentenceCase(clientId)}</div>
             <div style={{ fontSize: 13, color: "#64748b" }}>Entity Dashboard</div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Button
-            type="button"
-            variant="outline"
-            className="btn-icon"
-            aria-label={viewMode === "hierarchy" ? "Switch to Directory" : "Switch to Hierarchy"}
-            title={viewMode === "hierarchy" ? "Directory" : "Hierarchy"}
-            onClick={() => setViewMode(viewMode === "hierarchy" ? "directory" : "hierarchy")}
-          >
-            {viewMode === "hierarchy" ? <LayoutList size={18} /> : <GitFork size={18} />}
-          </Button>
+          <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid #cbd5e1" }}>
+            <button
+              type="button"
+              aria-label="Hierarchy view"
+              title="Hierarchy"
+              onClick={() => setViewMode("hierarchy")}
+              style={{
+                display: "flex", alignItems: "center", gap: 5, padding: "5px 12px",
+                fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
+                borderRight: "1px solid #cbd5e1",
+                background: viewMode === "hierarchy" ? "#1e293b" : "#fff",
+                color: viewMode === "hierarchy" ? "#fff" : "#475569",
+              }}
+            >
+              <GitFork size={14} /> Hierarchy
+            </button>
+            <button
+              type="button"
+              aria-label="Directory view"
+              title="Directory"
+              onClick={() => setViewMode("directory")}
+              style={{
+                display: "flex", alignItems: "center", gap: 5, padding: "5px 12px",
+                fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
+                background: viewMode === "directory" ? "#1e293b" : "#fff",
+                color: viewMode === "directory" ? "#fff" : "#475569",
+              }}
+            >
+              <LayoutList size={14} /> Directory
+            </button>
+          </div>
           <Button
             ref={homeButtonRef}
             type="button"
@@ -1658,6 +1848,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               if (homeScreen) {
                 setViewMode(homeScreen.viewMode);
                 if (homeScreen.focusId) setFocusId(homeScreen.focusId);
+                if (homeScreen.viewMode === "directory") setDirSearch(homeScreen.dirFilter ?? "");
               } else {
                 setViewMode("hierarchy");
               }
@@ -1665,132 +1856,47 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           >
             <Home size={18} />
           </Button>
-          <div className="settings-anchor" ref={exportMenuRef}>
-            <Button
-              type="button"
-              variant="outline"
-              className="btn-icon"
-              aria-label="Export"
-              title={viewMode === "hierarchy" ? "Export PDF" : "Export"}
-              disabled={viewMode === "hierarchy" && isPdfExporting}
-              onClick={async () => {
-                if (viewMode === "hierarchy") {
-                  if (isPdfExporting) return;
-                  const focusNode = nodeList.find((n) => n.id === focusId);
-                  const pendingFileName = `${focusNode?.name || focusId}.pdf`
-                    .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
-                  setExportResultAndRevoke({ status: "exporting", fileName: pendingFileName });
-                  setIsPdfExporting(true);
-                  try {
-                    const result = await generateEntityPdf({
-                      nodeId: focusId,
-                      nodeList,
-                      relList,
-                      dataDictionary,
-                      clientName: clientDisplayName || toSentenceCase(clientId),
-                      apiBase,
-                      token,
-                    });
-                    if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
-                  } finally {
-                    setIsPdfExporting(false);
-                  }
-                } else {
-                  setExportMenuOpen((prev) => !prev);
+          <Button
+            type="button"
+            variant="outline"
+            className="btn-icon"
+            aria-label={viewMode === "hierarchy" ? "Print" : "Print Entity Book"}
+            title={viewMode === "hierarchy" ? "Print" : "Print Entity Book"}
+            disabled={isPdfExporting}
+            onClick={async () => {
+              if (viewMode === "hierarchy") {
+                if (isPdfExporting) return;
+                const focusNode = nodeList.find((n) => n.id === focusId);
+                const pendingFileName = `${focusNode?.name || focusId}.pdf`
+                  .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+                setExportResultAndRevoke({ status: "exporting", fileName: pendingFileName });
+                setIsPdfExporting(true);
+                pdfCancelRef.current = false;
+                setPdfProgress(null);
+                try {
+                  const result = await generateEntityPdf({
+                    nodeId: focusId,
+                    nodeList,
+                    relList,
+                    dataDictionary,
+                    clientName: clientDisplayName || toSentenceCase(clientId),
+                    isCancelled: () => pdfCancelRef.current,
+                    onProgress: (current, total) => setPdfProgress({ current, total }),
+                    apiBase,
+                    token,
+                  });
+                  if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
+                } finally {
+                  setIsPdfExporting(false);
+                  setPdfProgress(null);
                 }
-              }}
-            >
-              <Download size={18} />
-            </Button>
-            {exportMenuOpen && viewMode !== "hierarchy" && (
-              <div className="settings-menu">
-                <button
-                  className="settings-menu-item"
-                  onClick={async () => {
-                    setExportMenuOpen(false);
-                    if (!exportReportsLoaded) {
-                      try {
-                        const data = await apiRequest(`/api/export-reports?client=${encodeURIComponent(clientId)}`);
-                        setExportReports(Array.isArray(data) ? data : []);
-                      } catch {
-                        setExportReports([]);
-                      }
-                      setExportReportsLoaded(true);
-                    }
-                    setExportOpen(true);
-                  }}
-                >
-                  <Download size={15} />
-                  Export to Excel
-                </button>
-                <div className="settings-menu-divider" />
-                <button
-                  className="settings-menu-item"
-                  onClick={async () => {
-                    setExportMenuOpen(false);
-                    setIsPdfExporting(true);
-                    const safeBase = `${clientDisplayName || toSentenceCase(clientId)}-entity-book-hierarchy`
-                      .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
-                    setExportResultAndRevoke({ status: "exporting", fileName: `${safeBase}.pdf` });
-                    try {
-                      const exportNodes = dirSearch.trim()
-                        ? [...filteredEntityNodes, ...filteredPersonNodes]
-                        : nodeList;
-                      const result = await generateEntityBook({
-                        nodes: exportNodes,
-                        nodeList,
-                        relList,
-                        dataDictionary,
-                        clientName: clientDisplayName || toSentenceCase(clientId),
-                        pageType: "hierarchy",
-                        fileName: `${clientDisplayName || toSentenceCase(clientId)}-entity-book-hierarchy`,
-                        apiBase,
-                        token,
-                      });
-                      if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
-                    } finally {
-                      setIsPdfExporting(false);
-                    }
-                  }}
-                >
-                  <BookOpen size={15} />
-                  Entity Book — Hierarchy pages
-                </button>
-                <button
-                  className="settings-menu-item"
-                  onClick={async () => {
-                    setExportMenuOpen(false);
-                    setIsPdfExporting(true);
-                    const safeBase2 = `${clientDisplayName || toSentenceCase(clientId)}-entity-book-data`
-                      .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
-                    setExportResultAndRevoke({ status: "exporting", fileName: `${safeBase2}.pdf` });
-                    try {
-                      const exportNodes = dirSearch.trim()
-                        ? [...filteredEntityNodes, ...filteredPersonNodes]
-                        : nodeList;
-                      const result = await generateEntityBook({
-                        nodes: exportNodes,
-                        nodeList,
-                        relList,
-                        dataDictionary,
-                        clientName: clientDisplayName || toSentenceCase(clientId),
-                        pageType: "info",
-                        fileName: `${clientDisplayName || toSentenceCase(clientId)}-entity-book-data`,
-                        apiBase,
-                        token,
-                      });
-                      if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
-                    } finally {
-                      setIsPdfExporting(false);
-                    }
-                  }}
-                >
-                  <BookOpen size={15} />
-                  Entity Book — Data pages
-                </button>
-              </div>
-            )}
-          </div>
+              } else {
+                setPrintDialogOpen(true);
+              }
+            }}
+          >
+            {isPdfExporting ? <Loader2 size={18} className="animate-spin" /> : <Printer size={18} />}
+          </Button>
           <div className="settings-anchor" ref={settingsRef}>
             <Button
               type="button"
@@ -1809,6 +1915,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     const screen = {
                       viewMode,
                       focusId: viewMode === "hierarchy" ? focusId : null,
+                      dirFilter: viewMode === "directory" ? dirSearch : null,
                     };
                     setHomeScreen(screen);
                     try { localStorage.setItem("homeScreen", JSON.stringify(screen)); } catch {}
@@ -1843,6 +1950,25 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 >
                   <Upload size={15} />
                   Import CSV
+                </button>
+                <button
+                  className="settings-menu-item"
+                  onClick={async () => {
+                    setSettingsOpen(false);
+                    if (!exportReportsLoaded) {
+                      try {
+                        const data = await apiRequest(`/api/export-reports?client=${encodeURIComponent(clientId)}`);
+                        setExportReports(Array.isArray(data) ? data : []);
+                      } catch {
+                        setExportReports([]);
+                      }
+                      setExportReportsLoaded(true);
+                    }
+                    setExportOpen(true);
+                  }}
+                >
+                  <Download size={15} />
+                  Export Database
                 </button>
                 <button
                   className="settings-menu-item"
@@ -2084,7 +2210,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       )}
 
       {viewMode === "hierarchy" && (
-        <div className="hierarchy-vertical">
+        <div className="hierarchy-vertical" ref={hierarchyContainerRef}>
 
           <div className="hv-above">
           {/* ── OWNERS (above the focus box) ── */}
@@ -2251,6 +2377,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
       {viewMode === "directory" && (
         <div className="directory-grid">
+          <StatsStrip
+            allEntityNodes={sortedEntityNodes}
+            allPersonNodes={sortedPersonNodes}
+            filteredEntityNodes={filteredEntityNodes}
+            filteredPersonNodes={filteredPersonNodes}
+            dataDictionary={dataDictionary}
+            isFiltered={!!dirSearchLower}
+          />
           <div className="directory-search-bar">
             <Search size={15} style={{ color: "#9ca3af", flexShrink: 0 }} />
             <input
@@ -2277,17 +2411,28 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         className="directory-item"
                         style={{ cursor: "pointer" }}
                         onClick={() => {
-                          setEditNodeId(n.id);
-                          setOpenDialog({ type: "edit-node" });
+                          setFocusId(n.id);
+                          setViewMode("hierarchy");
                         }}
                       >
                         {n.logo
                           ? <img src={n.logo} alt="" className="directory-thumb" />
                           : <Building2 className="directory-icon" />}
-                        <div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                           <div className="directory-name">{n.name}</div>
                           <div className="directory-meta">{n.id}</div>
                         </div>
+                        <button
+                          className="directory-edit-btn"
+                          title="Edit"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditNodeId(n.id);
+                            setOpenDialog({ type: "edit-node" });
+                          }}
+                        >
+                          <Pencil size={13} />
+                        </button>
                       </div>
                     </li>
                   ))}
@@ -2306,17 +2451,28 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         className="directory-item"
                         style={{ cursor: "pointer" }}
                         onClick={() => {
-                          setEditNodeId(n.id);
-                          setOpenDialog({ type: "edit-node" });
+                          setFocusId(n.id);
+                          setViewMode("hierarchy");
                         }}
                       >
                         {n.photo
                           ? <img src={n.photo} alt="" className="directory-thumb directory-thumb--round" />
                           : <Users className="directory-icon" />}
-                        <div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                           <div className="directory-name">{n.name}</div>
                           <div className="directory-meta">{n.id}</div>
                         </div>
+                        <button
+                          className="directory-edit-btn"
+                          title="Edit"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditNodeId(n.id);
+                            setOpenDialog({ type: "edit-node" });
+                          }}
+                        >
+                          <Pencil size={13} />
+                        </button>
                       </div>
                     </li>
                   ))}
@@ -2428,6 +2584,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         <th>Applies To</th>
                         <th>Multi-value</th>
                         <th>Valid Values</th>
+                        <th>Stats</th>
                         <th></th>
                       </tr>
                     </thead>
@@ -2450,6 +2607,36 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         <td style={{ color: "#6b7280" }}></td>
                         <td></td>
                       </tr>
+                      {/* Operational Role — built-in entity field */}
+                      <tr>
+                        <td><em style={{ color: "#6b7280" }}>Operational Role</em></td>
+                        <td style={{ color: "#6b7280" }}>Dropdown</td>
+                        <td style={{ color: "#6b7280" }}>Entity</td>
+                        <td style={{ color: "#6b7280" }}>No</td>
+                        <td style={{ color: "#6b7280" }}>Active, Passive, Mixed</td>
+                        <td style={{ color: "#6b7280" }}>✓</td>
+                        <td></td>
+                      </tr>
+                      {/* Legal Status — built-in entity field */}
+                      <tr>
+                        <td><em style={{ color: "#6b7280" }}>Legal Status</em></td>
+                        <td style={{ color: "#6b7280" }}>Dropdown</td>
+                        <td style={{ color: "#6b7280" }}>Entity</td>
+                        <td style={{ color: "#6b7280" }}>No</td>
+                        <td style={{ color: "#6b7280" }}>Good Standing, Dormant, Dissolved, Suspended</td>
+                        <td style={{ color: "#6b7280" }}>✓</td>
+                        <td></td>
+                      </tr>
+                      {/* Status — built-in person field */}
+                      <tr>
+                        <td><em style={{ color: "#6b7280" }}>Status</em></td>
+                        <td style={{ color: "#6b7280" }}>Dropdown</td>
+                        <td style={{ color: "#6b7280" }}>Person</td>
+                        <td style={{ color: "#6b7280" }}>No</td>
+                        <td style={{ color: "#6b7280" }}>Active, Inactive, Deceased, Former</td>
+                        <td style={{ color: "#6b7280" }}>✓</td>
+                        <td></td>
+                      </tr>
                       {[...dataDictionary]
                         .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
                         .map((entry, idx, sorted) => (
@@ -2468,6 +2655,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                               : (entry.validValues || []).length > 0
                                 ? entry.validValues.join(", ")
                                 : <span style={{ color: "#9ca3af" }}>Free-form</span>}
+                          </td>
+                          <td style={{ textAlign: "center" }}>
+                            {entry.showInStats ? "✓" : ""}
                           </td>
                           <td>
                             <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -2573,6 +2763,21 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   />
                 </div>
               ) : null}
+              {/* Show in Stats — only available when field has fixed valid values */}
+              {(ddEntryDraft.validValuesText.trim().split("\n").filter(Boolean).length > 0) && (
+                <div className="form-row">
+                  <label className="form-label">Show in statistics</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <Switch
+                      checked={ddEntryDraft.showInStats}
+                      onCheckedChange={(v) => setDdEntryDraft((prev) => ({ ...prev, showInStats: v }))}
+                    />
+                    <span style={{ fontSize: 14, color: ddEntryDraft.showInStats ? "#374151" : "#6b7280" }}>
+                      {ddEntryDraft.showInStats ? "Counts shown in directory stats bar" : "Not shown in stats"}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
             <DialogFooter style={{ marginTop: 16 }}>
               <Button variant="secondary" onClick={() => setOpenDialog({ type: "data-dictionary" })}>Cancel</Button>
@@ -2771,6 +2976,54 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 apiBase={apiBase}
                 token={token}
               />
+              {/* Built-in status fields */}
+              {newNode.kind === "entity" && (
+                <>
+                  <div className="form-row">
+                    <label className="form-label">Operational Role</label>
+                    <select
+                      className="form-input"
+                      value={newNode.operationalRole}
+                      onChange={(e) => setNewNode((prev) => ({ ...prev, operationalRole: e.target.value }))}
+                    >
+                      <option value="">— select —</option>
+                      <option value="Active">Active</option>
+                      <option value="Passive">Passive</option>
+                      <option value="Mixed">Mixed</option>
+                    </select>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">Legal Status</label>
+                    <select
+                      className="form-input"
+                      value={newNode.legalStatus}
+                      onChange={(e) => setNewNode((prev) => ({ ...prev, legalStatus: e.target.value }))}
+                    >
+                      <option value="">— select —</option>
+                      <option value="Good Standing">Good Standing</option>
+                      <option value="Dormant">Dormant</option>
+                      <option value="Dissolved">Dissolved</option>
+                      <option value="Suspended">Suspended</option>
+                    </select>
+                  </div>
+                </>
+              )}
+              {newNode.kind === "person" && (
+                <div className="form-row">
+                  <label className="form-label">Status</label>
+                  <select
+                    className="form-input"
+                    value={newNode.personStatus}
+                    onChange={(e) => setNewNode((prev) => ({ ...prev, personStatus: e.target.value }))}
+                  >
+                    <option value="">— select —</option>
+                    <option value="Active">Active</option>
+                    <option value="Inactive">Inactive</option>
+                    <option value="Deceased">Deceased</option>
+                    <option value="Former">Former</option>
+                  </select>
+                </div>
+              )}
               {[...dataDictionary]
                 .filter((f) => f.appliesTo === "both" || f.appliesTo === newNode.kind)
                 .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
@@ -2816,6 +3069,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     client: clientId,
                     photo: newNode.kind === "person" ? (newNode.photo || "") : "",
                     logo: newNode.kind === "entity" ? (newNode.logo || "") : "",
+                    operationalRole: newNode.kind === "entity" ? (newNode.operationalRole || "") : "",
+                    legalStatus: newNode.kind === "entity" ? (newNode.legalStatus || "") : "",
+                    personStatus: newNode.kind === "person" ? (newNode.personStatus || "") : "",
                     customFields: newNode.customFields || {},
                   };
                   try {
@@ -2825,7 +3081,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     });
                     setNodeList((prev) => [...prev, payload]);
                     if (!focusId) setFocusId(id);
-                    setNewNode({ name: "", kind: newNode.kind, photo: "", logo: "", customFields: {} });
+                    setNewNode({ name: "", kind: newNode.kind, photo: "", logo: "", operationalRole: "", legalStatus: "", personStatus: "", customFields: {} });
                     setRemoteStatus("connected");
                     setOpenDialog(null);
                   } catch (err) {
@@ -3162,6 +3418,54 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 apiBase={apiBase}
                 token={token}
               />
+              {/* Built-in status fields */}
+              {nodeDraft.kind === "entity" && (
+                <>
+                  <div className="form-row">
+                    <label className="form-label">Operational Role</label>
+                    <select
+                      className="form-input"
+                      value={nodeDraft.operationalRole}
+                      onChange={(e) => setNodeDraft((prev) => ({ ...prev, operationalRole: e.target.value }))}
+                    >
+                      <option value="">— select —</option>
+                      <option value="Active">Active</option>
+                      <option value="Passive">Passive</option>
+                      <option value="Mixed">Mixed</option>
+                    </select>
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">Legal Status</label>
+                    <select
+                      className="form-input"
+                      value={nodeDraft.legalStatus}
+                      onChange={(e) => setNodeDraft((prev) => ({ ...prev, legalStatus: e.target.value }))}
+                    >
+                      <option value="">— select —</option>
+                      <option value="Good Standing">Good Standing</option>
+                      <option value="Dormant">Dormant</option>
+                      <option value="Dissolved">Dissolved</option>
+                      <option value="Suspended">Suspended</option>
+                    </select>
+                  </div>
+                </>
+              )}
+              {nodeDraft.kind === "person" && (
+                <div className="form-row">
+                  <label className="form-label">Status</label>
+                  <select
+                    className="form-input"
+                    value={nodeDraft.personStatus}
+                    onChange={(e) => setNodeDraft((prev) => ({ ...prev, personStatus: e.target.value }))}
+                  >
+                    <option value="">— select —</option>
+                    <option value="Active">Active</option>
+                    <option value="Inactive">Inactive</option>
+                    <option value="Deceased">Deceased</option>
+                    <option value="Former">Former</option>
+                  </select>
+                </div>
+              )}
               {[...dataDictionary]
                 .filter((f) => f.appliesTo === "both" || f.appliesTo === nodeDraft.kind)
                 .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
@@ -3225,6 +3529,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
                     setExportResultAndRevoke({ status: "exporting", fileName: pendingFileName });
                     setIsPdfExporting(true);
+                    pdfCancelRef.current = false;
+                    setPdfProgress(null);
                     try {
                       const result = await generateEntityPdf({
                         nodeId: editNodeId,
@@ -3232,16 +3538,19 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         relList,
                         dataDictionary,
                         clientName: clientDisplayName || toSentenceCase(clientId),
+                        isCancelled: () => pdfCancelRef.current,
+                        onProgress: (current, total) => setPdfProgress({ current, total }),
                         apiBase,
                         token,
                       });
                       if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
                     } finally {
                       setIsPdfExporting(false);
+                      setPdfProgress(null);
                     }
                   }}
                 >
-                  Export
+                  Print
                 </Button>
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -3297,6 +3606,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       newId: newId !== editNodeId ? newId : null,
                       photo: nodeDraft.kind === "person" ? (nodeDraft.photo || "") : "",
                       logo: nodeDraft.kind === "entity" ? (nodeDraft.logo || "") : "",
+                      operationalRole: nodeDraft.kind === "entity" ? (nodeDraft.operationalRole || "") : "",
+                      legalStatus: nodeDraft.kind === "entity" ? (nodeDraft.legalStatus || "") : "",
+                      personStatus: nodeDraft.kind === "person" ? (nodeDraft.personStatus || "") : "",
                       customFields: nodeDraft.customFields || {},
                     };
                     apiRequest(`/api/nodes/${editNodeId}`, {
@@ -3314,6 +3626,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                   kind: nodeDraft.kind,
                                   photo: payload.photo,
                                   logo: payload.logo,
+                                  operationalRole: payload.operationalRole,
+                                  legalStatus: payload.legalStatus,
+                                  personStatus: payload.personStatus,
                                   customFields: payload.customFields,
                                   client: n.client || clientId,
                                 }
@@ -3756,16 +4071,96 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         )}
       </Dialog>
 
+      {/* ── Print Entity Book dialog (directory mode) ── */}
+      <Dialog open={printDialogOpen} onOpenChange={setPrintDialogOpen}>
+        <DialogContent style={{ maxWidth: 360 }}>
+          <DialogHeader>
+            <DialogTitle>Print Entity Book</DialogTitle>
+          </DialogHeader>
+          <div style={{ padding: "8px 0 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+            <p style={{ fontSize: 13, color: "#64748b", margin: 0 }}>
+              Select page types to include for each entity in the current view.
+              Pages are interleaved: hierarchy then detail for each entity.
+            </p>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={printHierarchy}
+                onChange={(e) => setPrintHierarchy(e.target.checked)}
+              />
+              Hierarchy pages
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={printDetail}
+                onChange={(e) => setPrintDetail(e.target.checked)}
+              />
+              Detail pages
+            </label>
+            {(printHierarchy || printDetail) && (() => {
+              const scopeNodes = dirSearch.trim()
+                ? [...filteredEntityNodes, ...filteredPersonNodes]
+                : nodeList;
+              return (
+                <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>
+                  {scopeNodes.length} {scopeNodes.length === 1 ? "item" : "items"} in scope
+                </p>
+              );
+            })()}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPrintDialogOpen(false)}>Cancel</Button>
+            <Button
+              disabled={(!printHierarchy && !printDetail) || isPdfExporting}
+              onClick={async () => {
+                setPrintDialogOpen(false);
+                setIsPdfExporting(true);
+                const suffix = printHierarchy && printDetail ? "full" : printHierarchy ? "hierarchy" : "detail";
+                const safeBase = `${clientDisplayName || toSentenceCase(clientId)}-entity-book-${suffix}`
+                  .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+                setExportResultAndRevoke({ status: "exporting", fileName: `${safeBase}.pdf` });
+                pdfCancelRef.current = false;
+                setPdfProgress(null);
+                try {
+                  const printNodes = dirSearch.trim()
+                    ? [...filteredEntityNodes, ...filteredPersonNodes]
+                    : nodeList;
+                  const result = await generateEntityBookInterleaved({
+                    nodes: printNodes,
+                    nodeList,
+                    relList,
+                    dataDictionary,
+                    clientName: clientDisplayName || toSentenceCase(clientId),
+                    includeHierarchy: printHierarchy,
+                    includeDetail: printDetail,
+                    isCancelled: () => pdfCancelRef.current,
+                    onProgress: (current, total) => setPdfProgress({ current, total }),
+                    fileName: safeBase,
+                    apiBase,
+                    token,
+                  });
+                  if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
+                } finally {
+                  setIsPdfExporting(false);
+                  setPdfProgress(null);
+                }
+              }}
+            >
+              {isPdfExporting
+                ? <><Loader2 size={14} className="animate-spin" style={{ marginRight: 6 }} />Printing…</>
+                : "Print"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <ExportDialog
         open={exportOpen}
         onClose={() => setExportOpen(false)}
         onExported={(result) => setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName })}
         onExportStart={({ fileName }) => setExportResultAndRevoke({ status: "exporting", fileName })}
-        exportNodes={
-          viewMode === "directory" && dirSearch.trim()
-            ? [...filteredEntityNodes, ...filteredPersonNodes]
-            : nodeList
-        }
+        exportNodes={nodeList}
         nodeList={nodeList}
         relList={relList}
         dataDictionary={dataDictionary}
@@ -3799,22 +4194,46 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         <DialogContent style={{ maxWidth: 400 }}>
           <DialogHeader style={{ marginBottom: 12, marginLeft: 0 }}>
             <DialogTitle>
-              {exportResult?.status === "ready" ? "Export ready" : "Exporting…"}
+              {exportResult?.status === "ready" ? "Document ready" : "Printing…"}
             </DialogTitle>
           </DialogHeader>
 
           {exportResult?.status !== "ready" ? (
-            /* ── In-progress pill ── */
-            <div className="export-progress-pill">
-              <Loader2 size={14} className="export-spin" style={{ flexShrink: 0 }} />
-              <span>Building {exportResult?.fileName || "…"}</span>
-            </div>
+            /* ── In-progress ── */
+            <>
+              {!pdfProgress ? (
+                <p style={{ fontSize: 13, color: "#64748b", margin: 0 }}>Preparing…</p>
+              ) : (
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#64748b", marginBottom: 4 }}>
+                    <span>Entity {pdfProgress.current} of {pdfProgress.total}</span>
+                    <span>{Math.round((pdfProgress.current / pdfProgress.total) * 100)}%</span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 3, background: "#e2e8f0", overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%", borderRadius: 3, background: "#1e293b",
+                      width: `${(pdfProgress.current / pdfProgress.total) * 100}%`,
+                      transition: "width 0.2s ease",
+                    }} />
+                  </div>
+                </div>
+              )}
+              <DialogFooter style={{ marginTop: 16 }}>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    pdfCancelRef.current = true;
+                    setExportResultAndRevoke(null);
+                    setIsPdfExporting(false);
+                  }}
+                >
+                  Cancel
+                </Button>
+              </DialogFooter>
+            </>
           ) : (
             /* ── Ready state ── */
             <>
-              <p style={{ fontSize: 13, color: "#374151", marginBottom: 12, wordBreak: "break-all" }}>
-                <strong>{exportResult.fileName}</strong>
-              </p>
               <DialogFooter style={{ gap: 8 }}>
                 <Button
                   variant="outline"

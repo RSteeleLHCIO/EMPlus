@@ -986,7 +986,7 @@ app.get("/api/data-dictionary", async (req, res) => {
 app.post("/api/data-dictionary", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { prompt, dataType, appliesTo, multiValue, validValues, phoneTypes } = req.body || {};
+    const { prompt, dataType, appliesTo, multiValue, validValues, phoneTypes, showInStats } = req.body || {};
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: "prompt is required" });
     }
@@ -1009,6 +1009,7 @@ app.post("/api/data-dictionary", async (req, res) => {
       multiValue: !!multiValue,
       validValues: Array.isArray(validValues) ? validValues.filter(Boolean) : [],
       phoneTypes: Array.isArray(phoneTypes) ? phoneTypes.filter(Boolean) : [],
+      showInStats: !!showInStats,
       sortOrder: existingFields.length,
       createdAt: now,
       updatedAt: now,
@@ -1026,7 +1027,7 @@ app.put("/api/data-dictionary/:fieldId", async (req, res) => {
   try {
     const client = req.auth.clientId;
     const fieldId = req.params.fieldId;
-    const { prompt, dataType, appliesTo, multiValue, validValues, phoneTypes } = req.body || {};
+    const { prompt, dataType, appliesTo, multiValue, validValues, phoneTypes, showInStats } = req.body || {};
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: "prompt is required" });
     }
@@ -1046,6 +1047,7 @@ app.put("/api/data-dictionary/:fieldId", async (req, res) => {
       multiValue: !!multiValue,
       validValues: Array.isArray(validValues) ? validValues.filter(Boolean) : [],
       phoneTypes: Array.isArray(phoneTypes) ? phoneTypes.filter(Boolean) : [],
+      showInStats: !!showInStats,
       updatedAt: new Date().toISOString(),
     };
     await putDDField(item);

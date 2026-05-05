@@ -566,6 +566,82 @@ input[type="text"] {
     align-items: start;
 }
 
+/* ── Stats strip ─────────────────────────────────────────────────────── */
+.stats-strip {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 8px 12px 6px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    margin-bottom: 2px;
+}
+.stats-filtered-badge {
+    display: inline-block;
+    align-self: flex-start;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #b45309;
+    background: #fef3c7;
+    border: 1px solid #fcd34d;
+    border-radius: 4px;
+    padding: 1px 7px;
+    margin-bottom: 2px;
+}
+.stats-line1 {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1e293b;
+}
+.stats-line2 {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    font-size: 12px;
+    color: #374151;
+    cursor: pointer;
+    user-select: none;
+    min-height: 20px;
+}
+.stats-slide-label {
+    font-weight: 600;
+    color: #64748b;
+    margin-right: 2px;
+}
+.stats-slide-value {
+    background: #e0f2fe;
+    color: #0369a1;
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 12px;
+    font-weight: 500;
+}
+.stats-slide-unset {
+    color: #9ca3af;
+    font-size: 12px;
+}
+.stats-dots {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 6px;
+}
+.stats-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #cbd5e1;
+    display: inline-block;
+}
+.stats-dot--active {
+    background: #0369a1;
+}
+
 .directory-search-bar {
     grid-column: 1 / -1;
     display: flex;
@@ -764,6 +840,26 @@ input[type="text"] {
     border: 1px solid #e5e7eb;
     border-radius: 8px;
     padding: 10px;
+}
+
+.directory-edit-btn {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 6px;
+    border: none;
+    background: transparent;
+    color: #9ca3af;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+    margin-left: auto;
+}
+
+.directory-edit-btn:hover {
+    background: #f1f5f9;
+    color: #374151;
 }
 
 .directory-scroll {
@@ -1311,7 +1407,7 @@ input[type="time"].no-native-picker {
     flex-direction: column;
     align-items: center;
     overflow-y: auto;
-    padding: 16px 16px 40px;
+    padding: 35vh 16px 35vh;
     scroll-behavior: smooth;
 }
 
