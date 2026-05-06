@@ -344,6 +344,7 @@ body {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
+    overscroll-behavior: contain;
     min-height: 0;
     margin: 0;
     padding: 0;
@@ -865,6 +866,7 @@ input[type="text"] {
 .directory-scroll {
     max-height: 60vh;
     overflow-y: auto;
+    overscroll-behavior: contain;
     padding-right: 4px;
 }
 

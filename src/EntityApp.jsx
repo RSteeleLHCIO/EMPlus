@@ -2169,7 +2169,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 <div style={{ fontSize: 13, color: "#b45309" }}>
                   {uploadSummary.errors.length} rows rejected.
                 </div>
-                <div style={{ maxHeight: 140, overflowY: "auto", border: "1px solid #e5e7eb", borderRadius: 8, padding: 8 }}>
+                <div style={{ maxHeight: 140, overflowY: "auto", overscrollBehavior: "contain", border: "1px solid #e5e7eb", borderRadius: 8, padding: 8 }}>
                   {uploadSummary.errors.slice(0, 50).map((err, idx) => (
                     <div key={`${err.row}-${idx}`} style={{ fontSize: 12, color: "#6b7280" }}>
                       Row {err.row}: {err.reason}

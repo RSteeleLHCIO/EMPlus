@@ -190,7 +190,9 @@ const parseOwnershipCsv = (csvText) => {
 
 const buildNodeItem = (
   { id, name, kind, client, address, workPhone, cellPhone, emails, photo,
-    taxId, accountingUrl, hrUrl, logo, customFields, createdAt, updatedAt }
+    taxId, accountingUrl, hrUrl, logo, customFields,
+    operationalRole, legalStatus, personStatus,
+    createdAt, updatedAt }
 ) => ({
   clientId: client,
   nodeId: id,          // DynamoDB sort key — mirrors id
@@ -207,6 +209,9 @@ const buildNodeItem = (
   accountingUrl: accountingUrl || "",
   hrUrl: hrUrl || "",
   logo: logo || "",
+  operationalRole: operationalRole || "",
+  legalStatus: legalStatus || "",
+  personStatus: personStatus || "",
   customFields: customFields || {},
   createdAt,
   updatedAt,
@@ -290,7 +295,7 @@ app.options("*", cors());
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "dynamodb-api", version: "2026-04-18.1419p", features: ["client management"] });
+  res.json({ ok: true, service: "dynamodb-api", version: "2026-05-06.operationalRole", features: ["client management"] });
 });
 
 // ─── AUTH ROUTES (no JWT required) ───────────────────────────────────────────
@@ -499,6 +504,7 @@ app.post("/api/nodes", async (req, res) => {
     const {
       id, name, kind, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo, customFields,
+      operationalRole, legalStatus, personStatus,
     } = req.body || {};
     if (!id || !name || !kind) {
       return res.status(400).json({ error: "id, name, kind are required" });
@@ -509,6 +515,7 @@ app.post("/api/nodes", async (req, res) => {
     const item = buildNodeItem({
       id: normalizedId, name, kind, client, address, workPhone, cellPhone,
       emails, photo, taxId, accountingUrl, hrUrl, logo, customFields,
+      operationalRole, legalStatus, personStatus,
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     });
@@ -671,6 +678,7 @@ app.put("/api/nodes/:id", async (req, res) => {
     const {
       name, kind, newId, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo, customFields,
+      operationalRole, legalStatus, personStatus,
     } = req.body || {};
     if (!id || !name || !kind) {
       return res.status(400).json({ error: "id, name, kind are required" });
@@ -689,6 +697,7 @@ app.put("/api/nodes/:id", async (req, res) => {
     const item = buildNodeItem({
       id: finalId, name, kind, client, address, workPhone, cellPhone,
       emails, photo, taxId, accountingUrl, hrUrl, logo, customFields,
+      operationalRole, legalStatus, personStatus,
       createdAt: existing.createdAt || now,
       updatedAt: now,
     });

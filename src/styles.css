@@ -10,6 +10,7 @@ body,
 body {
     background: #f8fafc;
     overflow-x: hidden;
+    overscroll-behavior-y: none;
 }
 
 .card {
