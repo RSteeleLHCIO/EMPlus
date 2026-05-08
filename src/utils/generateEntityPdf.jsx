@@ -845,3 +845,286 @@ export async function generateEntityBookInterleaved({
   return { url, fileName: outFileName };
 }
 
+// ─── Org Chart Poster ────────────────────────────────────────────────────────
+
+const POSTER = {
+  BOX_W: 100,
+  BOX_H: 40,
+  H_GAP: 12,
+  V_GAP: 44,    // space between bottom of one level and top of next (connector room)
+  MARGIN: 20,
+  PAGE_W: 841.89, // A4 landscape in pts
+  PAGE_H: 595.28,
+};
+
+/**
+ * BFS tree layout: returns levels, parentMap, layoutChildrenMap, nodeX, totalWidth, totalHeight.
+ */
+function computePosterLayout(focusId, relList) {
+  const { BOX_W, BOX_H, H_GAP, V_GAP } = POSTER;
+
+  const visited = new Set([focusId]);
+  const levels = [[focusId]];
+  const parentMap = new Map();
+  const layoutChildrenMap = new Map();
+  let current = [focusId];
+
+  while (true) {
+    const next = [];
+    for (const nodeId of current) {
+      for (const { nodeId: childId } of getOwnedBy(relList, nodeId)) {
+        if (visited.has(childId)) continue;
+        visited.add(childId);
+        parentMap.set(childId, nodeId);
+        if (!layoutChildrenMap.has(nodeId)) layoutChildrenMap.set(nodeId, []);
+        layoutChildrenMap.get(nodeId).push(childId);
+        next.push(childId);
+      }
+    }
+    if (next.length === 0) break;
+    levels.push(next);
+    current = next;
+  }
+
+  // Bottom-up: subtree width
+  const subtreeWidth = new Map();
+  for (let lvl = levels.length - 1; lvl >= 0; lvl--) {
+    for (const nodeId of levels[lvl]) {
+      const children = layoutChildrenMap.get(nodeId) || [];
+      if (children.length === 0) {
+        subtreeWidth.set(nodeId, BOX_W);
+      } else {
+        const w = children.reduce((s, c) => s + (subtreeWidth.get(c) || BOX_W), 0)
+          + H_GAP * (children.length - 1);
+        subtreeWidth.set(nodeId, Math.max(BOX_W, w));
+      }
+    }
+  }
+
+  // Top-down: assign center x positions
+  const nodeX = new Map();
+  const totalWidth = subtreeWidth.get(focusId) || BOX_W;
+  nodeX.set(focusId, totalWidth / 2);
+
+  for (let lvl = 0; lvl < levels.length; lvl++) {
+    for (const nodeId of levels[lvl]) {
+      const cx = nodeX.get(nodeId);
+      const children = layoutChildrenMap.get(nodeId) || [];
+      if (children.length === 0) continue;
+      const totalChildW = children.reduce((s, c) => s + (subtreeWidth.get(c) || BOX_W), 0)
+        + H_GAP * (children.length - 1);
+      let leftX = cx - totalChildW / 2;
+      for (const cid of children) {
+        const cw = subtreeWidth.get(cid) || BOX_W;
+        nodeX.set(cid, leftX + cw / 2);
+        leftX += cw + H_GAP;
+      }
+    }
+  }
+
+  const totalHeight = levels.length * (BOX_H + V_GAP) - V_GAP;
+  return { levels, parentMap, layoutChildrenMap, nodeX, totalWidth, totalHeight };
+}
+
+/**
+ * Synchronous page-count estimate — safe to call during render.
+ * Returns { pages, cols, rows }.
+ */
+export function estimatePosterPageCount(focusId, relList) {
+  const { MARGIN, PAGE_W, PAGE_H } = POSTER;
+  const usableW = PAGE_W - 2 * MARGIN;
+  const usableH = PAGE_H - 2 * MARGIN;
+  const { totalWidth, totalHeight } = computePosterLayout(focusId, relList);
+  const cols = Math.max(1, Math.ceil(totalWidth / usableW));
+  const rows = Math.max(1, Math.ceil(totalHeight / usableH));
+  return { pages: cols * rows, cols, rows };
+}
+
+/**
+ * Generates a tiled org-chart poster PDF using native jsPDF drawing (no html2canvas).
+ */
+export async function generateOrgChartPoster({
+  focusId,
+  nodeList,
+  relList,
+  clientName,
+  isCancelled = () => false,
+  onProgress = null,
+  apiBase,
+  token,
+}) {
+  const { BOX_W, BOX_H, V_GAP, MARGIN, PAGE_W, PAGE_H } = POSTER;
+  const usableW = PAGE_W - 2 * MARGIN;
+  const usableH = PAGE_H - 2 * MARGIN;
+
+  const patchedNodeList = await patchNodeImages(nodeList, apiBase, token);
+
+  const { levels, parentMap, layoutChildrenMap, nodeX, totalWidth, totalHeight } =
+    computePosterLayout(focusId, relList);
+
+  const pageCols = Math.max(1, Math.ceil(totalWidth / usableW));
+  const pageRows = Math.max(1, Math.ceil(totalHeight / usableH));
+  const totalPages = pageCols * pageRows;
+
+  const pdf = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+  let isFirst = true;
+  let pageNum = 0;
+
+  // Draw a horizontal or vertical line segment clipped to the page's virtual window
+  const drawClippedLine = (vx1, vy1, vx2, vy2, oX, oY) => {
+    const maxX = oX + usableW, maxY = oY + usableH;
+    if (vx1 === vx2) {
+      if (vx1 < oX || vx1 > maxX) return;
+      const cy1 = Math.max(Math.min(vy1, vy2), oY);
+      const cy2 = Math.min(Math.max(vy1, vy2), maxY);
+      if (cy1 >= cy2) return;
+      pdf.line(vx1 - oX + MARGIN, cy1 - oY + MARGIN, vx1 - oX + MARGIN, cy2 - oY + MARGIN);
+    } else {
+      if (vy1 < oY || vy1 > maxY) return;
+      const cx1 = Math.max(Math.min(vx1, vx2), oX);
+      const cx2 = Math.min(Math.max(vx1, vx2), maxX);
+      if (cx1 >= cx2) return;
+      pdf.line(cx1 - oX + MARGIN, vy1 - oY + MARGIN, cx2 - oX + MARGIN, vy1 - oY + MARGIN);
+    }
+  };
+
+  for (let row = 0; row < pageRows; row++) {
+    for (let col = 0; col < pageCols; col++) {
+      if (isCancelled()) return null;
+
+      if (!isFirst) pdf.addPage("a4", "landscape");
+      isFirst = false;
+
+      const oX = col * usableW;
+      const oY = row * usableH;
+
+      // ── Page decoration ──────────────────────────────────────────────
+      pdf.setDrawColor(210, 210, 210);
+      pdf.setLineWidth(0.3);
+      pdf.rect(MARGIN, MARGIN, usableW, usableH);
+
+      // Corner alignment dots
+      pdf.setFillColor(190, 190, 190);
+      [[MARGIN, MARGIN], [MARGIN + usableW, MARGIN], [MARGIN, MARGIN + usableH], [MARGIN + usableW, MARGIN + usableH]]
+        .forEach(([x, y]) => pdf.circle(x, y, 1.5, "F"));
+
+      pdf.setFontSize(7);
+      pdf.setTextColor(180, 180, 180);
+      pdf.text(
+        `${clientName || ""}  ·  Org Chart Poster  ·  Page ${pageNum + 1} of ${totalPages}  (col ${col + 1}/${pageCols}  ·  row ${row + 1}/${pageRows})`,
+        MARGIN, MARGIN - 5
+      );
+
+      // ── Connector lines ───────────────────────────────────────────────
+      pdf.setDrawColor(190, 190, 190);
+      pdf.setLineWidth(0.7);
+
+      for (let lvl = 0; lvl < levels.length - 1; lvl++) {
+        const boxTopY = lvl * (BOX_H + V_GAP);
+        const boxBotY = boxTopY + BOX_H;
+        const midY = boxBotY + V_GAP / 2;
+        const nextTopY = (lvl + 1) * (BOX_H + V_GAP);
+
+        for (const nodeId of levels[lvl]) {
+          const children = layoutChildrenMap.get(nodeId) || [];
+          if (children.length === 0) continue;
+          const cx = nodeX.get(nodeId);
+
+          drawClippedLine(cx, boxBotY, cx, midY, oX, oY);
+
+          if (children.length === 1) {
+            drawClippedLine(nodeX.get(children[0]), midY, nodeX.get(children[0]), nextTopY, oX, oY);
+          } else {
+            const leftCX = nodeX.get(children[0]);
+            const rightCX = nodeX.get(children[children.length - 1]);
+            drawClippedLine(leftCX, midY, rightCX, midY, oX, oY);
+            for (const cid of children) {
+              drawClippedLine(nodeX.get(cid), midY, nodeX.get(cid), nextTopY, oX, oY);
+            }
+          }
+        }
+      }
+
+      // ── Boxes ─────────────────────────────────────────────────────────
+      for (let lvl = 0; lvl < levels.length; lvl++) {
+        const boxTopY = lvl * (BOX_H + V_GAP);
+        const boxBotY = boxTopY + BOX_H;
+        if (boxBotY < oY || boxTopY > oY + usableH) continue;
+
+        const isRoot = lvl === 0;
+
+        for (const nodeId of levels[lvl]) {
+          const cx = nodeX.get(nodeId);
+          const vLeft = cx - BOX_W / 2;
+          const vRight = cx + BOX_W / 2;
+          if (vRight < oX || vLeft > oX + usableW) continue;
+
+          const px = vLeft - oX + MARGIN;
+          const py = boxTopY - oY + MARGIN;
+          const visLeft = Math.max(px, MARGIN);
+          const visRight = Math.min(px + BOX_W, MARGIN + usableW);
+          const visW = visRight - visLeft;
+          if (visW <= 0) continue;
+
+          const node = getNode(patchedNodeList, nodeId);
+          const name = node?.name || nodeId;
+
+          if (isRoot) {
+            pdf.setFillColor(239, 246, 255);
+            pdf.setDrawColor(37, 99, 235);
+            pdf.setLineWidth(1.2);
+          } else {
+            pdf.setFillColor(255, 255, 255);
+            pdf.setDrawColor(180, 180, 180);
+            pdf.setLineWidth(0.6);
+          }
+          pdf.roundedRect(visLeft, py, visW, BOX_H, 3, 3, "FD");
+
+          if (visW >= 24) {
+            const innerW = Math.min(BOX_W - 8, visW - 6);
+            const fontSize = isRoot ? 8.5 : 7.5;
+            pdf.setFontSize(fontSize);
+            pdf.setTextColor(isRoot ? 15 : 50, isRoot ? 30 : 50, isRoot ? 100 : 50);
+
+            const lines = pdf.splitTextToSize(name, innerW);
+            const displayLines = lines.slice(0, 2);
+            if (lines.length > 2) {
+              displayLines[1] = displayLines[1].replace(/\.{0,3}$/, "") + "…";
+            }
+            const lineH = fontSize * 1.25;
+            const totalTextH = displayLines.length * lineH;
+            const textStartY = py + (BOX_H - totalTextH) / 2 + lineH * 0.78;
+
+            displayLines.forEach((line, i) => {
+              const lw = pdf.getTextWidth(line);
+              pdf.text(line, visLeft + (visW - lw) / 2, textStartY + i * lineH);
+            });
+
+            // Ownership % at bottom
+            const pid = parentMap.get(nodeId);
+            if (pid) {
+              const rel = relList.find(r => r.type === "owns" && r.from === pid && r.to === nodeId);
+              const pct = rel?.percent;
+              if (pct != null && Number.isFinite(Number(pct)) && Number(pct) !== 100) {
+                pdf.setFontSize(5.5);
+                pdf.setTextColor(140, 140, 140);
+                const pctStr = `${Number(pct)}%`;
+                pdf.text(pctStr, visLeft + (visW - pdf.getTextWidth(pctStr)) / 2, py + BOX_H - 4);
+              }
+            }
+          }
+        }
+      }
+
+      pageNum++;
+      onProgress?.(pageNum, totalPages);
+    }
+  }
+
+  const focusNode = getNode(nodeList, focusId);
+  const safeName = `${focusNode?.name || focusId}-org-chart-poster`
+    .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+  const blob = pdf.output("blob");
+  const url = URL.createObjectURL(blob);
+  return { url, fileName: `${safeName}.pdf` };
+}

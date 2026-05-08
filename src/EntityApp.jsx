@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Printer } from "lucide-react";
-import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved } from "./utils/generateEntityPdf";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, FileDown } from "lucide-react";
+import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved, estimatePosterPageCount, generateOrgChartPoster } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone } from "./utils/helpers";
 import { Input } from "./components/ui/input";
@@ -622,6 +622,155 @@ const TreeNode = ({
   );
 };
 
+// ── Collect all descendant nodeIds, cycle-safe ─────────────────────────────────────────
+const getAllDescendants = (relList, rootId, initialVisited = new Set()) => {
+  const result = new Set();
+  const stack = [{ id: rootId, seen: new Set(initialVisited) }];
+  while (stack.length) {
+    const { id, seen } = stack.pop();
+    for (const child of getOwnedBy(relList, id)) {
+      if (seen.has(child.nodeId)) continue;
+      result.add(child.nodeId);
+      const nextSeen = new Set(seen);
+      nextSeen.add(child.nodeId);
+      stack.push({ id: child.nodeId, seen: nextSeen });
+    }
+  }
+  return result;
+};
+
+// ── HvNeighborBox: a single child tile in the explodable Owns section ────────────────
+const HvNeighborBox = ({ item, nodeList, relList, explodedNodes, onExplode, onExplodeAll, onFocus, isCyclic = false }) => {
+  const node = getNode(nodeList, item.nodeId);
+  if (!node) return null;
+  const pct = item.rel?.percent;
+  const showPct = pct != null && Number.isFinite(Number(pct));
+  const isZero = showPct && Number(pct) === 0;
+  const childCount = getOwnedBy(relList, item.nodeId).length;
+  const isExploded = explodedNodes.has(item.nodeId);
+  const classNames = [
+    "hv-neighbor-box",
+    isZero ? "hv-neighbor-box--zero" : "",
+    isCyclic ? "hv-neighbor-box--cyclic" : "",
+  ].filter(Boolean).join(" ");
+  return (
+    <div
+      className={classNames}
+      style={{ position: "relative" }}
+      data-hv-node-id={item.nodeId}
+      onClick={() => onFocus(item.nodeId)}
+      title={isCyclic ? "Circular ownership — already shown above" : isZero ? "Non-economic / 0% interest" : "Click to focus"}
+    >
+      {node.kind === "person"
+        ? node.photo
+          ? <img src={node.photo} alt="" className="hv-neighbor-photo" />
+          : <Users size={22} className="hv-neighbor-icon" />
+        : node.logo
+          ? <img src={node.logo} alt="" className="hv-neighbor-logo" />
+          : <Building2 size={22} className="hv-neighbor-icon" />
+      }
+      <div className="hv-neighbor-name">{node.name}</div>
+      {showPct && <div className="hv-neighbor-pct">{Number(pct)}%</div>}
+      {isCyclic && <div className="hv-neighbor-cycle-badge" title="Circular reference">∞</div>}
+      {!isCyclic && childCount > 0 && (
+        <>
+          <button
+            className={`hv-explode-btn${isExploded ? " hv-explode-btn--active" : ""}`}
+            title={isExploded ? `Collapse ${childCount} direct child${childCount === 1 ? "" : "ren"}` : `Expand ${childCount} direct child${childCount === 1 ? "" : "ren"}`}
+            onClick={(e) => { e.stopPropagation(); onExplode(item.nodeId); }}
+          >
+            <ChevronDown size={12} style={{ transition: "transform 0.2s", transform: isExploded ? "rotate(180deg)" : "none" }} />
+          </button>
+          {!isExploded && (() => {
+            const totalDesc = getAllDescendants(relList, item.nodeId).size;
+            return (
+              <button
+                className="hv-explode-all-btn"
+                title={`Expand all — ${totalDesc} node${totalDesc === 1 ? "" : "s"} in tree`}
+                onClick={(e) => { e.stopPropagation(); onExplodeAll(item.nodeId); }}
+              >
+                <ChevronsDown size={12} />
+              </button>
+            );
+          })()}
+        </>
+      )}
+    </div>
+  );
+};
+
+// ── ExplodableChildRow: recursive indented tree ─────────────────────────────
+// depth=0 primary children: horizontal wrap when nothing exploded, vertical once any exploded.
+// depth>0 always vertical (leaf rows included), indented one box+gap unit per level.
+// visitedIds tracks every ancestor shown so far — cyclic nodes are flagged but still rendered.
+const ExplodableChildRow = ({ items, nodeList, relList, explodedNodes, onExplode, onExplodeAll, onFocus, depth = 0, visitedIds = new Set() }) => {
+  const anyExploded = items.some(item => !visitedIds.has(item.nodeId) && explodedNodes.has(item.nodeId));
+
+  // Primary level with nothing exploded → original horizontal wrap row
+  if (depth === 0 && !anyExploded) {
+    return (
+      <div className="hv-owned-row">
+        {items.map(item => (
+          <HvNeighborBox
+            key={item.nodeId}
+            item={item}
+            nodeList={nodeList}
+            relList={relList}
+            explodedNodes={explodedNodes}
+            onExplode={onExplode}
+            onExplodeAll={onExplodeAll}
+            onFocus={onFocus}
+            isCyclic={visitedIds.has(item.nodeId)}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  // Vertical column — either primary level after explosion, or any sub-level
+  return (
+    <div className="hv-owned-column">
+      {items.map(item => {
+        const isCyclic = visitedIds.has(item.nodeId);
+        // Cyclic nodes are shown (red, no explode) but never expanded further
+        const isExploded = !isCyclic && explodedNodes.has(item.nodeId);
+        const nextVisited = new Set(visitedIds);
+        nextVisited.add(item.nodeId);
+        const childItems = isExploded ? getOwnedBy(relList, item.nodeId) : [];
+        return (
+          <React.Fragment key={item.nodeId}>
+            <HvNeighborBox
+              item={item}
+              nodeList={nodeList}
+              relList={relList}
+              explodedNodes={explodedNodes}
+              onExplode={onExplode}
+              onExplodeAll={onExplodeAll}
+              onFocus={onFocus}
+              isCyclic={isCyclic}
+            />
+            {isExploded && childItems.length > 0 && (
+              <div className="hv-explode-indent">
+                <ExplodableChildRow
+                  items={childItems}
+                  nodeList={nodeList}
+                  relList={relList}
+                  explodedNodes={explodedNodes}
+                  onExplode={onExplode}
+                  onExplodeAll={onExplodeAll}
+                  onFocus={onFocus}
+                  depth={depth + 1}
+                  visitedIds={nextVisited}
+                />
+              </div>
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+};
+
 const slugify = (value) =>
   value
     .toLowerCase()
@@ -781,6 +930,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   });
   // homeScreen is loaded from the server after login (see effect below)
   const [viewMode, setViewMode] = useState(() => homeScreen?.viewMode ?? "hierarchy");
+  const [explodedNodes, setExplodedNodes] = useState(new Set());
+  const [explodedAnchorId, setExplodedAnchorId] = useState(null);
   const [focusId, setFocusId] = useState(() => {
     if (typeof window === "undefined") return "entity:A";
     try {
@@ -975,6 +1126,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [printDialogOpen, setPrintDialogOpen] = useState(false);
   const [printHierarchy, setPrintHierarchy] = useState(true);
   const [printDetail, setPrintDetail] = useState(true);
+  const [posterConfirmed, setPosterConfirmed] = useState(false);
   const [exportResult, setExportResult] = useState(null); // { url, fileName }
   const exportResultRef = useRef(null);
   const pdfCancelRef = useRef(false);
@@ -1752,6 +1904,26 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return () => clearTimeout(t);
   }, [focusId, viewMode, nodeList]);
 
+  // Reset exploded child nodes whenever the focused entity changes
+  useEffect(() => { setExplodedNodes(new Set()); setExplodedAnchorId(null); }, [focusId]);
+
+  // Scroll the just-exploded node into view so it stays visible
+  useEffect(() => {
+    if (!explodedAnchorId || !hierarchyContainerRef.current) return;
+    const container = hierarchyContainerRef.current;
+    requestAnimationFrame(() => {
+      const el = container.querySelector(`[data-hv-node-id="${CSS.escape(explodedAnchorId)}"]`);
+      if (!el) return;
+      const containerRect = container.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const elCenter = elRect.top + elRect.height / 2;
+      const containerCenter = containerRect.top + containerRect.height / 2;
+      const delta = elCenter - containerCenter;
+      container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
+    });
+    setExplodedAnchorId(null);
+  }, [explodedAnchorId]);
+
   useEffect(() => {
     if (!settingsOpen) return;
     const handler = (e) => {
@@ -1860,42 +2032,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             type="button"
             variant="outline"
             className="btn-icon"
-            aria-label={viewMode === "hierarchy" ? "Print" : "Print Entity Book"}
-            title={viewMode === "hierarchy" ? "Print" : "Print Entity Book"}
+            aria-label={viewMode === "hierarchy" ? "Save as PDF" : "Save Entity Book as PDF"}
+            title={viewMode === "hierarchy" ? "Save as PDF" : "Save Entity Book as PDF"}
             disabled={isPdfExporting}
             onClick={async () => {
-              if (viewMode === "hierarchy") {
-                if (isPdfExporting) return;
-                const focusNode = nodeList.find((n) => n.id === focusId);
-                const pendingFileName = `${focusNode?.name || focusId}.pdf`
-                  .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
-                setExportResultAndRevoke({ status: "exporting", fileName: pendingFileName });
-                setIsPdfExporting(true);
-                pdfCancelRef.current = false;
-                setPdfProgress(null);
-                try {
-                  const result = await generateEntityPdf({
-                    nodeId: focusId,
-                    nodeList,
-                    relList,
-                    dataDictionary,
-                    clientName: clientDisplayName || toSentenceCase(clientId),
-                    isCancelled: () => pdfCancelRef.current,
-                    onProgress: (current, total) => setPdfProgress({ current, total }),
-                    apiBase,
-                    token,
-                  });
-                  if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
-                } finally {
-                  setIsPdfExporting(false);
-                  setPdfProgress(null);
-                }
-              } else {
-                setPrintDialogOpen(true);
-              }
+              setPrintDialogOpen(true);
             }}
           >
-            {isPdfExporting ? <Loader2 size={18} className="animate-spin" /> : <Printer size={18} />}
+            {isPdfExporting ? <Loader2 size={18} className="animate-spin" /> : <FileDown size={18} />}
           </Button>
           <div className="settings-anchor" ref={settingsRef}>
             <Button
@@ -2290,17 +2434,48 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             {(() => {
               const ownerCount = focusNode?.kind !== "person" ? getOwnersOf(relList, focusId).length : 0;
               const ownedCount = getOwnedBy(relList, focusId).length;
+              const totalDesc = ownedCount > 0 ? getAllDescendants(relList, focusId).size : 0;
+              const hasMore = totalDesc > ownedCount;
               return (ownerCount > 0 || ownedCount > 0) ? (
                 <div className="hv-focus-counts">
                   {ownerCount > 0 && (
                     <span>{ownerCount} {ownerCount === 1 ? "Owner" : "Owners"}</span>
                   )}
                   {ownedCount > 0 && (
-                    <span>Owns {ownedCount} {ownedCount === 1 ? "entity" : "entities"}</span>
+                    <span>
+                      {ownedCount} direct {ownedCount === 1 ? "subsidiary" : "subsidiaries"}
+                      {hasMore && ` · ${totalDesc} total in tree`}
+                    </span>
                   )}
                 </div>
               ) : null;
             })()}
+            {getOwnedBy(relList, focusId).length > 0 && (
+              explodedNodes.size > 0 ? (
+                <button
+                  className="hv-focus-explode-all-btn"
+                  title="Collapse all — return to first level"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setExplodedNodes(new Set());
+                  }}
+                >
+                  <ChevronsUp size={14} />
+                </button>
+              ) : (
+                <button
+                  className="hv-focus-explode-all-btn"
+                  title="Expand all descendants"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const allDesc = getAllDescendants(relList, focusId, new Set([focusId]));
+                    setExplodedNodes(prev => new Set([...prev, ...allDesc]));
+                  }}
+                >
+                  <ChevronsDown size={14} />
+                </button>
+              )
+            )}
           </div>
 
           <div className="hv-below">
@@ -2315,36 +2490,28 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               <div className="hv-section-header">
                 <span className="hv-section-label">Owns</span>
               </div>
-              <div className="hv-owned-row">
-              {getOwnedBy(relList, focusId).map((item) => {
-                const ownedNode = getNode(nodeList, item.nodeId);
-                if (!ownedNode) return null;
-                const pct = item.rel?.percent;
-                const showPct = pct != null && Number.isFinite(Number(pct));
-                const isZero = showPct && Number(pct) === 0;
-                return (
-                  <div
-                    key={item.nodeId}
-                    className={`hv-neighbor-box${isZero ? " hv-neighbor-box--zero" : ""}`}
-                    onClick={() => setFocusId(item.nodeId)}
-                    title={isZero ? "Non-economic / 0% interest" : "Click to focus"}
-                  >
-                    {ownedNode.kind === "person"
-                      ? ownedNode.photo
-                        ? <img src={ownedNode.photo} alt="" className="hv-neighbor-photo" />
-                        : <Users size={22} className="hv-neighbor-icon" />
-                      : ownedNode.logo
-                        ? <img src={ownedNode.logo} alt="" className="hv-neighbor-logo" />
-                        : <Building2 size={22} className="hv-neighbor-icon" />
-                    }
-                    <div className="hv-neighbor-name">{ownedNode.name}</div>
-                    {showPct && (
-                      <div className="hv-neighbor-pct">{Number(pct)}%</div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+              <ExplodableChildRow
+                items={getOwnedBy(relList, focusId)}
+                nodeList={nodeList}
+                relList={relList}
+                explodedNodes={explodedNodes}
+                onExplode={(nodeId) => {
+                  const expanding = !explodedNodes.has(nodeId);
+                  setExplodedNodes(prev => {
+                    const next = new Set(prev);
+                    if (next.has(nodeId)) next.delete(nodeId); else next.add(nodeId);
+                    return next;
+                  });
+                  if (expanding) setExplodedAnchorId(nodeId);
+                }}
+                onExplodeAll={(nodeId) => {
+                  const descendants = getAllDescendants(relList, nodeId, new Set([focusId]));
+                  setExplodedNodes(prev => new Set([...prev, nodeId, ...descendants]));
+                  setExplodedAnchorId(nodeId);
+                }}
+                onFocus={setFocusId}
+                visitedIds={new Set([focusId])}
+              />
             </div>
           )}
           {(focusEmployees.length > 0 || focusEmployers.length > 0) && (
@@ -4072,21 +4239,24 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       </Dialog>
 
       {/* ── Print Entity Book dialog (directory mode) ── */}
-      <Dialog open={printDialogOpen} onOpenChange={setPrintDialogOpen}>
-        <DialogContent style={{ maxWidth: 360 }}>
+      <Dialog open={printDialogOpen} onOpenChange={(open) => { if (!open) setPosterConfirmed(false); setPrintDialogOpen(open); }}>
+        <DialogContent style={{ maxWidth: 380 }}>
           <DialogHeader>
-            <DialogTitle>Print Entity Book</DialogTitle>
+            <DialogTitle>
+              {viewMode === "hierarchy" ? "Save as PDF" : "Print Entity Book"}
+            </DialogTitle>
           </DialogHeader>
           <div style={{ padding: "8px 0 16px", display: "flex", flexDirection: "column", gap: 12 }}>
             <p style={{ fontSize: 13, color: "#64748b", margin: 0 }}>
-              Select page types to include for each entity in the current view.
-              Pages are interleaved: hierarchy then detail for each entity.
+              {viewMode === "hierarchy"
+                ? "Select page types to include."
+                : "Select page types to include for each entity in the current view. Pages are interleaved: hierarchy then detail for each entity."}
             </p>
             <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
               <input
                 type="checkbox"
                 checked={printHierarchy}
-                onChange={(e) => setPrintHierarchy(e.target.checked)}
+                onChange={(e) => { setPrintHierarchy(e.target.checked); if (e.target.checked) setPosterConfirmed(false); }}
               />
               Hierarchy pages
             </label>
@@ -4094,38 +4264,132 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               <input
                 type="checkbox"
                 checked={printDetail}
-                onChange={(e) => setPrintDetail(e.target.checked)}
+                onChange={(e) => { setPrintDetail(e.target.checked); if (e.target.checked) setPosterConfirmed(false); }}
               />
               Detail pages
             </label>
             {(printHierarchy || printDetail) && (() => {
-              const scopeNodes = dirSearch.trim()
-                ? [...filteredEntityNodes, ...filteredPersonNodes]
-                : nodeList;
+              let scopeNodes;
+              if (viewMode === "hierarchy") {
+                if (explodedNodes.size > 0) {
+                  const visibleIds = new Set([focusId, ...explodedNodes]);
+                  scopeNodes = nodeList.filter(n => visibleIds.has(n.id));
+                } else {
+                  scopeNodes = nodeList.filter(n => n.id === focusId);
+                }
+              } else {
+                scopeNodes = dirSearch.trim()
+                  ? [...filteredEntityNodes, ...filteredPersonNodes]
+                  : nodeList;
+              }
               return (
                 <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>
                   {scopeNodes.length} {scopeNodes.length === 1 ? "item" : "items"} in scope
                 </p>
               );
             })()}
+
+            {/* ── Poster section (hierarchy mode only) ── */}
+            {viewMode === "hierarchy" && (() => {
+              const { pages, cols, rows } = estimatePosterPageCount(focusId, relList);
+              return (
+                <>
+                  <div style={{ height: 1, background: "#e2e8f0", margin: "4px 0" }} />
+                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#94a3b8" }}>
+                    Org Chart Poster
+                  </div>
+                  <p style={{ fontSize: 12, color: "#64748b", margin: 0 }}>
+                    Tiled landscape pages showing the complete ownership tree with every level fully horizontal. Print and assemble side-by-side.
+                  </p>
+                  <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>
+                    Estimated: <strong style={{ color: "#475569" }}>{pages} {pages === 1 ? "page" : "pages"}</strong> ({cols} wide × {rows} tall, A4 landscape)
+                  </p>
+                  <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, cursor: "pointer", lineHeight: 1.4 }}>
+                    <input
+                      type="checkbox"
+                      style={{ marginTop: 2, flexShrink: 0 }}
+                      checked={posterConfirmed}
+                      onChange={(e) => {
+                        setPosterConfirmed(e.target.checked);
+                        if (e.target.checked) {
+                          setPrintHierarchy(false);
+                          setPrintDetail(false);
+                        }
+                      }}
+                    />
+                    I understand — generate poster ({pages} {pages === 1 ? "page" : "pages"})
+                  </label>
+                </>
+              );
+            })()}
           </div>
-          <DialogFooter>
+          <DialogFooter style={{ gap: 8 }}>
             <Button variant="outline" onClick={() => setPrintDialogOpen(false)}>Cancel</Button>
-            <Button
+            {viewMode === "hierarchy" && posterConfirmed && (
+              <Button
+                disabled={isPdfExporting}
+                variant="outline"
+                style={posterConfirmed ? { borderColor: "#f59e0b", color: "#92400e", background: "#fffbeb" } : {}}
+                onClick={async () => {
+                  setPrintDialogOpen(false);
+                  setIsPdfExporting(true);
+                  const focusNodeName = nodeList.find(n => n.id === focusId)?.name || focusId;
+                  const safeBase = `${focusNodeName}-org-chart-poster`.replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+                  setExportResultAndRevoke({ status: "exporting", fileName: `${safeBase}.pdf` });
+                  pdfCancelRef.current = false;
+                  setPdfProgress(null);
+                  try {
+                    const result = await generateOrgChartPoster({
+                      focusId,
+                      nodeList,
+                      relList,
+                      clientName: clientDisplayName || toSentenceCase(clientId),
+                      isCancelled: () => pdfCancelRef.current,
+                      onProgress: (current, total) => setPdfProgress({ current, total }),
+                      apiBase,
+                      token,
+                    });
+                    if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
+                  } finally {
+                    setIsPdfExporting(false);
+                    setPdfProgress(null);
+                    setPosterConfirmed(false);
+                  }
+                }}
+              >
+                Generate Poster
+              </Button>
+            )}
+            {!posterConfirmed && <Button
               disabled={(!printHierarchy && !printDetail) || isPdfExporting}
               onClick={async () => {
                 setPrintDialogOpen(false);
                 setIsPdfExporting(true);
                 const suffix = printHierarchy && printDetail ? "full" : printHierarchy ? "hierarchy" : "detail";
-                const safeBase = `${clientDisplayName || toSentenceCase(clientId)}-entity-book-${suffix}`
-                  .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
+                let printNodes;
+                let baseLabel;
+                if (viewMode === "hierarchy") {
+                  if (explodedNodes.size > 0) {
+                    const visibleIds = new Set([focusId, ...explodedNodes]);
+                    printNodes = nodeList.filter(n => visibleIds.has(n.id));
+                    const focusNodeName = nodeList.find(n => n.id === focusId)?.name || focusId;
+                    baseLabel = `${focusNodeName}-expanded-${suffix}`;
+                  } else {
+                    printNodes = nodeList.filter(n => n.id === focusId);
+                    const focusNodeName = nodeList.find(n => n.id === focusId)?.name || focusId;
+                    baseLabel = `${focusNodeName}-${suffix}`;
+                  }
+                } else {
+                  printNodes = dirSearch.trim()
+                    ? [...filteredEntityNodes, ...filteredPersonNodes]
+                    : nodeList;
+                  baseLabel = `${clientDisplayName || toSentenceCase(clientId)}-entity-book-${suffix}`;
+                }
+                const safeBase = baseLabel.replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
                 setExportResultAndRevoke({ status: "exporting", fileName: `${safeBase}.pdf` });
                 pdfCancelRef.current = false;
                 setPdfProgress(null);
                 try {
-                  const printNodes = dirSearch.trim()
-                    ? [...filteredEntityNodes, ...filteredPersonNodes]
-                    : nodeList;
                   const result = await generateEntityBookInterleaved({
                     nodes: printNodes,
                     nodeList,
@@ -4149,8 +4413,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             >
               {isPdfExporting
                 ? <><Loader2 size={14} className="animate-spin" style={{ marginRight: 6 }} />Printing…</>
-                : "Print"}
-            </Button>
+                : "Save PDF"}
+            </Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>

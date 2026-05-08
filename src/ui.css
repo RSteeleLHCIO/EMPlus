@@ -1524,6 +1524,129 @@ input[type="time"].no-native-picker {
     font-weight: 600;
 }
 
+/* ── Circular-reference box (ancestor shown again in a child level) ── */
+.hv-neighbor-box--cyclic {
+    border-color: #ef4444;
+    background: #fff5f5;
+    cursor: pointer;
+}
+
+.hv-neighbor-box--cyclic:hover {
+    border-color: #dc2626;
+    box-shadow: 0 4px 12px rgba(220, 38, 38, 0.15);
+}
+
+.hv-neighbor-box--cyclic .hv-neighbor-name {
+    color: #dc2626;
+}
+
+.hv-neighbor-cycle-badge {
+    position: absolute;
+    bottom: 5px;
+    right: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #ef4444;
+    line-height: 1;
+    pointer-events: none;
+}
+
+/* ── Explode button (bottom-right of an owned child box) ── */
+.hv-explode-btn {
+    position: absolute;
+    bottom: 5px;
+    right: 5px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1.5px solid #d1d5db;
+    background: #f9fafb;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6b7280;
+    padding: 0;
+    line-height: 0;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    z-index: 1;
+}
+
+.hv-explode-btn:hover,
+.hv-explode-btn--active {
+    background: #dbeafe;
+    border-color: #3b82f6;
+    color: #2563eb;
+}
+
+/* "Explode all" button — sits left of the single-explode button */
+.hv-explode-all-btn {
+    position: absolute;
+    bottom: 5px;
+    right: 28px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1.5px solid #d1d5db;
+    background: #f9fafb;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6b7280;
+    padding: 0;
+    line-height: 0;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    z-index: 1;
+}
+
+.hv-explode-all-btn:hover {
+    background: #fef9c3;
+    border-color: #ca8a04;
+    color: #854d0e;
+}
+
+/* "Explode all" button on the focus oval */
+.hv-focus-explode-all-btn {
+    position: absolute;
+    bottom: 12px;
+    right: 16px;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: 1.5px solid #d1d5db;
+    background: #f9fafb;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6b7280;
+    padding: 0;
+    line-height: 0;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    z-index: 1;
+}
+
+.hv-focus-explode-all-btn:hover {
+    background: #fef9c3;
+    border-color: #ca8a04;
+    color: #854d0e;
+}
+
+/* Vertical column layout when at sub-level or any sibling is exploded */
+.hv-owned-column {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    width: 100%;
+}
+
+/* Each deeper level is indented by one box-width + gap (140px + 12px) */
+.hv-explode-indent {
+    margin-left: 152px;
+}
+
 /* Vertical connector line between rows */
 .hv-connector {
     width: 2px;
@@ -1534,6 +1657,7 @@ input[type="time"].no-native-picker {
 
 /* The focused entity box */
 .hv-focus-box {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
