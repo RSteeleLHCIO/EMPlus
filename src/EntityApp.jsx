@@ -673,7 +673,7 @@ const HvNeighborBox = ({
       style={{ position: "relative" }}
       data-hv-node-id={item.nodeId}
       onClick={() => onFocus(item.nodeId)}
-      title={isCyclic ? "Circular ownership — already shown above" : isZero ? "Non-economic / 0% interest" : "Click to focus"}
+      title={isCyclic ? "Circular ownership — already shown above" : isZero ? "Non-economic / 0% interest" : undefined}
     >
       {node.kind === "person"
         ? node.photo
