@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, FileDown } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair } from "lucide-react";
 import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved, estimatePosterPageCount, generateOrgChartPoster } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone } from "./utils/helpers";
@@ -640,7 +640,21 @@ const getAllDescendants = (relList, rootId, initialVisited = new Set()) => {
 };
 
 // ── HvNeighborBox: a single child tile in the explodable Owns section ────────────────
-const HvNeighborBox = ({ item, nodeList, relList, explodedNodes, onExplode, onExplodeAll, onFocus, isCyclic = false }) => {
+const HvNeighborBox = ({
+  item,
+  nodeList,
+  relList,
+  explodedNodes,
+  onExplode,
+  onExplodeAll,
+  onFocus,
+  onFocusPrimary,
+  onEdit,
+  onPrintBook,
+  onPrintPoster,
+  showExplodeControls = true,
+  isCyclic = false,
+}) => {
   const node = getNode(nodeList, item.nodeId);
   if (!node) return null;
   const pct = item.rel?.percent;
@@ -672,7 +686,51 @@ const HvNeighborBox = ({ item, nodeList, relList, explodedNodes, onExplode, onEx
       <div className="hv-neighbor-name">{node.name}</div>
       {showPct && <div className="hv-neighbor-pct">{Number(pct)}%</div>}
       {isCyclic && <div className="hv-neighbor-cycle-badge" title="Circular reference">∞</div>}
-      {!isCyclic && childCount > 0 && (
+      <div className="hv-neighbor-actions" onClick={(e) => e.stopPropagation()}>
+        <button
+          className="hv-neighbor-action-btn"
+          type="button"
+          title="Edit"
+          aria-label="Edit"
+          onClick={() => onEdit?.(item.nodeId)}
+        >
+          <Pencil size={11} />
+        </button>
+        <button
+          className="hv-neighbor-action-btn"
+          type="button"
+          title="Print Book Pages (PDF)"
+          aria-label="Print Book Pages"
+          onClick={() => onPrintBook?.(item.nodeId)}
+        >
+          <BookOpen size={11} />
+        </button>
+        <button
+          className="hv-neighbor-action-btn"
+          type="button"
+          title="Print Org Chart Poster"
+          aria-label="Print Org Chart Poster"
+          onClick={() => onPrintPoster?.(item.nodeId)}
+        >
+          <GitFork size={11} />
+        </button>
+        <button
+          className="hv-neighbor-action-btn"
+          type="button"
+          title="Focus on me"
+          aria-label="Focus on me"
+          onClick={() => {
+            if (onFocusPrimary) {
+              onFocusPrimary(item.nodeId);
+            } else {
+              onFocus(item.nodeId);
+            }
+          }}
+        >
+          <Crosshair size={11} />
+        </button>
+      </div>
+      {showExplodeControls && !isCyclic && childCount > 0 && (
         <>
           <button
             className={`hv-explode-btn${isExploded ? " hv-explode-btn--active" : ""}`}
@@ -731,7 +789,7 @@ function computeColWidth(nodeId, relList, explodedNodes, visited = new Set()) {
 // ── Recursive org-chart tree node ─────────────────────────────────────────────
 const OrgChartTreeNode = ({
   item, nodeList, relList, explodedNodes,
-  onExplode, onExplodeAll, onFocus,
+  onExplode, onExplodeAll, onFocus, onFocusPrimary, onEdit, onPrintBook, onPrintPoster,
   visitedIds = new Set(), showTopConnector = true,
 }) => {
   const { nodeId } = item;
@@ -757,7 +815,10 @@ const OrgChartTreeNode = ({
       <HvNeighborBox
         item={item} nodeList={nodeList} relList={relList}
         explodedNodes={explodedNodes} onExplode={onExplode}
-        onExplodeAll={onExplodeAll} onFocus={onFocus} isCyclic={isCyclic}
+        onExplodeAll={onExplodeAll} onFocus={onFocus}
+        onFocusPrimary={onFocusPrimary}
+        onEdit={onEdit} onPrintBook={onPrintBook} onPrintPoster={onPrintPoster}
+        isCyclic={isCyclic}
       />
       {children.length > 0 && (
         <>
@@ -774,6 +835,8 @@ const OrgChartTreeNode = ({
                 key={child.nodeId} item={child} nodeList={nodeList} relList={relList}
                 explodedNodes={explodedNodes} onExplode={onExplode}
                 onExplodeAll={onExplodeAll} onFocus={onFocus}
+                onFocusPrimary={onFocusPrimary}
+                onEdit={onEdit} onPrintBook={onPrintBook} onPrintPoster={onPrintPoster}
                 visitedIds={nv} showTopConnector={true}
               />
             ))}
@@ -1154,6 +1217,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5174";
   const [remoteStatus, setRemoteStatus] = useState("idle");
   const [remoteError, setRemoteError] = useState("");
+  const [exitPromptOpen, setExitPromptOpen] = useState(false);
   const [directoryLoaded, setDirectoryLoaded] = useState(false);
   const [profileLoading, setProfileLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -1265,6 +1329,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     columnOrder: [],
   });
   const [tabularViewNameError, setTabularViewNameError] = useState("");
+  const getTabularPrefsPayload = useCallback((overrides = {}) => ({
+    tabularViews: overrides.tabularViews ?? tabularViews,
+    tabularViewsSelectedId: overrides.tabularViewsSelectedId ?? selectedTabularViewId,
+  }), [selectedTabularViewId, tabularViews]);
 
   function checkDuplicateName(name) {
     const q = name.trim().toLowerCase();
@@ -1346,6 +1414,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [exportReports, setExportReports] = useState([]);
   const [exportReportsLoaded, setExportReportsLoaded] = useState(false);
   const [printDialogOpen, setPrintDialogOpen] = useState(false);
+  const [printDialogMode, setPrintDialogMode] = useState(null); // "book" | "poster" | null
+  const [printTargetNodeId, setPrintTargetNodeId] = useState("");
   const [printHierarchy, setPrintHierarchy] = useState(true);
   const [printDetail, setPrintDetail] = useState(true);
   const [posterConfirmed, setPosterConfirmed] = useState(false);
@@ -1565,7 +1635,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         tabularViewsSelectedId: selectedTabularViewId,
       }),
     }).catch(() => { });
-  }, [apiRequest, myLoginId, selectedTabularViewId, tabularViews]);
+    // apiRequest is intentionally omitted to avoid firing on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myLoginId, selectedTabularViewId, tabularViews]);
 
   const readFileText = (file) =>
     new Promise((resolve, reject) => {
@@ -1635,9 +1707,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       if (!canUpdate()) return;
       if (Array.isArray(data.nodes) && data.nodes.length > 0) {
         setNodeList(data.nodes);
-        if (!data.nodes.some((n) => n.id === focusId)) {
-          setFocusId(data.nodes[0].id);
-        }
+        // Preserve the latest focus when possible; avoid overriding a just-restored home focus.
+        setFocusId((prev) => (data.nodes.some((n) => n.id === prev) ? prev : data.nodes[0].id));
       }
       if (Array.isArray(data.rels)) {
         setRelList(data.rels);
@@ -1650,7 +1721,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     } finally {
       if (canUpdate()) setDirectoryLoaded(true);
     }
-  }, [apiBase, clientId, focusId]);
+  }, [apiBase, token]);
 
   const handleUploadCsv = async () => {
     if (!uploadFile) {
@@ -2351,12 +2422,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       try { localStorage.setItem("homeScreen", JSON.stringify(updatedHomeScreen)); } catch { }
       apiRequest("/api/auth/me", {
         method: "PATCH",
-        body: JSON.stringify({ homeScreen: updatedHomeScreen }),
+        body: JSON.stringify({
+          homeScreen: updatedHomeScreen,
+          ...getTabularPrefsPayload({
+            tabularViews: nextViews,
+            tabularViewsSelectedId: DEFAULT_TABULAR_VIEW_ID,
+          }),
+        }),
       }).catch(() => { });
     }
     setTabularViewNameError("");
     setTabularViewDialogOpen(false);
-  }, [apiRequest, homeScreen, persistTabularViewPrefs, selectedTabularViewId, tabularViews]);
+  }, [apiRequest, getTabularPrefsPayload, homeScreen, persistTabularViewPrefs, selectedTabularViewId, tabularViews]);
 
   const renderTabularCell = useCallback((column, { row, rowNode, isSaving, isDirty, rowError, resolvedId }) => {
     switch (column.key) {
@@ -2478,16 +2555,32 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 Save
               </Button>
               {!row.isNew && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    setFocusId(row.key);
-                    setViewMode("hierarchy");
-                  }}
-                >
-                  Focus
-                </Button>
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      setFocusId(row.key);
+                      setViewMode("hierarchy");
+                    }}
+                  >
+                    Focus
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => openNodeBookPrintDialog(row.key)}
+                  >
+                    Print Book
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => openNodePosterPrintDialog(row.key)}
+                  >
+                    Print Org
+                  </Button>
+                </>
               )}
               {row.isNew && (
                 <Button
@@ -2768,23 +2861,63 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     }
   }, [focusId]);
 
-  // Back-button interception: close dialogs, then go home, then let browser navigate away
+  // Back-button behavior:
+  // 1) Close transient UI first (dialogs/upload)
+  // 2) Otherwise follow normal in-app history (view/focus)
+  // 3) At app root only, require a second back press to exit
   const _backRef = useRef({});
-  _backRef.current = { openDialog, prevDialog, uploadOpen, confirmDialog, viewMode, homeScreen, focusId, isSameHomeScreen, restoreHomeScreen };
+  _backRef.current = {
+    openDialog,
+    prevDialog,
+    uploadOpen,
+    confirmDialog,
+    viewMode,
+    focusId,
+    selectedTabularViewId,
+  };
+  const backNavRef = useRef({
+    initialized: false,
+    restoring: false,
+    lastKey: "",
+    exitArmedUntil: 0,
+  });
+  const buildAppHistoryState = (isRoot = false) => {
+    const s = _backRef.current;
+    const state = {
+      emplusAppNav: true,
+      emplusRoot: isRoot,
+      viewMode: s.viewMode,
+      focusId: s.focusId,
+    };
+    if (s.viewMode === "tabular") {
+      state.selectedTabularViewId = s.selectedTabularViewId;
+    }
+    return state;
+  };
+
   useEffect(() => {
-    history.pushState({ emplus: true }, "");
-    const handlePop = () => {
+    const nav = backNavRef.current;
+    const rootState = buildAppHistoryState(true);
+    const initialState = buildAppHistoryState(false);
+    history.replaceState(rootState, "");
+    history.pushState(initialState, "");
+    nav.lastKey = JSON.stringify(initialState);
+    nav.initialized = true;
+
+    const handlePop = (event) => {
       const s = _backRef.current;
-      let handled = false;
+
+      // First consume back presses for transient UI that should close in-place.
       if (s.confirmDialog) {
         setConfirmDialog(null);
-        handled = true;
-      } else if (s.openDialog) {
+        setExitPromptOpen(false);
+        history.pushState(buildAppHistoryState(), "");
+        return;
+      }
+      if (s.openDialog) {
         if (s.prevDialog) {
           setOpenDialog(s.prevDialog);
           setPrevDialog(null);
-          // Update ref immediately so the next back press sees the correct state
-          // without waiting for React to re-render
           _backRef.current = { ...s, openDialog: s.prevDialog, prevDialog: null };
         } else {
           setOpenDialog(null);
@@ -2793,21 +2926,89 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         setDupMatches([]);
         setOwnerSearch("");
         setOwnerSearchOpen(false);
-        handled = true;
-      } else if (s.uploadOpen) {
+        setExitPromptOpen(false);
+        history.pushState(buildAppHistoryState(), "");
+        return;
+      }
+      if (s.uploadOpen) {
         setUploadOpen(false);
-        handled = true;
-      } else if (s.homeScreen && !s.isSameHomeScreen?.(s.homeScreen)) {
-        s.restoreHomeScreen?.(s.homeScreen);
-        handled = true;
+        setExitPromptOpen(false);
+        history.pushState(buildAppHistoryState(), "");
+        return;
       }
-      if (handled) {
-        history.pushState({ emplus: true }, "");
+
+      // Normal in-app pop to a known app state.
+      const next = event.state;
+      if (next?.emplusAppNav) {
+        // Root sentinel means user tried to leave app from its first history entry.
+        if (next.emplusRoot) {
+          const now = Date.now();
+          if (now < nav.exitArmedUntil) {
+            nav.exitArmedUntil = 0;
+            setExitPromptOpen(false);
+            history.back();
+            return;
+          }
+          nav.exitArmedUntil = now + 2500;
+          setExitPromptOpen(true);
+          const restoreState = buildAppHistoryState(false);
+          history.pushState(restoreState, "");
+          nav.lastKey = JSON.stringify(restoreState);
+          return;
+        }
+        setExitPromptOpen(false);
+        nav.restoring = true;
+        setViewMode(next.viewMode || "hierarchy");
+        if (next.focusId) setFocusId(next.focusId);
+        if (next.viewMode === "tabular") {
+          setSelectedTabularViewId(next.selectedTabularViewId || DEFAULT_TABULAR_VIEW_ID);
+        }
+        requestAnimationFrame(() => {
+          nav.restoring = false;
+        });
+        return;
       }
+
+      // Root guard: first back warns, second back exits.
+      const now = Date.now();
+      if (now < nav.exitArmedUntil) {
+        nav.exitArmedUntil = 0;
+        setExitPromptOpen(false);
+        history.back();
+        return;
+      }
+      nav.exitArmedUntil = now + 2500;
+      setExitPromptOpen(true);
+      const restoreState = buildAppHistoryState(false);
+      history.pushState(restoreState, "");
+      nav.lastKey = JSON.stringify(restoreState);
     };
+
     window.addEventListener("popstate", handlePop);
     return () => window.removeEventListener("popstate", handlePop);
+    // Run once: this initializes app history and pop handling.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const nav = backNavRef.current;
+    if (!nav.initialized || nav.restoring) return;
+    const nextState = buildAppHistoryState();
+    const nextKey = JSON.stringify(nextState);
+    if (nextKey === nav.lastKey) return;
+    history.pushState(nextState, "");
+    nav.lastKey = nextKey;
+  }, [focusId, selectedTabularViewId, viewMode]);
+
+  const handleExitPromptReturn = useCallback(() => {
+    backNavRef.current.exitArmedUntil = 0;
+    setExitPromptOpen(false);
+  }, []);
+
+  const handleExitPromptExit = useCallback(() => {
+    backNavRef.current.exitArmedUntil = Date.now() + 2000;
+    setExitPromptOpen(false);
+    history.back();
   }, []);
 
   useEffect(() => {
@@ -3032,13 +3233,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   useEffect(() => {
     if (viewMode !== "hierarchy") return;
+    const shouldCenterVertically = directOwners.length > 0;
     const center = (behavior) => {
       if (!focusBoxRef.current || !hierarchyContainerRef.current) return;
       const container = hierarchyContainerRef.current;
       const box = focusBoxRef.current;
       const containerRect = container.getBoundingClientRect();
       const boxRect = box.getBoundingClientRect();
-      const deltaY = (boxRect.top + box.clientHeight / 2) - (containerRect.top + container.clientHeight / 2);
+      const deltaY = shouldCenterVertically
+        ? (boxRect.top + box.clientHeight / 2) - (containerRect.top + container.clientHeight / 2)
+        : 0;
       const deltaX = (boxRect.left + box.clientWidth / 2) - (containerRect.left + container.clientWidth / 2);
       container.scrollTo({
         left: container.scrollLeft + deltaX,
@@ -3050,7 +3254,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     // Re-center after images in the focus box have loaded (photos/logos load asynchronously)
     const t = setTimeout(() => center("instant"), 300);
     return () => clearTimeout(t);
-  }, [focusId, viewMode, nodeList]);
+  }, [directOwners.length, focusId, viewMode, nodeList]);
 
   // Reset exploded child nodes whenever the focused entity changes
   useEffect(() => {
@@ -3124,6 +3328,56 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
 
   const initialHydrationLoading = profileLoading || !directoryLoaded;
+  const activePrintFocusId = printTargetNodeId || focusId;
+  const activePrintNode = getNode(nodeList, activePrintFocusId);
+  const openNodeEditFromHierarchy = useCallback((nodeId) => {
+    setEditNodeId(nodeId);
+    setOpenDialog({ type: "edit-node" });
+  }, []);
+  const openNodeBookPrintDialog = useCallback((nodeId) => {
+    setPrintDialogMode("book");
+    setPrintTargetNodeId(nodeId || "");
+    setPosterConfirmed(false);
+    setPrintDialogOpen(true);
+  }, []);
+  const openNodePosterPrintDialog = useCallback((nodeId) => {
+    setPrintDialogMode("poster");
+    setPrintTargetNodeId(nodeId || "");
+    setPosterConfirmed(false);
+    setPrintDialogOpen(true);
+  }, []);
+  const focusNodeAndPersistPrimary = useCallback((nodeId) => {
+    const nextFocusId = String(nodeId || "");
+    if (!nextFocusId) return;
+    setFocusId(nextFocusId);
+
+    let baseHome = homeScreen && typeof homeScreen === "object" ? homeScreen : null;
+    if (!baseHome) {
+      try {
+        const stored = localStorage.getItem("homeScreen");
+        const parsed = stored ? JSON.parse(stored) : null;
+        if (parsed && typeof parsed === "object") baseHome = parsed;
+      } catch {
+        baseHome = null;
+      }
+    }
+    if (!baseHome) return;
+
+    const nextHome = { ...baseHome, focusId: nextFocusId };
+    setHomeScreen(nextHome);
+    try {
+      localStorage.setItem("homeScreen", JSON.stringify(nextHome));
+    } catch {
+      // ignore storage errors
+    }
+    apiRequest("/api/auth/me", {
+      method: "PATCH",
+      body: JSON.stringify({
+        homeScreen: nextHome,
+        ...getTabularPrefsPayload(),
+      }),
+    }).catch(() => { });
+  }, [apiRequest, getTabularPrefsPayload, homeScreen]);
 
 
   if (initialHydrationLoading) {
@@ -3156,14 +3410,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 }
               }}
             >
-              <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 80, width: "auto", margin: "-10px" }} />
+              <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 50, width: "auto", margin: "-10px" }} />
             </button>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 600, color: "#1a1a2e" }}>{clientDisplayName || toSentenceCase(clientId)}</div>
+            <div style={{marginLeft: 8}}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#1a1a2e" }}>{clientDisplayName || toSentenceCase(clientId)}</div>
               <div style={{ fontSize: 13, color: "#64748b" }}>Entity Dashboard</div>
             </div>
           </div>
-          <div style={{ display: "flex", marginRight: "90px", borderRadius: 6, overflow: "hidden", border: "1px solid #cbd5e1" }}>
+          <div style={{ display: "flex", marginRight: "110px", borderRadius: 6, overflow: "hidden", border: "1px solid #cbd5e1" }}>
             <button
               type="button"
               aria-label="Hierarchy view"
@@ -3227,19 +3481,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             >
               <Home size={18} />
             </Button>
-            <Button
-              type="button"
-              variant="outline"
-              className="btn-icon"
-              aria-label={viewMode === "hierarchy" ? "Save as PDF" : "Save Entity Book as PDF"}
-              title={viewMode === "hierarchy" ? "Save as PDF" : "Save Entity Book as PDF"}
-              disabled={isPdfExporting}
-              onClick={async () => {
-                setPrintDialogOpen(true);
-              }}
-            >
-              {isPdfExporting ? <Loader2 size={18} className="animate-spin" /> : <FileDown size={18} />}
-            </Button>
             <div className="settings-anchor" ref={settingsRef}>
               <Button
                 type="button"
@@ -3261,8 +3502,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       // Persist to user record so it survives across sessions/devices
                       apiRequest("/api/auth/me", {
                         method: "PATCH",
-                        body: JSON.stringify({ homeScreen: screen }),
-                      }).catch(() => { });
+                        body: JSON.stringify({
+                          homeScreen: screen,
+                          ...getTabularPrefsPayload(),
+                        }),
+                      }).catch((err) => {
+                        setRemoteStatus("error");
+                        setRemoteError(err.message || "Unable to save home screen.");
+                      });
                       const rect = homeButtonRef.current?.getBoundingClientRect();
                       const ox = rect ? `${Math.round(rect.left + rect.width / 2)}px` : "90vw";
                       const oy = rect ? `${Math.round(rect.top + rect.height / 2)}px` : "40px";
@@ -3429,6 +3676,38 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         </div>{/* end maxWidth wrapper */}
       </div>{/* end app-header */}
 
+        {exitPromptOpen && (
+          <div
+            style={{
+              position: "fixed",
+              top: 60,
+              left: 12,
+              zIndex: 1400,
+              background: "#fff",
+              border: "1px solid #fca5a5",
+              borderRadius: 10,
+              boxShadow: "0 8px 24px rgba(15, 23, 42, 0.18)",
+              padding: "10px 12px",
+              minWidth: 280,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b", marginBottom: 8 }}>
+              Leave EMPlus?
+            </div>
+            <div style={{ fontSize: 12, color: "#7f1d1d", marginBottom: 10 }}>
+              Are you trying to exit EMPlus?
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Button type="button" variant="outline" onClick={handleExitPromptExit}>
+                Exit
+              </Button>
+              <Button type="button" onClick={handleExitPromptReturn}>
+                Return to EMPlus
+              </Button>
+            </div>
+          </div>
+        )}
+
       <div className="app-content">
 
         <Dialog open={uploadOpen} onOpenChange={() => setUploadOpen(false)}>
@@ -3551,7 +3830,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         {viewMode === "hierarchy" && (
           <>
             <div
-              className="hierarchy-vertical"
+              className={`hierarchy-vertical${directOwners.length === 0 ? " hierarchy-vertical--no-parents" : ""}`}
               ref={hierarchyContainerRef}
               onPointerDown={onHierarchyPointerDown}
               onPointerMove={onHierarchyPointerMove}
@@ -3575,34 +3854,23 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         {getOwnersOf(relList, focusId).length === 0 ? (
                           <div className="hv-empty">No owners recorded</div>
                         ) : (
-                          [...getOwnersOf(relList, focusId).map((item) => {
-                            const ownerNode = getNode(nodeList, item.nodeId);
-                            if (!ownerNode) return null;
-                            const pct = item.rel?.percent;
-                            const showPct = pct != null && Number.isFinite(Number(pct));
-                            const isZero = showPct && Number(pct) === 0;
-                            return (
-                              <div
-                                key={item.nodeId}
-                                className={`hv-neighbor-box${isZero ? " hv-neighbor-box--zero" : ""}`}
-                                onClick={() => setFocusId(item.nodeId)}
-                                title={isZero ? "Non-economic / 0% interest" : "Click to focus"}
-                              >
-                                {ownerNode.kind === "person"
-                                  ? ownerNode.photo
-                                    ? <img src={ownerNode.photo} alt="" className="hv-neighbor-photo" />
-                                    : <Users size={22} className="hv-neighbor-icon" />
-                                  : ownerNode.logo
-                                    ? <img src={ownerNode.logo} alt="" className="hv-neighbor-logo" />
-                                    : <Building2 size={22} className="hv-neighbor-icon" />
-                                }
-                                <div className="hv-neighbor-name">{ownerNode.name}</div>
-                                {showPct && (
-                                  <div className="hv-neighbor-pct">{Number(pct)}%</div>
-                                )}
-                              </div>
-                            );
-                          }),
+                          [...getOwnersOf(relList, focusId).map((item) => (
+                            <HvNeighborBox
+                              key={item.nodeId}
+                              item={item}
+                              nodeList={nodeList}
+                              relList={relList}
+                              explodedNodes={explodedNodes}
+                              onExplode={() => { }}
+                              onExplodeAll={() => { }}
+                              onFocus={setFocusId}
+                              onFocusPrimary={focusNodeAndPersistPrimary}
+                              onEdit={openNodeEditFromHierarchy}
+                              onPrintBook={openNodeBookPrintDialog}
+                              onPrintPoster={openNodePosterPrintDialog}
+                              showExplodeControls={false}
+                            />
+                          )),
                           (() => {
                             const gap = Math.round((100 - directOwnerTotal) * 10) / 10;
                             if (directOwnerTotalOk || directOwnerTotal === 0 || gap <= 0) return null;
@@ -3655,6 +3923,35 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       </div>
                     ) : null;
                   })()}
+                  <div className="hv-focus-actions" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="hv-focus-action-btn"
+                      type="button"
+                      title="Edit"
+                      aria-label="Edit"
+                      onClick={() => openNodeEditFromHierarchy(focusId)}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      className="hv-focus-action-btn"
+                      type="button"
+                      title="Print Book Pages (PDF)"
+                      aria-label="Print Book Pages"
+                      onClick={() => openNodeBookPrintDialog(focusId)}
+                    >
+                      <BookOpen size={13} />
+                    </button>
+                    <button
+                      className="hv-focus-action-btn"
+                      type="button"
+                      title="Print Org Chart Poster"
+                      aria-label="Print Org Chart Poster"
+                      onClick={() => openNodePosterPrintDialog(focusId)}
+                    >
+                      <GitFork size={13} />
+                    </button>
+                  </div>
                   {getOwnedBy(relList, focusId).length > 0 && (
                     explodedNodes.size > 0 ? (
                       <button
@@ -3735,6 +4032,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                 key={item.nodeId} item={item} nodeList={nodeList} relList={relList}
                                 explodedNodes={explodedNodes} onExplode={handleExplode}
                                 onExplodeAll={handleExplodeAll} onFocus={setFocusId}
+                                onFocusPrimary={focusNodeAndPersistPrimary}
+                                onEdit={openNodeEditFromHierarchy}
+                                onPrintBook={openNodeBookPrintDialog}
+                                onPrintPoster={openNodePosterPrintDialog}
                                 visitedIds={visitedIds} showTopConnector={items.length > 1}
                               />
                             ))}
@@ -3824,17 +4125,46 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                             <div className="directory-name">{n.name}</div>
                             <div className="directory-meta">{n.id}</div>
                           </div>
-                          <button
-                            className="directory-edit-btn"
-                            title="Edit"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setEditNodeId(n.id);
-                              setOpenDialog({ type: "edit-node" });
-                            }}
-                          >
-                            <Pencil size={13} />
-                          </button>
+                          <div className="directory-item-actions" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              className="directory-edit-btn"
+                              title="Edit"
+                              aria-label="Edit"
+                              onClick={() => {
+                                setEditNodeId(n.id);
+                                setOpenDialog({ type: "edit-node" });
+                              }}
+                            >
+                              <Pencil size={13} />
+                            </button>
+                            <button
+                              className="directory-edit-btn"
+                              title="Print Book Pages (PDF)"
+                              aria-label="Print Book Pages"
+                              onClick={() => openNodeBookPrintDialog(n.id)}
+                            >
+                              <BookOpen size={13} />
+                            </button>
+                            <button
+                              className="directory-edit-btn"
+                              title="Print Org Chart Poster"
+                              aria-label="Print Org Chart Poster"
+                              onClick={() => openNodePosterPrintDialog(n.id)}
+                            >
+                              <GitFork size={13} />
+                            </button>
+                            <button
+                              className="directory-edit-btn"
+                              title="Focus in Hierarchy"
+                              aria-label="Focus in Hierarchy"
+                              onClick={() => {
+                                setFocusId(n.id);
+                                setViewMode("hierarchy");
+                              }}
+                            >
+                              <Crosshair size={13} />
+                            </button>
+                          </div>
                         </div>
                       </li>
                     ))}
@@ -3864,17 +4194,46 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                             <div className="directory-name">{n.name}</div>
                             <div className="directory-meta">{n.id}</div>
                           </div>
-                          <button
-                            className="directory-edit-btn"
-                            title="Edit"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setEditNodeId(n.id);
-                              setOpenDialog({ type: "edit-node" });
-                            }}
-                          >
-                            <Pencil size={13} />
-                          </button>
+                          <div className="directory-item-actions" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              className="directory-edit-btn"
+                              title="Edit"
+                              aria-label="Edit"
+                              onClick={() => {
+                                setEditNodeId(n.id);
+                                setOpenDialog({ type: "edit-node" });
+                              }}
+                            >
+                              <Pencil size={13} />
+                            </button>
+                            <button
+                              className="directory-edit-btn"
+                              title="Print Book Pages (PDF)"
+                              aria-label="Print Book Pages"
+                              onClick={() => openNodeBookPrintDialog(n.id)}
+                            >
+                              <BookOpen size={13} />
+                            </button>
+                            <button
+                              className="directory-edit-btn"
+                              title="Print Org Chart Poster"
+                              aria-label="Print Org Chart Poster"
+                              onClick={() => openNodePosterPrintDialog(n.id)}
+                            >
+                              <GitFork size={13} />
+                            </button>
+                            <button
+                              className="directory-edit-btn"
+                              title="Focus in Hierarchy"
+                              aria-label="Focus in Hierarchy"
+                              onClick={() => {
+                                setFocusId(n.id);
+                                setViewMode("hierarchy");
+                              }}
+                            >
+                              <Crosshair size={13} />
+                            </button>
+                          </div>
                         </div>
                       </li>
                     ))}
@@ -5677,66 +6036,81 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           )}
         </Dialog>
 
-        {/* ── Print Entity Book dialog (directory mode) ── */}
-        <Dialog open={printDialogOpen} onOpenChange={(open) => { if (!open) setPosterConfirmed(false); setPrintDialogOpen(open); }}>
+        {/* ── Print dialogs ── */}
+        <Dialog open={printDialogOpen} onOpenChange={(open) => {
+          if (!open) {
+            setPosterConfirmed(false);
+            setPrintDialogMode(null);
+            setPrintTargetNodeId("");
+          }
+          setPrintDialogOpen(open);
+        }}>
           <DialogContent style={{ maxWidth: 380 }}>
             <DialogHeader>
               <DialogTitle>
-                {viewMode === "hierarchy" ? "Save as PDF" : "Print Entity Book"}
+                {printDialogMode === "poster" ? "Print Org Chart Poster" : "Print Entity Book"}
               </DialogTitle>
             </DialogHeader>
             <div style={{ padding: "8px 0 16px", display: "flex", flexDirection: "column", gap: 12 }}>
-              <p style={{ fontSize: 13, color: "#64748b", margin: 0 }}>
-                {viewMode === "hierarchy"
-                  ? "Select page types to include."
-                  : "Select page types to include for each entity in the current view. Pages are interleaved: hierarchy then detail for each entity."}
-              </p>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
-                <input
-                  type="checkbox"
-                  checked={printHierarchy}
-                  onChange={(e) => { setPrintHierarchy(e.target.checked); if (e.target.checked) setPosterConfirmed(false); }}
-                />
-                Hierarchy pages
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
-                <input
-                  type="checkbox"
-                  checked={printDetail}
-                  onChange={(e) => { setPrintDetail(e.target.checked); if (e.target.checked) setPosterConfirmed(false); }}
-                />
-                Detail pages
-              </label>
-              {(printHierarchy || printDetail) && (() => {
-                let scopeNodes;
-                if (viewMode === "hierarchy") {
-                  if (explodedNodes.size > 0) {
-                    const visibleIds = new Set([focusId, ...explodedNodes]);
-                    scopeNodes = nodeList.filter(n => visibleIds.has(n.id));
-                  } else {
-                    scopeNodes = nodeList.filter(n => n.id === focusId);
-                  }
-                } else {
-                  scopeNodes = dirSearch.trim()
-                    ? [...filteredEntityNodes, ...filteredPersonNodes]
-                    : nodeList;
-                }
-                return (
-                  <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>
-                    {scopeNodes.length} {scopeNodes.length === 1 ? "item" : "items"} in scope
+              {printDialogMode === "book" && (
+                <>
+                  <p style={{ fontSize: 13, color: "#64748b", margin: 0 }}>
+                    {printTargetNodeId
+                      ? "Select page types to include for the selected entity."
+                      : viewMode === "hierarchy"
+                      ? "Select page types to include."
+                      : "Select page types to include for each entity in the current view. Pages are interleaved: hierarchy then detail for each entity."}
                   </p>
-                );
-              })()}
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={printHierarchy}
+                      onChange={(e) => setPrintHierarchy(e.target.checked)}
+                    />
+                    Hierarchy pages
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={printDetail}
+                      onChange={(e) => setPrintDetail(e.target.checked)}
+                    />
+                    Detail pages
+                  </label>
+                  {(printHierarchy || printDetail) && (() => {
+                    let scopeNodes;
+                    if (printTargetNodeId) {
+                      scopeNodes = activePrintNode ? [activePrintNode] : [];
+                    } else if (viewMode === "hierarchy") {
+                      if (explodedNodes.size > 0) {
+                        const visibleIds = new Set([focusId, ...explodedNodes]);
+                        scopeNodes = nodeList.filter(n => visibleIds.has(n.id));
+                      } else {
+                        scopeNodes = nodeList.filter(n => n.id === focusId);
+                      }
+                    } else {
+                      scopeNodes = dirSearch.trim()
+                        ? [...filteredEntityNodes, ...filteredPersonNodes]
+                        : nodeList;
+                    }
+                    return (
+                      <p style={{ fontSize: 12, color: "#94a3b8", margin: 0 }}>
+                        {scopeNodes.length} {scopeNodes.length === 1 ? "item" : "items"} in scope
+                      </p>
+                    );
+                  })()}
+                </>
+              )}
 
-              {/* ── Poster section (hierarchy mode only) ── */}
-              {viewMode === "hierarchy" && (() => {
-                const { pages, cols, rows } = estimatePosterPageCount(focusId, relList);
+              {printDialogMode === "poster" && (() => {
+                const { pages, cols, rows } = estimatePosterPageCount(activePrintFocusId, relList);
                 return (
                   <>
-                    <div style={{ height: 1, background: "#e2e8f0", margin: "4px 0" }} />
-                    <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#94a3b8" }}>
-                      Org Chart Poster
-                    </div>
+                    {printTargetNodeId && (
+                      <p style={{ fontSize: 12, color: "#64748b", margin: 0 }}>
+                        Selected focus: <strong>{activePrintNode?.name || activePrintFocusId}</strong>
+                      </p>
+                    )}
                     <p style={{ fontSize: 12, color: "#64748b", margin: 0 }}>
                       Tiled landscape pages showing the complete ownership tree with every level fully horizontal. Print and assemble side-by-side.
                     </p>
@@ -5764,22 +6138,22 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             </div>
             <DialogFooter style={{ gap: 8 }}>
               <Button variant="outline" onClick={() => setPrintDialogOpen(false)}>Cancel</Button>
-              {viewMode === "hierarchy" && posterConfirmed && (
+              {printDialogMode === "poster" && (
                 <Button
-                  disabled={isPdfExporting}
+                  disabled={isPdfExporting || !posterConfirmed || !activePrintFocusId}
                   variant="outline"
                   style={posterConfirmed ? { borderColor: "#f59e0b", color: "#92400e", background: "#fffbeb" } : {}}
                   onClick={async () => {
                     setPrintDialogOpen(false);
                     setIsPdfExporting(true);
-                    const focusNodeName = nodeList.find(n => n.id === focusId)?.name || focusId;
+                    const focusNodeName = activePrintNode?.name || activePrintFocusId;
                     const safeBase = `${focusNodeName}-org-chart-poster`.replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
                     setExportResultAndRevoke({ status: "exporting", fileName: `${safeBase}.pdf` });
                     pdfCancelRef.current = false;
                     setPdfProgress(null);
                     try {
                       const result = await generateOrgChartPoster({
-                        focusId,
+                        focusId: activePrintFocusId,
                         nodeList,
                         relList,
                         clientName: clientDisplayName || toSentenceCase(clientId),
@@ -5799,15 +6173,19 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   Generate Poster
                 </Button>
               )}
-              {!posterConfirmed && <Button
-                disabled={(!printHierarchy && !printDetail) || isPdfExporting}
+              {printDialogMode === "book" && <Button
+                disabled={(!printHierarchy && !printDetail) || isPdfExporting || (printTargetNodeId && !activePrintNode)}
                 onClick={async () => {
                   setPrintDialogOpen(false);
                   setIsPdfExporting(true);
                   const suffix = printHierarchy && printDetail ? "full" : printHierarchy ? "hierarchy" : "detail";
                   let printNodes;
                   let baseLabel;
-                  if (viewMode === "hierarchy") {
+                  if (printTargetNodeId) {
+                    printNodes = activePrintNode ? [activePrintNode] : [];
+                    const nodeName = activePrintNode?.name || printTargetNodeId;
+                    baseLabel = `${nodeName}-${suffix}`;
+                  } else if (viewMode === "hierarchy") {
                     if (explodedNodes.size > 0) {
                       const visibleIds = new Set([focusId, ...explodedNodes]);
                       printNodes = nodeList.filter(n => visibleIds.has(n.id));
