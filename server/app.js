@@ -1209,7 +1209,14 @@ app.patch("/api/auth/me", async (req, res) => {
   try {
     const user = await getUser(req.auth.loginId);
     if (!user) return res.status(404).json({ error: "User not found" });
-    const { name, email, cellPhone, workPhone, homeScreen } = req.body || {};
+    const { name, email, cellPhone, workPhone, homeScreen, tabularViews, tabularViewsSelectedId } = req.body || {};
+    const normalizedTabularViews = Array.isArray(tabularViews)
+      ? tabularViews.map((view) => {
+          if (!view || typeof view !== "object") return null;
+          const { hidden, ...rest } = view;
+          return rest;
+        }).filter(Boolean)
+      : tabularViews;
     const updated = {
       ...user,
       ...(name       !== undefined && { name:       String(name).trim() }),
@@ -1217,6 +1224,8 @@ app.patch("/api/auth/me", async (req, res) => {
       ...(cellPhone  !== undefined && { cellPhone:  String(cellPhone).trim() }),
       ...(workPhone  !== undefined && { workPhone:  String(workPhone).trim() }),
       ...(homeScreen !== undefined && { homeScreen: homeScreen }),
+      ...(tabularViews !== undefined && { tabularViews: normalizedTabularViews }),
+      ...(tabularViewsSelectedId !== undefined && { tabularViewsSelectedId: tabularViewsSelectedId }),
     };
     await putUser(updated);
     const { passwordHash, ...profile } = updated;
