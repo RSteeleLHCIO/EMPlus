@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
+import XLSX from "xlsx";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
@@ -104,6 +105,92 @@ const getColumnIndex = (headers, candidates, fallback) => {
   return fallback;
 };
 
+// ─── Fuzzy header → DD field mapping ─────────────────────────────────────────
+
+// Maps known user column header variants to canonical DD field names.
+const FIELD_SYNONYMS = {
+  name:            ["name", "company name", "entity name", "node name", "organization", "org name", "business name", "legal name"],
+  kind:            ["kind", "type", "node type", "entity type"],
+  address:         ["address", "street", "street address", "mailing address", "location", "addr"],
+  workPhone:       ["work phone", "phone", "workphone", "office phone", "ph work", "business phone", "telephone", "tel", "phone number"],
+  cellPhone:       ["cell phone", "cell", "mobile", "mobile phone", "cellphone", "cell number", "personal phone"],
+  emails:          ["email", "emails", "email address", "e mail", "email addr"],
+  taxId:           ["tax id", "taxid", "ein", "tin", "federal id", "tax identification", "federal tax id", "fein"],
+  accountingUrl:   ["accounting url", "accounting", "accountingurl", "acctg link", "quickbooks url", "quickbooks", "accounting link", "acctg url"],
+  hrUrl:           ["hr url", "hrurl", "hr link", "hr system", "hris url", "hris", "human resources url"],
+  logo:            ["logo", "logo url", "logo link", "company logo"],
+  photo:           ["photo", "photo url", "picture", "headshot", "profile photo", "image"],
+  legalStatus:     ["legal status", "legalstatus", "entity structure", "structure", "corp type", "company type", "incorporation type"],
+  operationalRole: ["operational role", "operationalrole", "role", "function", "operational function", "business role"],
+  personStatus:    ["person status", "personstatus", "status", "employment status"],
+};
+
+// Strips punctuation, lowercases, and collapses whitespace in a header string.
+const normalizeHeader = (str) =>
+  String(str || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// Jaccard token-overlap score between two normalized strings.
+const tokenOverlap = (a, b) => {
+  const ta = new Set(a.split(" ").filter(Boolean));
+  const tb = new Set(b.split(" ").filter(Boolean));
+  if (ta.size === 0 && tb.size === 0) return 0;
+  const intersection = [...ta].filter((t) => tb.has(t)).length;
+  const union = new Set([...ta, ...tb]).size;
+  return intersection / union;
+};
+
+// Maps an array of raw column headers to DD field names.
+// Returns:
+//   fieldMap — { columnIndex: { field, confidence: "exact"|"fuzzy" } }
+//   guessed  — { rawHeader: fieldName } for fuzzy-matched columns (surfaced as warnings)
+//   extra    — rawHeaders with no DD match (will be stored in customFields)
+const mapHeadersToFields = (headers) => {
+  const fieldMap = {};
+  const guessed = {};
+  const extra = [];
+
+  headers.forEach((rawHeader, idx) => {
+    const normalized = normalizeHeader(rawHeader);
+    if (!normalized) return; // skip blank column headers
+
+    // Exact match against synonym lists
+    let matched = null;
+    for (const [field, synonyms] of Object.entries(FIELD_SYNONYMS)) {
+      if (synonyms.includes(normalized)) {
+        matched = { field, confidence: "exact" };
+        break;
+      }
+    }
+
+    // Fuzzy fallback: best token-overlap score ≥ 0.5
+    if (!matched) {
+      let bestScore = 0;
+      let bestField = null;
+      for (const [field, synonyms] of Object.entries(FIELD_SYNONYMS)) {
+        for (const synonym of synonyms) {
+          const score = tokenOverlap(normalized, synonym);
+          if (score > bestScore) { bestScore = score; bestField = field; }
+        }
+      }
+      if (bestScore >= 0.5) matched = { field: bestField, confidence: "fuzzy" };
+    }
+
+    if (matched) {
+      fieldMap[idx] = matched;
+      if (matched.confidence === "fuzzy") guessed[rawHeader] = matched.field;
+    } else {
+      extra.push(rawHeader);
+    }
+  });
+
+  return { fieldMap, guessed, extra };
+};
+
 const parseNodeCsv = (csvText, defaultKind = "entity", client) => {
   if (!csvText || typeof csvText !== "string") return { rows: [], skipped: 0 };
   const records = parse(csvText, {
@@ -184,6 +271,71 @@ const parseOwnershipCsv = (csvText) => {
   }
 
   return { rows, skipped };
+};
+
+// ─── Node details CSV/XLSX parser ────────────────────────────────────────────
+
+// Converts a parsed records array (header row + data rows) into patch objects.
+// Each row produces { name, patch } where patch contains only fields present in the file.
+// Columns that don't match any DD field are stored under customFields.
+const parseRecordsToDetailRows = (records) => {
+  if (!Array.isArray(records) || records.length < 2) return { rows: [], mapping: {}, skipped: 0 };
+
+  const headers = records[0].map((h) => String(h ?? ""));
+  const { fieldMap, guessed, extra } = mapHeadersToFields(headers);
+
+  // A "name" column is required to identify each node.
+  const nameColIdx = Number(
+    Object.entries(fieldMap).find(([, v]) => v.field === "name")?.[0] ?? -1
+  );
+  if (nameColIdx === -1) {
+    throw Object.assign(new Error('CSV must contain a "name" column to identify nodes'), { status: 400 });
+  }
+
+  // Map column indices for unrecognised headers → stored in customFields.
+  const extraColMap = {};
+  headers.forEach((rawHeader, idx) => {
+    if (extra.includes(rawHeader) && rawHeader.trim()) extraColMap[idx] = rawHeader.trim();
+  });
+
+  const rows = [];
+  let skipped = 0;
+  for (let i = 1; i < records.length; i++) {
+    const record = records[i] || [];
+    const name = String(record[nameColIdx] ?? "").trim();
+    if (!name) { skipped += 1; continue; }
+
+    const patch = {};
+    for (const [idxStr, { field }] of Object.entries(fieldMap)) {
+      if (field === "name") continue;
+      const value = String(record[Number(idxStr)] ?? "").trim();
+      if (value !== "") patch[field] = value;
+    }
+
+    // Non-DD columns stored separately so applyDetailRows can assign proper DD fieldIds.
+    const extraValues = {};
+    for (const [idxStr, header] of Object.entries(extraColMap)) {
+      const value = String(record[Number(idxStr)] ?? "").trim();
+      if (value !== "") extraValues[header] = value;
+    }
+
+    rows.push({ name, patch, extraValues });
+  }
+
+  return { rows, extraHeaders: extra, mapping: { guessed, extra }, skipped };
+};
+
+const parseDetailsCsv = (csvText) => {
+  if (!csvText || typeof csvText !== "string") return { rows: [], mapping: {}, skipped: 0 };
+  const records = parse(csvText, { skip_empty_lines: true, relax_column_count: true, trim: true });
+  return parseRecordsToDetailRows(records);
+};
+
+const parseDetailsXlsx = (buffer) => {
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const records = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  return parseRecordsToDetailRows(records);
 };
 
 // ─── DynamoDB item builders ───────────────────────────────────────────────────
@@ -667,6 +819,153 @@ app.post("/api/import/ownerships-csv/upload", upload.single("file"), async (req,
     res.json({ ok: true, total: rows.length, imported: resolved.length, skipped: skipped + errors.length, errors, importBatchId });
   } catch (err) {
     console.error("/api/import/ownerships-csv/upload error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── Helper shared by both details endpoints ──────────────────────────────────
+
+// Patches existing nodes with fields extracted from a details file.
+// Looks up each row by name (case-insensitive). Unknown columns that landed in
+// customFields are merged (not replaced) with whatever the node already has.
+// Resolves or auto-creates a DD field for each unrecognised column header.
+// Returns a map of rawHeader → fieldId so values can be stored under the correct key.
+const resolveExtraHeaders = async (extraHeaders, client) => {
+  if (!extraHeaders || extraHeaders.length === 0) return {};
+
+  const existingFields = await queryDDFields(client);
+  // Build lookup: normalised prompt → fieldId
+  const existingByPrompt = new Map(
+    existingFields.map((f) => [normalizeHeader(f.prompt || ""), f.fieldId])
+  );
+
+  const headerToFieldId = {};
+  const now = new Date().toISOString();
+  const toCreate = [];
+
+  for (const rawHeader of extraHeaders) {
+    if (!rawHeader.trim()) continue;
+    const normalized = normalizeHeader(rawHeader);
+    if (existingByPrompt.has(normalized)) {
+      headerToFieldId[rawHeader] = existingByPrompt.get(normalized);
+    } else {
+      const fieldId = `dd:${slugify(rawHeader.trim())}-${Date.now().toString(36)}-${toCreate.length}`;
+      const item = {
+        clientId: client,
+        fieldId,
+        id: fieldId,
+        prompt: rawHeader.trim(),
+        dataType: "string",
+        appliesTo: "both",
+        multiValue: false,
+        validValues: [],
+        phoneTypes: [],
+        showInStats: false,
+        sortOrder: existingFields.length + toCreate.length,
+        createdAt: now,
+        updatedAt: now,
+      };
+      toCreate.push(item);
+      headerToFieldId[rawHeader] = fieldId;
+      existingByPrompt.set(normalized, fieldId); // prevent duplicates within the same batch
+    }
+  }
+
+  if (toCreate.length) await Promise.all(toCreate.map((f) => putDDField(f)));
+  return headerToFieldId;
+};
+
+const applyDetailRows = async (rows, extraHeaders, client) => {
+  const [allNodes, headerToFieldId] = await Promise.all([
+    queryNodes(client),
+    resolveExtraHeaders(extraHeaders, client),
+  ]);
+  const nameMap = new Map(allNodes.map((n) => [String(n.name || "").toLowerCase(), n]));
+
+  const now = new Date().toISOString();
+  const importBatchId = now;
+  const updated = [];
+  const notFoundList = [];
+
+  for (const { name, patch, extraValues = {} } of rows) {
+    // Match by display name or by raw/prefixed id value
+    const existing =
+      nameMap.get(name.toLowerCase()) ||
+      allNodes.find((n) => n.id === normalizeClientId(client, name));
+    if (!existing) { notFoundList.push(name); continue; }
+
+    // Remap extra column values from raw header name → DD fieldId.
+    const remappedExtra = {};
+    for (const [rawHeader, value] of Object.entries(extraValues)) {
+      const fieldId = headerToFieldId[rawHeader];
+      if (fieldId) remappedExtra[fieldId] = value;
+    }
+
+    // Merge customFields: preserve existing keys; add/overwrite only keys present in this import.
+    // Fields absent from the spreadsheet are NOT touched.
+    const mergedCustomFields = {
+      ...(existing.customFields || {}),
+      ...remappedExtra,
+    };
+
+    const item = buildNodeItem({
+      ...existing,
+      ...patch,                  // only overwrites DD fields that were present & non-blank
+      customFields: mergedCustomFields,
+      emails: patch.emails !== undefined
+        ? normalizeEmails(patch.emails)
+        : existing.emails,
+      client,
+      createdAt: existing.createdAt || now,
+      updatedAt: now,
+    });
+    updated.push({ ...item, importBatchId });
+  }
+
+  if (updated.length) await batchPutNodes(updated);
+  const ddCreated = Object.entries(headerToFieldId);
+  return {
+    updated: updated.length,
+    notFound: notFoundList.length,
+    notFoundList,
+    ddFieldsCreated: ddCreated.map(([header, fieldId]) => ({ header, fieldId })),
+  };
+};
+
+app.post("/api/import/details-csv", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const { csv } = req.body || {};
+    if (!csv) return res.status(400).json({ error: "csv is required" });
+
+    const { rows, extraHeaders, mapping, skipped } = parseDetailsCsv(csv);
+    if (!rows.length) return res.status(400).json({ error: "no valid rows found", mapping, skipped });
+
+    const result = await applyDetailRows(rows, extraHeaders, client);
+    res.json({ ok: true, ...result, skipped, mapping });
+  } catch (err) {
+    console.error("/api/import/details-csv error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post("/api/import/details-csv/upload", upload.single("file"), async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
+
+    const ext = (req.file.originalname || "").split(".").pop().toLowerCase();
+    const isXlsx = ext === "xlsx" || ext === "xls";
+    const { rows, extraHeaders, mapping, skipped } = isXlsx
+      ? parseDetailsXlsx(req.file.buffer)
+      : parseDetailsCsv(req.file.buffer.toString("utf-8"));
+
+    if (!rows.length) return res.status(400).json({ error: "no valid rows found", mapping, skipped });
+
+    const result = await applyDetailRows(rows, extraHeaders, client);
+    res.json({ ok: true, ...result, skipped, mapping });
+  } catch (err) {
+    console.error("/api/import/details-csv/upload error", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
@@ -1339,6 +1638,98 @@ app.patch("/api/client", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("/api/client PATCH error", err);
     res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── CLONE CLIENT ─────────────────────────────────────────────────────────────
+
+// POST /api/admin/clone-client — admin-only; creates a new empty client with:
+//   • a new client record (EMPlusClients)
+//   • a single admin user whose loginId is  <first segment of caller's loginId>-<newClientId>
+//     and whose password hash is copied from the caller (same password, no plaintext needed)
+//   • a full copy of the source client's DataDictionary
+// The new client starts with no nodes/rels — the new admin is expected to import data.
+app.post("/api/admin/clone-client", requireAdmin, async (req, res) => {
+  try {
+    const srcClientId = req.auth.clientId;
+    const { newClientId } = req.body || {};
+
+    if (!newClientId || !String(newClientId).trim()) {
+      return res.status(400).json({ error: "newClientId is required" });
+    }
+
+    // Normalise to lowercase slug (same chars allowed as clientId throughout the app).
+    const cleanId = String(newClientId)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-")
+      .replace(/(^-|-$)/g, "");
+
+    if (!cleanId) {
+      return res.status(400).json({ error: "newClientId must contain alphanumeric characters" });
+    }
+
+    // Guard: reject if the target client already has users.
+    const existingCount = await countUsersByClient(cleanId);
+    if (existingCount > 0) {
+      return res.status(409).json({ error: `Client "${cleanId}" already exists` });
+    }
+
+    // Fetch the current admin's record so we can copy the password hash.
+    const srcUser = await getUser(req.auth.loginId);
+    if (!srcUser) return res.status(404).json({ error: "Source user not found" });
+
+    // New admin loginId: first "-"-delimited segment of current loginId + "-" + newClientId.
+    const baseLoginId = req.auth.loginId.split("-")[0];
+    const newLoginId = `${baseLoginId}-${cleanId}`;
+
+    // Guard: loginId must not already exist in the users table.
+    const existingLogin = await getUser(newLoginId);
+    if (existingLogin) {
+      return res.status(409).json({ error: `Login ID "${newLoginId}" is already taken` });
+    }
+
+    const now = new Date().toISOString();
+
+    // 1. Create the new client record.
+    await putClient({
+      clientId: cleanId,
+      clonedFrom: srcClientId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // 2. Create the new admin user, reusing the source user's bcrypt hash so the
+    //    new admin can log in with the same password without us ever seeing it as
+    //    plaintext.
+    await putUser({
+      loginId: newLoginId,
+      clientId: cleanId,
+      personId: null,
+      role: "admin",
+      passwordHash: srcUser.passwordHash,
+      createdAt: now,
+    });
+
+    // 3. Copy all DataDictionary fields from the source client to the new client.
+    const ddFields = await queryDDFields(srcClientId);
+    if (ddFields.length > 0) {
+      await Promise.all(
+        ddFields.map((field) =>
+          putDDField({ ...field, clientId: cleanId, updatedAt: now })
+        )
+      );
+    }
+
+    res.status(201).json({
+      ok: true,
+      newClientId: cleanId,
+      newLoginId,
+      ddFieldsCloned: ddFields.length,
+    });
+  } catch (err) {
+    console.error("/api/admin/clone-client error", err);
+    res.status(500).json({ error: err.message });
   }
 });
 

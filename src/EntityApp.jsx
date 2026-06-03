@@ -1457,6 +1457,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [serverInfoOpen, setServerInfoOpen] = useState(false);
   const [serverInfoData, setServerInfoData] = useState(null);
   const [serverInfoBusy, setServerInfoBusy] = useState(false);
+  const [cloneClientOpen, setCloneClientOpen] = useState(false);
+  const [cloneClientDraft, setCloneClientDraft] = useState("");
+  const [cloneClientBusy, setCloneClientBusy] = useState(false);
+  const [cloneClientError, setCloneClientError] = useState("");
+  const [cloneClientResult, setCloneClientResult] = useState(null);
   const [collapsedOwnerNodes, setCollapsedOwnerNodes] = useState(() => new Set());
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
 
@@ -3638,6 +3643,21 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     >
                       <UserPlus size={15} />
                       Manage Users
+                    </button>
+                  )}
+                  {myRole === "admin" && (
+                    <button
+                      className="settings-menu-item"
+                      onClick={() => {
+                        setSettingsOpen(false);
+                        setCloneClientDraft("");
+                        setCloneClientError("");
+                        setCloneClientResult(null);
+                        setCloneClientOpen(true);
+                      }}
+                    >
+                      <GitFork size={15} />
+                      Clone this client
                     </button>
                   )}
                   <div className="settings-menu-divider" />
@@ -6708,6 +6728,102 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             </div>
             <DialogFooter style={{ marginTop: 20 }}>
               <Button variant="secondary" onClick={() => setServerInfoOpen(false)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={cloneClientOpen} onOpenChange={(v) => { if (!v && !cloneClientBusy) setCloneClientOpen(false); }}>
+          <DialogContent style={{ width: "min(440px, 92vw)", maxWidth: "none" }}>
+            <DialogHeader style={{ marginBottom: 16 }}>
+              <DialogTitle>Clone this client</DialogTitle>
+            </DialogHeader>
+            <div style={{ display: "grid", gap: 14, fontSize: 14 }}>
+              {cloneClientResult ? (
+                <div style={{ display: "grid", gap: 10 }}>
+                  <div style={{ color: "#16a34a", fontWeight: 600 }}>Client cloned successfully.</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ padding: "4px 12px 4px 0", fontWeight: 600, color: "#374151" }}>New client ID</td>
+                        <td style={{ padding: "4px 0", fontFamily: "monospace" }}>{cloneClientResult.newClientId}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: "4px 12px 4px 0", fontWeight: 600, color: "#374151" }}>Admin login</td>
+                        <td style={{ padding: "4px 0", fontFamily: "monospace" }}>{cloneClientResult.newLoginId}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: "4px 12px 4px 0", fontWeight: 600, color: "#374151" }}>DD fields copied</td>
+                        <td style={{ padding: "4px 0" }}>{cloneClientResult.ddFieldsCloned}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: "4px 12px 4px 0", fontWeight: 600, color: "#374151" }}>Password</td>
+                        <td style={{ padding: "4px 0" }}>Same as your current password</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <>
+                  <div style={{ color: "#6b7280" }}>
+                    Creates a new empty client with a single admin user. The DataDictionary from this client will be copied. The new admin can log in with the same password as your current account.
+                  </div>
+                  <div>
+                    <Label htmlFor="clone-client-id">New client ID</Label>
+                    <Input
+                      id="clone-client-id"
+                      value={cloneClientDraft}
+                      onChange={(e) => { setCloneClientDraft(e.target.value); setCloneClientError(""); }}
+                      placeholder="e.g. acme-corp"
+                      autoComplete="off"
+                      disabled={cloneClientBusy}
+                    />
+                  </div>
+                  {cloneClientDraft.trim() && (
+                    <div style={{ fontSize: 12, color: "#6b7280" }}>
+                      New admin login:{" "}
+                      <span style={{ fontFamily: "monospace", color: "#111827" }}>
+                        {myLoginId.split("-")[0]}-{cloneClientDraft.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/(^-|-$)/g, "")}
+                      </span>
+                    </div>
+                  )}
+                  {cloneClientError && (
+                    <div style={{ color: "#dc2626", fontSize: 13 }}>{cloneClientError}</div>
+                  )}
+                </>
+              )}
+            </div>
+            <DialogFooter style={{ marginTop: 20 }}>
+              {cloneClientResult ? (
+                <Button onClick={() => setCloneClientOpen(false)}>Close</Button>
+              ) : (
+                <>
+                  <Button variant="secondary" onClick={() => setCloneClientOpen(false)} disabled={cloneClientBusy}>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={async () => {
+                      const val = cloneClientDraft.trim();
+                      if (!val) { setCloneClientError("Please enter a client ID."); return; }
+                      setCloneClientBusy(true);
+                      setCloneClientError("");
+                      try {
+                        const result = await apiRequest("/api/admin/clone-client", {
+                          method: "POST",
+                          body: JSON.stringify({ newClientId: val }),
+                        });
+                        setCloneClientResult(result);
+                      } catch (err) {
+                        setCloneClientError(err.message || "Clone failed.");
+                      } finally {
+                        setCloneClientBusy(false);
+                      }
+                    }}
+                    disabled={cloneClientBusy || !cloneClientDraft.trim()}
+                  >
+                    {cloneClientBusy ? <><Loader2 size={15} className="animate-spin" style={{ marginRight: 6 }} />Cloning…</> : "Clone client"}
+                  </Button>
+                </>
+              )}
             </DialogFooter>
           </DialogContent>
         </Dialog>
