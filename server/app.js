@@ -338,6 +338,12 @@ const parseDetailsXlsx = (buffer) => {
   return parseRecordsToDetailRows(records);
 };
 
+const xlsxBufferToCsv = (buffer) => {
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_csv(sheet);
+};
+
 // ─── DynamoDB item builders ───────────────────────────────────────────────────
 
 const buildNodeItem = (
@@ -722,7 +728,9 @@ app.post("/api/import/nodes-csv/upload", upload.single("file"), async (req, res)
     const defaultKind = req.body?.defaultKind || "entity";
     if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
 
-    const csv = req.file.buffer.toString("utf-8");
+    const ext = (req.file.originalname || "").split(".").pop().toLowerCase();
+    const isXlsx = ext === "xlsx" || ext === "xls";
+    const csv = isXlsx ? xlsxBufferToCsv(req.file.buffer) : req.file.buffer.toString("utf-8");
     const { rows, skipped } = parseNodeCsv(csv, defaultKind, client);
     if (!rows.length) {
       return res.status(400).json({ error: "no valid rows found in csv" });
@@ -806,7 +814,9 @@ app.post("/api/import/ownerships-csv/upload", upload.single("file"), async (req,
     const client = req.auth.clientId;
     if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
 
-    const csv = req.file.buffer.toString("utf-8");
+    const ext = (req.file.originalname || "").split(".").pop().toLowerCase();
+    const isXlsx = ext === "xlsx" || ext === "xls";
+    const csv = isXlsx ? xlsxBufferToCsv(req.file.buffer) : req.file.buffer.toString("utf-8");
     const { rows, skipped } = parseOwnershipCsv(csv);
     if (!rows.length) {
       return res.status(400).json({ error: "no valid rows found in csv" });
@@ -819,6 +829,63 @@ app.post("/api/import/ownerships-csv/upload", upload.single("file"), async (req,
     res.json({ ok: true, total: rows.length, imported: resolved.length, skipped: skipped + errors.length, errors, importBatchId });
   } catch (err) {
     console.error("/api/import/ownerships-csv/upload error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── Import preview (parse-only, no writes) ───────────────────────────────────
+
+app.post("/api/import/preview/upload", upload.single("file"), async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const importType = req.body?.importType || "entity";
+    const defaultKind = req.body?.defaultKind || "entity";
+    if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
+
+    const ext = (req.file.originalname || "").split(".").pop().toLowerCase();
+    const isXlsx = ext === "xlsx" || ext === "xls";
+    const MAX_PREVIEW = 50;
+
+    if (importType === "details") {
+      let rawRecords;
+      if (isXlsx) {
+        const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        rawRecords = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+      } else {
+        rawRecords = parse(req.file.buffer.toString("utf-8"), { skip_empty_lines: true, relax_column_count: true, trim: true });
+      }
+      if (!rawRecords || rawRecords.length < 2) {
+        return res.json({ headers: [], rows: [], total: 0, skipped: 0, truncated: false });
+      }
+      const { rows, skipped, mapping } = parseRecordsToDetailRows(rawRecords);
+      const headers = rawRecords[0].map((h) => String(h ?? "")).filter((h) => h.trim());
+      const previewRows = rawRecords.slice(1, MAX_PREVIEW + 1).map((record) =>
+        headers.reduce((obj, h, i) => { obj[h] = String(record[i] ?? ""); return obj; }, {})
+      );
+      return res.json({ headers, rows: previewRows, total: rows.length, skipped, mapping, truncated: rows.length > MAX_PREVIEW });
+    }
+
+    if (importType === "ownership") {
+      const csv = isXlsx ? xlsxBufferToCsv(req.file.buffer) : req.file.buffer.toString("utf-8");
+      const { rows, skipped } = parseOwnershipCsv(csv);
+      const headers = ["Owner", "Owned", "Percent"];
+      const previewRows = rows.slice(0, MAX_PREVIEW).map((r) => ({
+        Owner: r.owner,
+        Owned: r.owned,
+        Percent: Number.isNaN(r.percent) ? "" : String(r.percent),
+      }));
+      return res.json({ headers, rows: previewRows, total: rows.length, skipped, truncated: rows.length > MAX_PREVIEW });
+    }
+
+    // entity or person
+    const csv = isXlsx ? xlsxBufferToCsv(req.file.buffer) : req.file.buffer.toString("utf-8");
+    const { rows, skipped } = parseNodeCsv(csv, defaultKind, client);
+    const headers = ["Name", "Kind"];
+    const previewRows = rows.slice(0, MAX_PREVIEW).map((r) => ({ Name: r.name, Kind: r.kind }));
+    return res.json({ headers, rows: previewRows, total: rows.length, skipped, truncated: rows.length > MAX_PREVIEW });
+  } catch (err) {
+    console.error("/api/import/preview/upload error", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });

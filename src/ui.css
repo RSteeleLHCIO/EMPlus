@@ -2040,6 +2040,7 @@ input[type="time"].no-native-picker {
     max-width: 80px;
     max-height: 48px;
     object-fit: contain;
+    border-radius: 30px;
 }
 
 .hv-focus-photo {

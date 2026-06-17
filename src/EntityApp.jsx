@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
 import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair } from "lucide-react";
@@ -1229,6 +1230,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [uploadSummary, setUploadSummary] = useState(null);
   const [uploadDetected, setUploadDetected] = useState("");
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
+  const [uploadPreview, setUploadPreview] = useState(null);
+  const [uploadPreviewLoading, setUploadPreviewLoading] = useState(false);
   const parseCsvLine = (line) => {
     const result = [];
     let current = "";
@@ -1269,15 +1272,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     if (hasOwnershipHeaders) return { type: "ownership", label: "Ownerships" };
 
     const sampleLines = lines.slice(0, 5).map(parseCsvLine);
-    const maxCols = Math.max(...sampleLines.map((row) => row.length));
-
-    if (maxCols >= 3) {
-      const percentIdx = 2;
-      const looksNumeric = sampleLines.some((row) =>
-        row[percentIdx] && !Number.isNaN(Number(row[percentIdx]))
-      );
-      if (looksNumeric) return { type: "ownership", label: "Ownerships" };
-    }
 
     const secondCol = sampleLines.map((row) => (row[1] || "").toLowerCase());
     const hasKind = secondCol.some((value) => value === "entity" || value === "person");
@@ -1741,7 +1735,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       setUploadProgress({ current: 0, total: 0 });
 
       if (uploadType === "ownership") {
-        const csvText = await readFileText(uploadFile);
+        const ext = (uploadFile.name || "").split(".").pop().toLowerCase();
+        let csvText;
+        if (ext === "xlsx" || ext === "xls") {
+          const buffer = await uploadFile.arrayBuffer();
+          const workbook = XLSX.read(buffer, { type: "array" });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          csvText = XLSX.utils.sheet_to_csv(sheet);
+        } else {
+          csvText = await readFileText(uploadFile);
+        }
         const { rows, skipped } = parseOwnershipCsvClient(csvText);
         if (!rows.length) {
           setUploadStatus("error");
@@ -1763,7 +1766,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           const chunkCsv = rowsToCsv(chunk);
           const response = await fetch(`${apiBase}/api/import/ownerships-csv`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
             body: JSON.stringify({ csv: chunkCsv, client: clientId }),
           });
           const responseText = await response.text();
@@ -1808,9 +1811,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
       const endpoint = uploadType === "ownership"
         ? "/api/import/ownerships-csv/upload"
+        : uploadType === "details"
+        ? "/api/import/details-csv/upload"
         : "/api/import/nodes-csv/upload";
       const response = await fetch(`${apiBase}${endpoint}`, {
         method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: form,
       });
       const responseText = await response.text();
@@ -1823,6 +1829,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         }
       }
       if (!response.ok) {
+        // For ownership resolution failures the server sends per-row errors — surface them.
+        if (Array.isArray(data?.errors) && data.errors.length > 0) {
+          setUploadSummary({ imported: 0, skipped: data.skipped || 0, errors: data.errors, total: data.errors.length });
+          setUploadStatus("success");
+          await loadDirectory();
+          return;
+        }
         const fallback = typeof data?.raw === "string" ? data.raw : responseText;
         throw new Error(data?.error || fallback || `Upload failed (${response.status})`);
       }
@@ -1832,6 +1845,36 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     } catch (err) {
       setUploadStatus("error");
       setUploadError(err.message || "Upload failed");
+    }
+  };
+
+  const handlePreview = async () => {
+    if (!uploadFile) {
+      setUploadError("Please select a file.");
+      setUploadStatus("error");
+      return;
+    }
+    setUploadPreviewLoading(true);
+    setUploadError("");
+    setUploadStatus("idle");
+    setUploadPreview(null);
+    try {
+      const form = new FormData();
+      form.append("file", uploadFile);
+      form.append("importType", uploadType);
+      form.append("defaultKind", uploadKind);
+      const response = await fetch(`${apiBase}/api/import/preview/upload`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: form,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Preview failed");
+      setUploadPreview(data);
+    } catch (err) {
+      setUploadError(err.message || "Preview failed");
+    } finally {
+      setUploadPreviewLoading(false);
     }
   };
 
@@ -1856,6 +1899,36 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  const downloadTemplate = () => {
+    const TEMPLATES = {
+      entity: {
+        headers: ["name", "kind"],
+        example: ["Example Corp", "entity"],
+        fileName: "entities-template.xlsx",
+      },
+      person: {
+        headers: ["name", "kind"],
+        example: ["Jane Doe", "person"],
+        fileName: "persons-template.xlsx",
+      },
+      ownership: {
+        headers: ["owner", "owned", "percent"],
+        example: ["Parent Corp", "Subsidiary LLC", "100"],
+        fileName: "ownerships-template.xlsx",
+      },
+      details: {
+        headers: ["name", "address", "workPhone", "cellPhone", "emails", "taxId", "accountingUrl", "hrUrl", "logo", "legalStatus", "operationalRole", "personStatus"],
+        example: ["Example Corp", "123 Main St", "555-1234", "555-5678", "info@example.com", "12-3456789", "", "", "", "LLC", "", ""],
+        fileName: "details-template.xlsx",
+      },
+    };
+    const tpl = TEMPLATES[uploadType] || TEMPLATES.entity;
+    const ws = XLSX.utils.aoa_to_sheet([tpl.headers, tpl.example]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Template");
+    XLSX.writeFile(wb, tpl.fileName);
   };
 
   const loadDataDictionary = async () => {
@@ -3415,14 +3488,15 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 }
               }}
             >
-              <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 50, width: "auto", margin: "-10px" }} />
+              <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 50, width: "auto", margin: "-10px", borderRadius: "25px" }} />
             </button>
-            <div style={{marginLeft: 8}}>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+            <div style={{ textAlign: "center" }}>
               <div style={{ fontSize: 15, fontWeight: 600, color: "#1a1a2e" }}>{clientDisplayName || toSentenceCase(clientId)}</div>
               <div style={{ fontSize: 13, color: "#64748b" }}>Entity Dashboard</div>
             </div>
-          </div>
-          <div style={{ display: "flex", marginRight: "110px", borderRadius: 6, overflow: "hidden", border: "1px solid #cbd5e1" }}>
+            <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid #cbd5e1" }}>
             <button
               type="button"
               aria-label="Hierarchy view"
@@ -3467,6 +3541,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             >
               <BookOpen size={14} /> Tabular
             </button>
+          </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Button
@@ -3536,6 +3611,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       setUploadSummary(null);
                       setUploadFile(null);
                       setUploadDetected("");
+                      setUploadPreview(null);
+                      setUploadPreviewLoading(false);
                       setSettingsOpen(false);
                     }}
                   >
@@ -3731,112 +3808,222 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       <div className="app-content">
 
         <Dialog open={uploadOpen} onOpenChange={() => setUploadOpen(false)}>
-          <DialogContent style={{ maxWidth: 520 }}>
+          <DialogContent style={{ maxWidth: uploadPreview && uploadStatus !== "success" ? 700 : 520 }}>
             <DialogHeader>
-              <DialogTitle>Import CSV</DialogTitle>
+              <DialogTitle>Import</DialogTitle>
             </DialogHeader>
-            <div style={{ display: "grid", gap: 12 }}>
-              <div style={{ fontSize: 14, color: "#6b7280" }}>
-                {uploadDetected ? `Detected: ${uploadDetected}` : "Choose a CSV file to detect its type."}
-              </div>
-              <div>
-                <Label htmlFor="csv-upload">CSV file</Label>
-                <Input
-                  id="csv-upload"
-                  type="file"
-                  accept=".csv,text/csv"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0] || null;
-                    setUploadFile(file);
-                    setUploadSummary(null);
-                    setUploadError("");
-                    setUploadStatus("idle");
-                    if (!file) {
-                      setUploadDetected("");
-                      return;
-                    }
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                      const text = reader.result || "";
-                      const detected = detectUploadType(text);
-                      setUploadType(detected.type === "person" ? "person" : detected.type === "ownership" ? "ownership" : "entity");
-                      setUploadDetected(detected.label);
-                      if (detected.type === "person") setUploadKind("person");
-                      if (detected.type === "entity") setUploadKind("entity");
-                    };
-                    reader.readAsText(file);
-                  }}
-                />
-              </div>
-              {uploadType !== "ownership" && uploadDetected && (
+
+            {/* ── Configure view ── */}
+            {!uploadPreview && uploadStatus !== "success" && (
+              <div style={{ display: "grid", gap: 12 }}>
                 <div>
-                  <Label htmlFor="csv-default-kind">Default kind</Label>
-                  <select
-                    id="csv-default-kind"
-                    className="focus-select"
-                    value={uploadKind}
-                    onChange={(event) => setUploadKind(event.target.value)}
-                  >
-                    <option value="entity">Entity</option>
-                    <option value="person">Person</option>
-                  </select>
+                  <Label>Import type</Label>
+                  <div style={{ display: "flex", gap: 20, marginTop: 8, flexWrap: "wrap" }}>
+                    {[
+                      { value: "entity", label: "Entities" },
+                      { value: "person", label: "Persons" },
+                      { value: "ownership", label: "Ownerships" },
+                      { value: "details", label: "Details" },
+                    ].map(({ value, label }) => (
+                      <label key={value} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 14 }}>
+                        <input
+                          type="radio"
+                          name="upload-type"
+                          value={value}
+                          checked={uploadType === value}
+                          onChange={() => {
+                            setUploadType(value);
+                            if (value === "entity") setUploadKind("entity");
+                            if (value === "person") setUploadKind("person");
+                            setUploadSummary(null);
+                            setUploadError("");
+                            setUploadStatus("idle");
+                            setUploadPreview(null);
+                          }}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
                 </div>
-              )}
-              {uploadStatus === "uploading" && (
-                <div style={{ color: "#6b7280", fontSize: 14 }}>
-                  {uploadType === "ownership" && uploadProgress.total > 0
-                    ? `Uploading chunk ${uploadProgress.current} of ${uploadProgress.total}...`
-                    : "Uploading..."}
+                <div>
+                  <Label htmlFor="csv-upload">File</Label>
+                  <Input
+                    id="csv-upload"
+                    type="file"
+                    accept=".csv,.xlsx,.xls,text/csv"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null;
+                      setUploadFile(file);
+                      setUploadSummary(null);
+                      setUploadError("");
+                      setUploadStatus("idle");
+                      setUploadPreview(null);
+                      if (!file) {
+                        setUploadDetected("");
+                        return;
+                      }
+                      const ext = (file.name || "").split(".").pop().toLowerCase();
+                      if (ext === "xlsx" || ext === "xls") {
+                        return; // keep whatever radio button type the user selected
+                      }
+                      const reader = new FileReader();
+                      reader.onload = () => {
+                        const text = reader.result || "";
+                        const detected = detectUploadType(text);
+                        setUploadType(detected.type === "person" ? "person" : detected.type === "ownership" ? "ownership" : "entity");
+                        setUploadDetected(detected.label);
+                        if (detected.type === "person") setUploadKind("person");
+                        if (detected.type === "entity") setUploadKind("entity");
+                      };
+                      reader.readAsText(file);
+                    }}
+                  />
                 </div>
-              )}
-              {uploadStatus === "error" && uploadError && (
-                <div style={{ color: "#dc2626", fontSize: 14 }}>{uploadError}</div>
-              )}
-              {uploadStatus === "success" && uploadSummary && (
+                {uploadStatus === "error" && uploadError && (
+                  <div style={{ color: "#dc2626", fontSize: 14 }}>{uploadError}</div>
+                )}
+              </div>
+            )}
+
+            {/* ── Preview view ── */}
+            {uploadPreview && uploadStatus !== "success" && (
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ fontSize: 14, color: "#374151" }}>
+                  Found <strong>{uploadPreview.total}</strong> row{uploadPreview.total !== 1 ? "s" : ""}
+                  {uploadPreview.skipped > 0 && <>, {uploadPreview.skipped} blank or invalid skipped</>}.
+                  {uploadPreview.truncated && <> Showing first {uploadPreview.rows.length}.</>}
+                </div>
+                <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden" }}>
+                  <div style={{ overflowX: "auto", maxHeight: 320, overflowY: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr>
+                          {uploadPreview.headers.map((h) => (
+                            <th key={h} style={{ padding: "6px 10px", textAlign: "left", background: "#f9fafb", borderBottom: "1px solid #e5e7eb", whiteSpace: "nowrap", fontWeight: 600, color: "#374151", position: "sticky", top: 0 }}>
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {uploadPreview.rows.map((row, i) => (
+                          <tr key={i} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                            {uploadPreview.headers.map((h) => (
+                              <td key={h} style={{ padding: "4px 10px", color: "#374151", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {row[h] ?? ""}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                {uploadPreview.mapping?.guessed && Object.keys(uploadPreview.mapping.guessed).length > 0 && (
+                  <div style={{ fontSize: 12, color: "#b45309", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    <span style={{ fontWeight: 600 }}>Fuzzy-matched columns:</span>
+                    {Object.entries(uploadPreview.mapping.guessed).map(([h, f]) => (
+                      <span key={h} style={{ background: "#fef3c7", padding: "1px 6px", borderRadius: 4 }}>"{h}" → {f}</span>
+                    ))}
+                  </div>
+                )}
+                {uploadStatus === "uploading" && (
+                  <div style={{ color: "#6b7280", fontSize: 14 }}>
+                    {uploadType === "ownership" && uploadProgress.total > 0
+                      ? `Uploading chunk ${uploadProgress.current} of ${uploadProgress.total}...`
+                      : "Uploading..."}
+                  </div>
+                )}
+                {uploadStatus === "error" && uploadError && (
+                  <div style={{ color: "#dc2626", fontSize: 14 }}>{uploadError}</div>
+                )}
+              </div>
+            )}
+
+            {/* ── Success view ── */}
+            {uploadStatus === "success" && uploadSummary && (
+              <div style={{ display: "grid", gap: 10 }}>
                 <div style={{ color: "#16a34a", fontSize: 14 }}>
                   {uploadType === "ownership" ? (
                     <>Imported {uploadSummary.imported || 0} ownerships. Skipped {uploadSummary.skipped || 0}.</>
+                  ) : uploadType === "details" ? (
+                    <>Updated {uploadSummary.updated || 0} records.{uploadSummary.notFound > 0 ? ` ${uploadSummary.notFound} not matched by name.` : ""}{uploadSummary.skipped > 0 ? ` ${uploadSummary.skipped} rows skipped.` : ""}</>
                   ) : (
                     <>Imported {uploadSummary.total || 0} rows ({uploadSummary.entities || 0} entities,
                       {" "}{uploadSummary.persons || 0} persons). Skipped {uploadSummary.skipped || 0}.</>
                   )}
                 </div>
-              )}
-              {uploadSummary?.errors?.length > 0 && (
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 13, color: "#b45309" }}>
-                    {uploadSummary.errors.length} rows rejected.
+                {uploadSummary?.errors?.length > 0 && (
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ fontSize: 13, color: "#b45309" }}>
+                      {uploadSummary.errors.length} rows rejected.
+                    </div>
+                    <div style={{ maxHeight: 140, overflowY: "auto", overscrollBehavior: "contain", border: "1px solid #e5e7eb", borderRadius: 8, padding: 8 }}>
+                      {uploadSummary.errors.slice(0, 50).map((err, idx) => (
+                        <div key={`${err.row}-${idx}`} style={{ fontSize: 12, color: "#6b7280" }}>
+                          Row {err.row}: {err.reason}
+                          {err.owner ? ` (owner: ${err.owner})` : ""}
+                          {err.owned ? ` (owned: ${err.owned})` : ""}
+                          {err.percent !== undefined ? ` (percent: ${err.percent})` : ""}
+                        </div>
+                      ))}
+                      {uploadSummary.errors.length > 50 && (
+                        <div style={{ fontSize: 12, color: "#6b7280" }}>…showing first 50</div>
+                      )}
+                    </div>
+                    <Button type="button" variant="outline" onClick={downloadErrorsCsv}>
+                      Download rejected rows
+                    </Button>
                   </div>
-                  <div style={{ maxHeight: 140, overflowY: "auto", overscrollBehavior: "contain", border: "1px solid #e5e7eb", borderRadius: 8, padding: 8 }}>
-                    {uploadSummary.errors.slice(0, 50).map((err, idx) => (
-                      <div key={`${err.row}-${idx}`} style={{ fontSize: 12, color: "#6b7280" }}>
-                        Row {err.row}: {err.reason}
-                        {err.owner ? ` (owner: ${err.owner})` : ""}
-                        {err.owned ? ` (owned: ${err.owned})` : ""}
-                        {err.percent !== undefined ? ` (percent: ${err.percent})` : ""}
-                      </div>
-                    ))}
-                    {uploadSummary.errors.length > 50 && (
-                      <div style={{ fontSize: 12, color: "#6b7280" }}>…showing first 50</div>
-                    )}
-                  </div>
-                  <Button type="button" variant="outline" onClick={downloadErrorsCsv}>
-                    Download rejected rows
-                  </Button>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
+
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>
-                Close
-              </Button>
-              <Button
-                type="button"
-                onClick={handleUploadCsv}
-                disabled={uploadStatus === "uploading"}
-              >
-                Upload
-              </Button>
+              {uploadStatus === "success" ? (
+                <Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>
+                  Close
+                </Button>
+              ) : uploadPreview ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => { setUploadPreview(null); setUploadStatus("idle"); setUploadError(""); }}
+                    disabled={uploadStatus === "uploading"}
+                  >
+                    Back
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={handleUploadCsv}
+                    disabled={uploadStatus === "uploading" || uploadPreview.total === 0}
+                  >
+                    {uploadStatus === "uploading"
+                      ? <><Loader2 size={14} className="animate-spin" style={{ marginRight: 6 }} />Importing…</>
+                      : `Import ${uploadPreview.total} row${uploadPreview.total !== 1 ? "s" : ""}`}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>
+                    Close
+                  </Button>
+                  <Button type="button" variant="outline" onClick={downloadTemplate}>
+                    Download Template
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={handlePreview}
+                    disabled={!uploadFile || uploadPreviewLoading}
+                  >
+                    {uploadPreviewLoading
+                      ? <><Loader2 size={14} className="animate-spin" style={{ marginRight: 6 }} />Loading…</>
+                      : "Preview"}
+                  </Button>
+                </>
+              )}
             </DialogFooter>
           </DialogContent>
         </Dialog>
