@@ -149,7 +149,7 @@ const tokenOverlap = (a, b) => {
 //   fieldMap — { columnIndex: { field, confidence: "exact"|"fuzzy" } }
 //   guessed  — { rawHeader: fieldName } for fuzzy-matched columns (surfaced as warnings)
 //   extra    — rawHeaders with no DD match (will be stored in customFields)
-const mapHeadersToFields = (headers) => {
+const mapHeadersToFields = (headers, ddPromptsSet = new Set()) => {
   const fieldMap = {};
   const guessed = {};
   const extra = [];
@@ -158,7 +158,14 @@ const mapHeadersToFields = (headers) => {
     const normalized = normalizeHeader(rawHeader);
     if (!normalized) return; // skip blank column headers
 
-    // Exact match against synonym lists
+    // First pass: exact match against DD field prompts.
+    // If the header matches a known DD field, treat it as a DD (extra) field
+    // immediately — do not attempt any built-in synonym matching.
+    if (ddPromptsSet.has(normalized)) {
+      extra.push(rawHeader);
+      return;
+    }
+    // Second pass: built-in synonym matching (exact, then fuzzy with extra-token guard).
     let matched = null;
     for (const [field, synonyms] of Object.entries(FIELD_SYNONYMS)) {
       if (synonyms.includes(normalized)) {
@@ -167,14 +174,25 @@ const mapHeadersToFields = (headers) => {
       }
     }
 
-    // Fuzzy fallback: best token-overlap score ≥ 0.5
+    // Fuzzy fallback: best token-overlap score ≥ 0.5, but only if the header has
+    // at most 1 token not covered by the synonym.  This prevents descriptive names
+    // like "Franchise & Excise Tax ID" (4 tokens, 2 unmatched) from hijacking
+    // short synonyms like "tax id" (2 tokens).
     if (!matched) {
       let bestScore = 0;
       let bestField = null;
       for (const [field, synonyms] of Object.entries(FIELD_SYNONYMS)) {
         for (const synonym of synonyms) {
-          const score = tokenOverlap(normalized, synonym);
-          if (score > bestScore) { bestScore = score; bestField = field; }
+          const ta = new Set(normalized.split(" ").filter(Boolean));
+          const tb = new Set(synonym.split(" ").filter(Boolean));
+          const intersectionCount = [...ta].filter((t) => tb.has(t)).length;
+          const unionCount = new Set([...ta, ...tb]).size;
+          const score = unionCount === 0 ? 0 : intersectionCount / unionCount;
+          const unmatchedHeaderTokens = ta.size - intersectionCount;
+          if (score > bestScore && unmatchedHeaderTokens <= 1) {
+            bestScore = score;
+            bestField = field;
+          }
         }
       }
       if (bestScore >= 0.5) matched = { field: bestField, confidence: "fuzzy" };
@@ -278,11 +296,11 @@ const parseOwnershipCsv = (csvText) => {
 // Converts a parsed records array (header row + data rows) into patch objects.
 // Each row produces { name, patch } where patch contains only fields present in the file.
 // Columns that don't match any DD field are stored under customFields.
-const parseRecordsToDetailRows = (records) => {
+const parseRecordsToDetailRows = (records, ddPromptsSet = new Set()) => {
   if (!Array.isArray(records) || records.length < 2) return { rows: [], mapping: {}, skipped: 0 };
 
   const headers = records[0].map((h) => String(h ?? ""));
-  const { fieldMap, guessed, extra } = mapHeadersToFields(headers);
+  const { fieldMap, guessed, extra } = mapHeadersToFields(headers, ddPromptsSet);
 
   // A "name" column is required to identify each node.
   const nameColIdx = Number(
@@ -325,17 +343,17 @@ const parseRecordsToDetailRows = (records) => {
   return { rows, extraHeaders: extra, mapping: { guessed, extra }, skipped };
 };
 
-const parseDetailsCsv = (csvText) => {
+const parseDetailsCsv = (csvText, ddPromptsSet = new Set()) => {
   if (!csvText || typeof csvText !== "string") return { rows: [], mapping: {}, skipped: 0 };
   const records = parse(csvText, { skip_empty_lines: true, relax_column_count: true, trim: true });
-  return parseRecordsToDetailRows(records);
+  return parseRecordsToDetailRows(records, ddPromptsSet);
 };
 
-const parseDetailsXlsx = (buffer) => {
+const parseDetailsXlsx = (buffer, ddPromptsSet = new Set()) => {
   const workbook = XLSX.read(buffer, { type: "buffer" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const records = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-  return parseRecordsToDetailRows(records);
+  return parseRecordsToDetailRows(records, ddPromptsSet);
 };
 
 const xlsxBufferToCsv = (buffer) => {
@@ -942,10 +960,10 @@ const resolveExtraHeaders = async (extraHeaders, client, existingFields = null) 
   return headerToFieldId;
 };
 
-const applyDetailRows = async (rows, extraHeaders, client, guessed = {}) => {
+const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preloadedDdFields = null) => {
   const [allNodes, ddFields] = await Promise.all([
     queryNodes(client),
-    queryDDFields(client),
+    preloadedDdFields != null ? Promise.resolve(preloadedDdFields) : queryDDFields(client),
   ]);
 
   // If a fuzzy-matched built-in header is an EXACT match for a DD field prompt,
@@ -1041,10 +1059,13 @@ app.post("/api/import/details-csv", async (req, res) => {
     const { csv } = req.body || {};
     if (!csv) return res.status(400).json({ error: "csv is required" });
 
-    const { rows, extraHeaders, mapping, skipped } = parseDetailsCsv(csv);
+    const ddFields = await queryDDFields(client);
+    const ddPromptsSet = new Set(ddFields.map((f) => normalizeHeader(f.prompt || "")));
+
+    const { rows, extraHeaders, mapping, skipped } = parseDetailsCsv(csv, ddPromptsSet);
     if (!rows.length) return res.status(400).json({ error: "no valid rows found", mapping, skipped });
 
-    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {});
+    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {}, ddFields);
     res.json({ ok: true, ...result, skipped, mapping });
   } catch (err) {
     console.error("/api/import/details-csv error", err);
@@ -1057,15 +1078,18 @@ app.post("/api/import/details-csv/upload", upload.single("file"), async (req, re
     const client = req.auth.clientId;
     if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
 
+    const ddFields = await queryDDFields(client);
+    const ddPromptsSet = new Set(ddFields.map((f) => normalizeHeader(f.prompt || "")));
+
     const ext = (req.file.originalname || "").split(".").pop().toLowerCase();
     const isXlsx = ext === "xlsx" || ext === "xls";
     const { rows, extraHeaders, mapping, skipped } = isXlsx
-      ? parseDetailsXlsx(req.file.buffer)
-      : parseDetailsCsv(req.file.buffer.toString("utf-8"));
+      ? parseDetailsXlsx(req.file.buffer, ddPromptsSet)
+      : parseDetailsCsv(req.file.buffer.toString("utf-8"), ddPromptsSet);
 
     if (!rows.length) return res.status(400).json({ error: "no valid rows found", mapping, skipped });
 
-    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {});
+    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {}, ddFields);
     res.json({ ok: true, ...result, skipped, mapping });
   } catch (err) {
     console.error("/api/import/details-csv/upload error", err);
