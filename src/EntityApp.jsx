@@ -1905,12 +1905,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     if (uploadType === "details") {
       // Built-in fields included in the details template
       const builtInCols = [
-        { header: "Entity or Person's Name", example: "[Example] Acme Corp or Jane Doe" },
-        { header: "Address",       example: "" },
-        { header: "Primary Phone", example: "" },
-        { header: "Cell Phone",    example: "(People only)" },
-        { header: "e-Mail",        example: "(People only)" },
-        { header: "Tax ID",        example: "" },
+        { header: "Entity or Person's Name", helper: "[← Delete rows you don't need. Fill in the columns and upload.]" },
+        { header: "Address",       helper: "" },
+        { header: "Primary Phone", helper: "" },
+        { header: "Cell Phone",    helper: "(People only)" },
+        { header: "e-Mail",        helper: "(People only)" },
+        { header: "Tax ID",        helper: "" },
       ];
 
       // Mirrors the server's normalizeHeader — strips punctuation, lowercases, collapses spaces.
@@ -1941,17 +1941,26 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         }
         if (f.appliesTo === "entity") parts.push("(Entities only)");
         else if (f.appliesTo === "person") parts.push("(People only)");
-        return { header: f.prompt, example: parts.join(" ") };
+        return { header: f.prompt, helper: parts.join(" ") };
       });
 
       const allCols = [...builtInCols, ...ddCols];
       const headers = allCols.map((c) => c.header);
-      const examples = allCols.map((c) => c.example);
+      const helpers = allCols.map((c) => c.helper);
 
-      const ws = XLSX.utils.aoa_to_sheet([headers, examples]);
+      // Pre-populate rows with existing node names: entities alpha first, then people alpha.
+      const sortedNodes = [...nodeList].sort((a, b) => {
+        if (a.kind !== b.kind) return a.kind === "entity" ? -1 : 1;
+        return String(a.name || "").localeCompare(String(b.name || ""));
+      });
+      const nodeRows = sortedNodes.map((n) => [n.name, ...Array(allCols.length - 1).fill("")]);
+
+      const ws = XLSX.utils.aoa_to_sheet([headers, helpers, ...nodeRows]);
       ws["!cols"] = allCols.map((c) => ({
-        wch: Math.max(c.header.length, c.example.length, 15) + 4,
+        wch: Math.max(c.header.length, c.helper.length, 20) + 4,
       }));
+      // Freeze top two rows (header + helper) so they stay visible while scrolling.
+      ws["!freeze"] = { xSplit: 0, ySplit: 2 };
 
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Template");
