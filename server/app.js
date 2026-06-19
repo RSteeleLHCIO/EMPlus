@@ -109,8 +109,8 @@ const getColumnIndex = (headers, candidates, fallback) => {
 
 // Maps known user column header variants to canonical DD field names.
 const FIELD_SYNONYMS = {
+  // NOTE: "kind" is intentionally absent — the details upload must never alter a node's kind.
   name:            ["name", "company name", "entity name", "node name", "organization", "org name", "business name", "legal name", "entity or person s name"],
-  kind:            ["kind", "type", "node type", "entity type"],
   address:         ["address", "street", "street address", "mailing address", "location", "addr"],
   workPhone:       ["work phone", "phone", "workphone", "office phone", "ph work", "business phone", "telephone", "tel", "phone number", "primary phone"],
   cellPhone:       ["cell phone", "cell", "mobile", "mobile phone", "cellphone", "cell number", "personal phone"],
@@ -897,13 +897,13 @@ app.post("/api/import/preview/upload", upload.single("file"), async (req, res) =
 // customFields are merged (not replaced) with whatever the node already has.
 // Resolves or auto-creates a DD field for each unrecognised column header.
 // Returns a map of rawHeader → fieldId so values can be stored under the correct key.
-const resolveExtraHeaders = async (extraHeaders, client) => {
+const resolveExtraHeaders = async (extraHeaders, client, existingFields = null) => {
   if (!extraHeaders || extraHeaders.length === 0) return {};
 
-  const existingFields = await queryDDFields(client);
+  const ddFields = existingFields || await queryDDFields(client);
   // Build lookup: normalised prompt → fieldId
   const existingByPrompt = new Map(
-    existingFields.map((f) => [normalizeHeader(f.prompt || ""), f.fieldId])
+    ddFields.map((f) => [normalizeHeader(f.prompt || ""), f.fieldId])
   );
 
   const headerToFieldId = {};
@@ -928,7 +928,7 @@ const resolveExtraHeaders = async (extraHeaders, client) => {
         validValues: [],
         phoneTypes: [],
         showInStats: false,
-        sortOrder: existingFields.length + toCreate.length,
+        sortOrder: ddFields.length + toCreate.length,
         createdAt: now,
         updatedAt: now,
       };
@@ -942,10 +942,43 @@ const resolveExtraHeaders = async (extraHeaders, client) => {
   return headerToFieldId;
 };
 
-const applyDetailRows = async (rows, extraHeaders, client) => {
-  const [allNodes, headerToFieldId] = await Promise.all([
+const applyDetailRows = async (rows, extraHeaders, client, guessed = {}) => {
+  const [allNodes, ddFields] = await Promise.all([
     queryNodes(client),
-    resolveExtraHeaders(extraHeaders, client),
+    queryDDFields(client),
+  ]);
+
+  // If a fuzzy-matched built-in header is an EXACT match for a DD field prompt,
+  // the DD field takes precedence — re-route that column back to extraValues.
+  const ddNormToPrompt = new Map(ddFields.map((f) => [normalizeHeader(f.prompt || ""), f.prompt]));
+  const redirect = {}; // builtInFieldName → rawHeader
+  for (const [rawHeader, builtInField] of Object.entries(guessed)) {
+    if (ddNormToPrompt.has(normalizeHeader(rawHeader))) {
+      redirect[builtInField] = rawHeader;
+    }
+  }
+
+  const hasRedirects = Object.keys(redirect).length > 0;
+  const adjustedRows = hasRedirects
+    ? rows.map(({ name, patch, extraValues = {} }) => {
+        const newPatch = { ...patch };
+        const newExtraValues = { ...extraValues };
+        for (const [field, rawHeader] of Object.entries(redirect)) {
+          if (field in newPatch) {
+            newExtraValues[rawHeader] = newPatch[field];
+            delete newPatch[field];
+          }
+        }
+        return { name, patch: newPatch, extraValues: newExtraValues };
+      })
+    : rows;
+
+  const adjustedExtraHeaders = hasRedirects
+    ? [...extraHeaders, ...Object.values(redirect)]
+    : extraHeaders;
+
+  const [headerToFieldId] = await Promise.all([
+    resolveExtraHeaders(adjustedExtraHeaders, client, ddFields),
   ]);
   const nameMap = new Map(allNodes.map((n) => [String(n.name || "").toLowerCase(), n]));
 
@@ -954,7 +987,7 @@ const applyDetailRows = async (rows, extraHeaders, client) => {
   const updated = [];
   const notFoundList = [];
 
-  for (const { name, patch, extraValues = {} } of rows) {
+  for (const { name, patch, extraValues = {} } of adjustedRows) {
     // Match by display name or by raw/prefixed id value
     const existing =
       nameMap.get(name.toLowerCase()) ||
@@ -974,6 +1007,9 @@ const applyDetailRows = async (rows, extraHeaders, client) => {
       ...(existing.customFields || {}),
       ...remappedExtra,
     };
+
+    // Never allow the details import to change a node's kind.
+    delete patch.kind;
 
     const item = buildNodeItem({
       ...existing,
@@ -1008,7 +1044,7 @@ app.post("/api/import/details-csv", async (req, res) => {
     const { rows, extraHeaders, mapping, skipped } = parseDetailsCsv(csv);
     if (!rows.length) return res.status(400).json({ error: "no valid rows found", mapping, skipped });
 
-    const result = await applyDetailRows(rows, extraHeaders, client);
+    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {});
     res.json({ ok: true, ...result, skipped, mapping });
   } catch (err) {
     console.error("/api/import/details-csv error", err);
@@ -1029,7 +1065,7 @@ app.post("/api/import/details-csv/upload", upload.single("file"), async (req, re
 
     if (!rows.length) return res.status(400).json({ error: "no valid rows found", mapping, skipped });
 
-    const result = await applyDetailRows(rows, extraHeaders, client);
+    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {});
     res.json({ ok: true, ...result, skipped, mapping });
   } catch (err) {
     console.error("/api/import/details-csv/upload error", err);

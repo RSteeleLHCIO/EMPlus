@@ -1525,7 +1525,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     { key: "status", label: "Status", hideable: false },
     { key: "type", label: "Type", hideable: true },
     { key: "name", label: "Name", hideable: true },
-    { key: "id", label: "ID", hideable: true },
+    { key: "address",   label: "Address",       hideable: true },
+    { key: "workPhone", label: "Primary Phone",  hideable: true },
+    { key: "cellPhone", label: "Cell Phone",     hideable: true },
+    { key: "emails",    label: "e-Mail",         hideable: true },
+    { key: "taxId",     label: "Tax ID",         hideable: true },
     { key: "operationalRole", label: "Operational Role", hideable: true },
     { key: "legalStatus", label: "Legal Status", hideable: true },
     { key: "personStatus", label: "Person Status", hideable: true },
@@ -1921,6 +1925,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       // Any DD field whose prompt normalizes to one of these is redundant and excluded.
       const BUILTIN_SYNONYMS = new Set([
         "name", "company name", "entity name", "node name", "organization", "org name", "business name", "legal name", "entity or person s name",
+        "kind", "type", "node type", "entity type", "business type",
         "address", "street", "street address", "mailing address", "location", "addr",
         "work phone", "phone", "workphone", "office phone", "ph work", "business phone", "telephone", "tel", "phone number", "primary phone",
         "cell phone", "cell", "mobile", "mobile phone", "cellphone", "cell number", "personal phone",
@@ -2146,6 +2151,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     if ((draft.operationalRole || "") !== (node.operationalRole || "")) return true;
     if ((draft.legalStatus || "") !== (node.legalStatus || "")) return true;
     if ((draft.personStatus || "") !== (node.personStatus || "")) return true;
+    if ((draft.address || "") !== (node.address || "")) return true;
+    if ((draft.workPhone || "") !== (node.workPhone || "")) return true;
+    if ((draft.cellPhone || "") !== (node.cellPhone || "")) return true;
+    if ((draft.taxId || "") !== (node.taxId || "")) return true;
+    const toEmailStr = (v) => Array.isArray(v) ? v.join(", ") : (v || "");
+    if (toEmailStr(draft.emails) !== toEmailStr(node.emails)) return true;
     const nodeCustom = JSON.stringify(normalizeCustomFields(node.customFields || {}));
     const draftCustom = JSON.stringify(normalizeCustomFields(draft.customFields || {}));
     return nodeCustom !== draftCustom;
@@ -2162,6 +2173,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       operationalRole: "",
       legalStatus: "",
       personStatus: "",
+      address: "",
+      workPhone: "",
+      cellPhone: "",
+      emails: "",
+      taxId: "",
       customFields: {},
       client: clientId,
     };
@@ -2264,6 +2280,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           operationalRole: draft.kind === "entity" ? (draft.operationalRole || "") : "",
           legalStatus: draft.kind === "entity" ? (draft.legalStatus || "") : "",
           personStatus: draft.kind === "person" ? (draft.personStatus || "") : "",
+          address: draft.address || "",
+          workPhone: draft.workPhone || "",
+          cellPhone: draft.cellPhone || "",
+          emails: draft.emails || "",
+          taxId: draft.taxId || "",
           customFields: draft.customFields || {},
         };
         await apiRequest("/api/nodes", {
@@ -2284,6 +2305,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           operationalRole: draft.kind === "entity" ? (draft.operationalRole || "") : "",
           legalStatus: draft.kind === "entity" ? (draft.legalStatus || "") : "",
           personStatus: draft.kind === "person" ? (draft.personStatus || "") : "",
+          address: draft.address || "",
+          workPhone: draft.workPhone || "",
+          cellPhone: draft.cellPhone || "",
+          emails: draft.emails || "",
+          taxId: draft.taxId || "",
           customFields: draft.customFields || {},
         };
         await apiRequest(`/api/nodes/${rowKey}`, {
@@ -2304,6 +2330,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 operationalRole: payload.operationalRole,
                 legalStatus: payload.legalStatus,
                 personStatus: payload.personStatus,
+                address: payload.address,
+                workPhone: payload.workPhone,
+                cellPhone: payload.cellPhone,
+                emails: payload.emails,
+                taxId: payload.taxId,
                 customFields: payload.customFields,
                 client: n.client || clientId,
               }
@@ -2622,12 +2653,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             />
           </td>
         );
-      case "id":
-        return (
-          <td key={`${row.key}-id`}>
-            <div className="tabular-id-cell">{resolvedId}</div>
-          </td>
-        );
       case "operationalRole":
         return (
           <td key={`${row.key}-operationalRole`}>
@@ -2679,6 +2704,84 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               <option value="Deceased">Deceased</option>
               <option value="Former">Former</option>
             </select>
+          </td>
+        );
+      case "address":
+        return (
+          <td key={`${row.key}-address`}>
+            <input
+              className="tabular-cell-input"
+              value={rowNode.address || ""}
+              onChange={(e) => updateTableRowDraft(row, { address: e.target.value })}
+              onBlur={() => saveTableRow(row.key)}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              disabled={isSaving}
+              autoComplete="off"
+              data-lpignore="true"
+            />
+          </td>
+        );
+      case "workPhone":
+        return (
+          <td key={`${row.key}-workPhone`}>
+            <input
+              className="tabular-cell-input"
+              type="tel"
+              value={rowNode.workPhone || ""}
+              onChange={(e) => updateTableRowDraft(row, { workPhone: e.target.value })}
+              onBlur={() => saveTableRow(row.key)}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              disabled={isSaving}
+              autoComplete="off"
+              data-lpignore="true"
+            />
+          </td>
+        );
+      case "cellPhone":
+        return (
+          <td key={`${row.key}-cellPhone`}>
+            <input
+              className="tabular-cell-input"
+              type="tel"
+              value={rowNode.cellPhone || ""}
+              onChange={(e) => updateTableRowDraft(row, { cellPhone: e.target.value })}
+              onBlur={() => saveTableRow(row.key)}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              disabled={isSaving}
+              autoComplete="off"
+              data-lpignore="true"
+            />
+          </td>
+        );
+      case "emails":
+        return (
+          <td key={`${row.key}-emails`}>
+            <input
+              className="tabular-cell-input"
+              type="email"
+              value={Array.isArray(rowNode.emails) ? rowNode.emails.join(", ") : (rowNode.emails || "")}
+              onChange={(e) => updateTableRowDraft(row, { emails: e.target.value })}
+              onBlur={() => saveTableRow(row.key)}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              disabled={isSaving}
+              autoComplete="off"
+              data-lpignore="true"
+            />
+          </td>
+        );
+      case "taxId":
+        return (
+          <td key={`${row.key}-taxId`}>
+            <input
+              className="tabular-cell-input"
+              value={rowNode.taxId || ""}
+              onChange={(e) => updateTableRowDraft(row, { taxId: e.target.value })}
+              onBlur={() => saveTableRow(row.key)}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              disabled={isSaving}
+              autoComplete="off"
+              data-lpignore="true"
+            />
           </td>
         );
       case "actions":
