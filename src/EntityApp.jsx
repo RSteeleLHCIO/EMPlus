@@ -1902,6 +1902,63 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   };
 
   const downloadTemplate = () => {
+    if (uploadType === "details") {
+      // Built-in fields included in the details template
+      const builtInCols = [
+        { header: "Entity or Person's Name", example: "[Example] Acme Corp or Jane Doe" },
+        { header: "Address",       example: "" },
+        { header: "Primary Phone", example: "" },
+        { header: "Cell Phone",    example: "(People only)" },
+        { header: "e-Mail",        example: "(People only)" },
+        { header: "Tax ID",        example: "" },
+      ];
+
+      // Mirrors the server's normalizeHeader — strips punctuation, lowercases, collapses spaces.
+      const normalizeH = (str) =>
+        String(str || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+
+      // All synonyms for the built-in fields already in the template.
+      // Any DD field whose prompt normalizes to one of these is redundant and excluded.
+      const BUILTIN_SYNONYMS = new Set([
+        "name", "company name", "entity name", "node name", "organization", "org name", "business name", "legal name", "entity or person s name",
+        "address", "street", "street address", "mailing address", "location", "addr",
+        "work phone", "phone", "workphone", "office phone", "ph work", "business phone", "telephone", "tel", "phone number", "primary phone",
+        "cell phone", "cell", "mobile", "mobile phone", "cellphone", "cell number", "personal phone",
+        "email", "emails", "email address", "e mail", "email addr",
+        "tax id", "taxid", "ein", "tin", "federal id", "tax identification", "federal tax id", "fein",
+      ]);
+
+      // DD custom fields — exclude file type and any field redundant with a built-in, sorted by sortOrder
+      const ddFields = [...dataDictionary]
+        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+        .filter((f) => f.dataType !== "file")
+        .filter((f) => !BUILTIN_SYNONYMS.has(normalizeH(f.prompt)));
+
+      const ddCols = ddFields.map((f) => {
+        const parts = [];
+        if (Array.isArray(f.validValues) && f.validValues.length > 0) {
+          parts.push(f.validValues.join(", "));
+        }
+        if (f.appliesTo === "entity") parts.push("(Entities only)");
+        else if (f.appliesTo === "person") parts.push("(People only)");
+        return { header: f.prompt, example: parts.join(" ") };
+      });
+
+      const allCols = [...builtInCols, ...ddCols];
+      const headers = allCols.map((c) => c.header);
+      const examples = allCols.map((c) => c.example);
+
+      const ws = XLSX.utils.aoa_to_sheet([headers, examples]);
+      ws["!cols"] = allCols.map((c) => ({
+        wch: Math.max(c.header.length, c.example.length, 15) + 4,
+      }));
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Template");
+      XLSX.writeFile(wb, "details-template.xlsx");
+      return;
+    }
+
     const TEMPLATES = {
       entity: {
         headers: ["name", "kind"],
@@ -1917,11 +1974,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         headers: ["owner", "owned", "percent"],
         example: ["Parent Corp", "Subsidiary LLC", "100"],
         fileName: "ownerships-template.xlsx",
-      },
-      details: {
-        headers: ["name", "address", "workPhone", "cellPhone", "emails", "taxId", "accountingUrl", "hrUrl", "logo", "legalStatus", "operationalRole", "personStatus"],
-        example: ["Example Corp", "123 Main St", "555-1234", "555-5678", "info@example.com", "12-3456789", "", "", "", "LLC", "", ""],
-        fileName: "details-template.xlsx",
       },
     };
     const tpl = TEMPLATES[uploadType] || TEMPLATES.entity;

@@ -109,10 +109,10 @@ const getColumnIndex = (headers, candidates, fallback) => {
 
 // Maps known user column header variants to canonical DD field names.
 const FIELD_SYNONYMS = {
-  name:            ["name", "company name", "entity name", "node name", "organization", "org name", "business name", "legal name"],
+  name:            ["name", "company name", "entity name", "node name", "organization", "org name", "business name", "legal name", "entity or person s name"],
   kind:            ["kind", "type", "node type", "entity type"],
   address:         ["address", "street", "street address", "mailing address", "location", "addr"],
-  workPhone:       ["work phone", "phone", "workphone", "office phone", "ph work", "business phone", "telephone", "tel", "phone number"],
+  workPhone:       ["work phone", "phone", "workphone", "office phone", "ph work", "business phone", "telephone", "tel", "phone number", "primary phone"],
   cellPhone:       ["cell phone", "cell", "mobile", "mobile phone", "cellphone", "cell number", "personal phone"],
   emails:          ["email", "emails", "email address", "e mail", "email addr"],
   taxId:           ["tax id", "taxid", "ein", "tin", "federal id", "tax identification", "federal tax id", "fein"],
@@ -303,7 +303,7 @@ const parseRecordsToDetailRows = (records) => {
   for (let i = 1; i < records.length; i++) {
     const record = records[i] || [];
     const name = String(record[nameColIdx] ?? "").trim();
-    if (!name) { skipped += 1; continue; }
+    if (!name || name.startsWith("[")) { skipped += 1; continue; }
 
     const patch = {};
     for (const [idxStr, { field }] of Object.entries(fieldMap)) {
