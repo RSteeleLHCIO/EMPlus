@@ -2,10 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import * as XLSX from "xlsx";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter } from "lucide-react";
 import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved, estimatePosterPageCount, generateOrgChartPoster } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
-import { normalizePhone, formatPhone } from "./utils/helpers";
+import { normalizePhone, formatPhone, normalizeDateInput } from "./utils/helpers";
 import { Input } from "./components/ui/input";
 import {
   Dialog,
@@ -772,6 +772,14 @@ const ORG_NODE_GAP = 24;     // horizontal gap between sibling subtree columns
 const ORG_V_SEG = 20;        // px — height of each vertical connector segment
 const ORG_LINE_COLOR = '#d1d5db';
 const DEFAULT_TABULAR_VIEW_ID = "__default__";
+const DEFAULT_OWNERSHIP_TABULAR_VIEW_ID = "__default_ownership__";
+
+// Normalize appliesTo: old string "both" → ["entity","person"], single string → [string], array → as-is
+const normalizeAppliesTo = (v) =>
+  Array.isArray(v) ? v :
+  v === "both" ? ["entity", "person"] :
+  v && v.includes(",") ? v.split(",") :
+  v ? [v] : ["entity", "person"];
 
 // Compute the full pixel width of a subtree column (for precise connector positioning)
 function computeColWidth(nodeId, relList, explodedNodes, visited = new Set()) {
@@ -1087,8 +1095,10 @@ function StatsStrip({ allEntityNodes, allPersonNodes, filteredEntityNodes, filte
       .filter((f) => f.showInStats && (f.validValues || []).length > 0)
       .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
     for (const field of statsFields) {
-      const nodes = field.appliesTo === "person" ? filteredPersonNodes
-        : field.appliesTo === "entity" ? filteredEntityNodes
+      const _nat = normalizeAppliesTo(field.appliesTo);
+      if (_nat.includes("ownership") && !_nat.includes("entity") && !_nat.includes("person")) continue;
+      const nodes = (_nat.includes("entity") && !_nat.includes("person")) ? filteredEntityNodes
+        : (!_nat.includes("entity") && _nat.includes("person")) ? filteredPersonNodes
           : filteredNodes;
       const slide = makeSlide(field.prompt, nodes, (n) => n.customFields?.[field.fieldId]);
       if (slide) result.push(slide);
@@ -1165,6 +1175,195 @@ function StatsStrip({ allEntityNodes, allPersonNodes, filteredEntityNodes, filte
             </span>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+
+// ── Tabular sort / filter helpers ────────────────────────────────────────────
+
+function isFilterEmpty(filter) {
+  if (!filter) return true;
+  if (filter.type === "text") return !filter.value;
+  if (filter.type === "enum") return !(filter.selected?.length);
+  if (filter.type === "range") return filter.min === "" && filter.max === "";
+  if (filter.type === "daterange") return !filter.from && !filter.to;
+  return true;
+}
+
+function formatFilterSummary(filter) {
+  if (!filter) return "";
+  if (filter.type === "text") return `"${filter.value}"`;
+  if (filter.type === "enum") return (filter.selected || []).join(", ");
+  if (filter.type === "range") {
+    const parts = [];
+    if (filter.min !== "" && filter.min != null) parts.push(`\u2265 ${filter.min}`);
+    if (filter.max !== "" && filter.max != null) parts.push(`\u2264 ${filter.max}`);
+    return parts.join(", ");
+  }
+  if (filter.type === "daterange") {
+    const parts = [];
+    if (filter.from) parts.push(`from ${filter.from}`);
+    if (filter.to) parts.push(`to ${filter.to}`);
+    return parts.join(" ");
+  }
+  return "";
+}
+
+function getColumnFilterConfig(column) {
+  const key = column.key;
+  if (key === "status" || key === "actions") return { filterType: null };
+  if (key === "type") return { filterType: "enum", enumOptions: [{ value: "entity", label: "Entity" }, { value: "person", label: "Person" }] };
+  if (key === "operationalRole") return { filterType: "enum", enumOptions: ["Active","Passive","Mixed"].map((v) => ({ value: v, label: v })) };
+  if (key === "legalStatus") return { filterType: "enum", enumOptions: ["Good Standing","Dormant","Dissolved","Suspended"].map((v) => ({ value: v, label: v })) };
+  if (key === "personStatus") return { filterType: "enum", enumOptions: ["Active","Inactive","Deceased","Former"].map((v) => ({ value: v, label: v })) };
+  if (key === "percent") return { filterType: "range" };
+  if (key === "startDate" || key === "endDate") return { filterType: "daterange" };
+  if (column.field?.dataType === "boolean") return { filterType: "enum", enumOptions: [{ value: "true", label: "Yes" }, { value: "false", label: "No" }] };
+  if (column.field?.dataType === "date") return { filterType: "daterange" };
+  if (["number","currency","percentage"].includes(column.field?.dataType)) return { filterType: "range" };
+  if ((column.field?.validValues || []).length > 0) return { filterType: "enum", enumOptions: column.field.validValues.map((v) => ({ value: v, label: v })) };
+  return { filterType: "text" };
+}
+
+// ── Canvas-based text width measurement ───────────────────────────────────
+let _measureCanvas = null;
+function measureTextWidth(text, fontSize = 13) {
+  const s = String(text ?? "");
+  if (!s) return 0;
+  try {
+    if (!_measureCanvas) _measureCanvas = document.createElement("canvas");
+    const ctx = _measureCanvas.getContext("2d");
+    if (ctx) {
+      ctx.font = `${fontSize}px Inter, system-ui, Arial, sans-serif`;
+      const w = ctx.measureText(s).width;
+      if (w > 0) return w; // canvas can return 0 without throwing — fall through
+    }
+  } catch { /* ignore */ }
+  // Fallback: character-count estimation
+  return s.length * fontSize * 0.65;
+}
+
+function getNodeTabularValue(node, column) {
+  if (!node) return "";
+  switch (column.key) {
+    case "type": return node.kind || "";
+    case "name": return node.name || "";
+    case "address": return node.address || "";
+    case "workPhone": return node.workPhone || "";
+    case "cellPhone": return node.cellPhone || "";
+    case "emails": return Array.isArray(node.emails) ? node.emails.join(", ") : (node.emails || "");
+    case "taxId": return node.taxId || "";
+    case "operationalRole": return node.operationalRole || "";
+    case "legalStatus": return node.legalStatus || "";
+    case "personStatus": return node.personStatus || "";
+    default: return column.field ? (node.customFields?.[column.field.fieldId] ?? "") : "";
+  }
+}
+
+function getOwnershipTabularValue(rel, nodeList, column) {
+  if (!rel) return "";
+  switch (column.key) {
+    case "owner": { const n = nodeList.find((x) => x.id === rel.from); return n?.name || rel.from || ""; }
+    case "owned": { const n = nodeList.find((x) => x.id === rel.to); return n?.name || rel.to || ""; }
+    case "percent": return rel.percent ?? "";
+    case "startDate": return rel.startDate || "";
+    case "endDate": return rel.endDate || "";
+    default: return column.field ? (rel.customFields?.[column.field.fieldId] ?? "") : "";
+  }
+}
+
+function matchesTabularFilter(value, filter) {
+  if (isFilterEmpty(filter)) return true;
+  if (filter.type === "text") return String(value ?? "").toLowerCase().includes(filter.value.toLowerCase());
+  if (filter.type === "enum") return filter.selected.includes(String(value ?? ""));
+  if (filter.type === "range") {
+    const n = Number(value);
+    if (filter.min !== "" && n < Number(filter.min)) return false;
+    if (filter.max !== "" && n > Number(filter.max)) return false;
+    return true;
+  }
+  if (filter.type === "daterange") {
+    const v = String(value ?? "");
+    if (filter.from && v < filter.from) return false;
+    if (filter.to && v > filter.to) return false;
+    return true;
+  }
+  return true;
+}
+
+function ColumnFilterPopover({ filterType, enumOptions, currentFilter, popoverPos, onChange, onClose }) {
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    document.addEventListener("mousedown", handler, true);
+    return () => document.removeEventListener("mousedown", handler, true);
+  }, [onClose]);
+
+  const textVal    = currentFilter?.type === "text"      ? (currentFilter.value || "")       : "";
+  const enumSel    = currentFilter?.type === "enum"      ? (currentFilter.selected || [])     : [];
+  const rangeMin   = currentFilter?.type === "range"     ? (currentFilter.min || "")          : "";
+  const rangeMax   = currentFilter?.type === "range"     ? (currentFilter.max || "")          : "";
+  const dateFrom   = currentFilter?.type === "daterange" ? (currentFilter.from || "")         : "";
+  const dateTo     = currentFilter?.type === "daterange" ? (currentFilter.to || "")           : "";
+  const hasValue   = !isFilterEmpty(currentFilter);
+
+  return (
+    <div
+      ref={ref}
+      className="tabular-filter-popover"
+      style={{ position: "fixed", top: popoverPos.top, left: popoverPos.left, zIndex: 9999 }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {filterType === "text" && (
+        <input
+          className="tabular-filter-input"
+          autoFocus
+          placeholder="Contains…"
+          value={textVal}
+          onChange={(e) => onChange({ type: "text", value: e.target.value })}
+          onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
+        />
+      )}
+      {filterType === "enum" && (
+        <div className="tabular-filter-enum-list">
+          {enumOptions.map((opt) => {
+            const val = typeof opt === "object" ? opt.value : opt;
+            const label = typeof opt === "object" ? opt.label : val;
+            const checked = enumSel.includes(val);
+            return (
+              <label key={val} className="tabular-filter-enum-item">
+                <input type="checkbox" checked={checked} onChange={() => {
+                  const next = checked ? enumSel.filter((s) => s !== val) : [...enumSel, val];
+                  onChange({ type: "enum", selected: next });
+                }} />
+                <span>{label}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+      {filterType === "range" && (
+        <div className="tabular-filter-range">
+          <input className="tabular-filter-input" type="number" placeholder="Min" value={rangeMin}
+            onChange={(e) => onChange({ type: "range", min: e.target.value, max: rangeMax })} />
+          <input className="tabular-filter-input" type="number" placeholder="Max" value={rangeMax}
+            onChange={(e) => onChange({ type: "range", min: rangeMin, max: e.target.value })} />
+        </div>
+      )}
+      {filterType === "daterange" && (
+        <div className="tabular-filter-range">
+          <label className="tabular-filter-date-label">From</label>
+          <input className="tabular-filter-input" type="date" value={dateFrom}
+            onChange={(e) => onChange({ type: "daterange", from: e.target.value, to: dateTo })} />
+          <label className="tabular-filter-date-label">To</label>
+          <input className="tabular-filter-input" type="date" value={dateTo}
+            onChange={(e) => onChange({ type: "daterange", from: dateFrom, to: e.target.value })} />
+        </div>
+      )}
+      {hasValue && (
+        <button className="tabular-filter-clear-btn" onClick={() => onChange(null)}>Clear filter</button>
       )}
     </div>
   );
@@ -1323,10 +1522,50 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     columnOrder: [],
   });
   const [tabularViewNameError, setTabularViewNameError] = useState("");
+  const [tabularOrderInputs, setTabularOrderInputs] = useState({});
+  const [tabularSaveAsNewOpen, setTabularSaveAsNewOpen] = useState(false);
+  const [tabularSaveAsNewName, setTabularSaveAsNewName] = useState("");
+  const [tabularSaveAsNewError, setTabularSaveAsNewError] = useState("");
+  const [tabularDeleteConfirmOpen, setTabularDeleteConfirmOpen] = useState(false);
+  const [ownershipDeleteConfirmOpen, setOwnershipDeleteConfirmOpen] = useState(false);
+
+  // ── Tabular sub-mode (nodes vs ownerships) ────────────────────────────────
+  const [tabularSubMode, setTabularSubMode] = useState("entities"); // "entities" | "persons" | "ownerships"
+
+  // ── Ownership tabular view management ─────────────────────────────────────
+  const [ownershipTabularViews, setOwnershipTabularViews] = useState([]);
+  const [selectedOwnershipTabularViewId, setSelectedOwnershipTabularViewId] = useState(DEFAULT_OWNERSHIP_TABULAR_VIEW_ID);
+  const [ownershipTabularViewDialogOpen, setOwnershipTabularViewDialogOpen] = useState(false);
+  const [ownershipTabularViewDraft, setOwnershipTabularViewDraft] = useState({ name: "", columnOrder: [] });
+  const [ownershipTabularViewNameError, setOwnershipTabularViewNameError] = useState("");
+  const [ownershipOrderInputs, setOwnershipOrderInputs] = useState({});
+  const [ownershipSaveAsNewOpen, setOwnershipSaveAsNewOpen] = useState(false);
+  const [ownershipSaveAsNewName, setOwnershipSaveAsNewName] = useState("");
+  const [ownershipSaveAsNewError, setOwnershipSaveAsNewError] = useState("");
+
+  // ── Tabular sort / filter state ───────────────────────────────────────────
+  const [tabularSort, setTabularSort] = useState(null);           // { key, dir:"asc"|"desc" } | null
+  const [tabularFilters, setTabularFilters] = useState({});       // { [columnKey]: filter | null }
+  const [openTabularFilterKey, setOpenTabularFilterKey] = useState(null);
+  const [tabularFilterPopoverPos, setTabularFilterPopoverPos] = useState({ top: 0, left: 0 });
+
+  const [ownershipTabularSort, setOwnershipTabularSort] = useState(null);
+  const [ownershipTabularFilters, setOwnershipTabularFilters] = useState({});
+  const [openOwnershipTabularFilterKey, setOpenOwnershipTabularFilterKey] = useState(null);
+  const [ownershipTabularFilterPopoverPos, setOwnershipTabularFilterPopoverPos] = useState({ top: 0, left: 0 });
+
+  // ── Ownership tabular row state ────────────────────────────────────────────
+  const [ownershipTableDrafts, setOwnershipTableDrafts] = useState({});
+  const [ownershipTableDirtyKeys, setOwnershipTableDirtyKeys] = useState(() => new Set());
+  const [ownershipTableSavingKeys, setOwnershipTableSavingKeys] = useState(() => new Set());
+  const [ownershipTableRowErrors, setOwnershipTableRowErrors] = useState({});
+
   const getTabularPrefsPayload = useCallback((overrides = {}) => ({
     tabularViews: overrides.tabularViews ?? tabularViews,
     tabularViewsSelectedId: overrides.tabularViewsSelectedId ?? selectedTabularViewId,
-  }), [selectedTabularViewId, tabularViews]);
+    ownershipTabularViews: overrides.ownershipTabularViews ?? ownershipTabularViews,
+    ownershipTabularViewsSelectedId: overrides.ownershipTabularViewsSelectedId ?? selectedOwnershipTabularViewId,
+  }), [selectedTabularViewId, tabularViews, ownershipTabularViews, selectedOwnershipTabularViewId]);
 
   function checkDuplicateName(name) {
     const q = name.trim().toLowerCase();
@@ -1460,7 +1699,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
 
   const [dataDictionary, setDataDictionary] = useState([]);
-  const emptyDdDraft = { prompt: "", dataType: "string", appliesTo: "both", multiValue: false, validValuesText: "", phoneTypesText: "", showInStats: false };
+  const emptyDdDraft = { prompt: "", dataType: "string", appliesTo: ["entity", "person"], multiValue: false, validValuesText: "", phoneTypesText: "", showInStats: false };
   const [ddEntryDraft, setDdEntryDraft] = useState(emptyDdDraft);
   const [ddEntryId, setDdEntryId] = useState(null);
   const [isSavingDdEntry, setIsSavingDdEntry] = useState(false);
@@ -1518,22 +1757,29 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return sorted.filter((n) => (n.name || n.id || "").toLowerCase().includes(dirSearchLower));
   }, [nodeList, dirSearchLower]);
   const tableDdFields = useMemo(
-    () => [...dataDictionary].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)),
+    () => [...dataDictionary]
+      .filter((f) => { const n = normalizeAppliesTo(f.appliesTo); return n.includes("entity") || n.includes("person"); })
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)),
+    [dataDictionary]
+  );
+  const ownershipDdFields = useMemo(
+    () => [...dataDictionary]
+      .filter((f) => normalizeAppliesTo(f.appliesTo).includes("ownership"))
+      .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)),
     [dataDictionary]
   );
   const baseTabularColumns = useMemo(() => ([
-    { key: "status", label: "Status", hideable: false },
-    { key: "type", label: "Type", hideable: true },
-    { key: "name", label: "Name", hideable: true },
-    { key: "address",   label: "Address",       hideable: true },
-    { key: "workPhone", label: "Primary Phone",  hideable: true },
-    { key: "cellPhone", label: "Cell Phone",     hideable: true },
-    { key: "emails",    label: "e-Mail",         hideable: true },
-    { key: "taxId",     label: "Tax ID",         hideable: true },
-    { key: "operationalRole", label: "Operational Role", hideable: true },
-    { key: "legalStatus", label: "Legal Status", hideable: true },
-    { key: "personStatus", label: "Person Status", hideable: true },
-    { key: "actions", label: "Actions", hideable: false },
+    { key: "status",          label: "Status",           hideable: false },
+    { key: "name",            label: "Name",             hideable: true },
+    { key: "address",         label: "Address",          hideable: true },
+    { key: "workPhone",       label: "Primary Phone",    hideable: true,  width: 160 },
+    { key: "cellPhone",       label: "Cell Phone",       hideable: true,  width: 160 },
+    { key: "emails",          label: "e-Mail",           hideable: true },
+    { key: "taxId",           label: "Tax ID",           hideable: true,  width: 140 },
+    { key: "operationalRole", label: "Operational Role", hideable: true,  width: 160 },
+    { key: "legalStatus",     label: "Legal Status",     hideable: true,  width: 150 },
+    { key: "personStatus",    label: "Person Status",    hideable: true,  width: 150 },
+    { key: "actions",         label: "Actions",          hideable: false },
   ]), []);
   const allTabularColumns = useMemo(() => {
     const ddCols = tableDdFields.map((field) => ({
@@ -1550,6 +1796,27 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     [allTabularColumns]
   );
 
+  // ── Ownership tabular columns ──────────────────────────────────────────────
+  const baseOwnershipTabularColumns = useMemo(() => ([
+    { key: "owner",     label: "Owner",        hideable: true },
+    { key: "owned",     label: "Owned Entity", hideable: true },
+    { key: "percent",   label: "% Owned",      hideable: true, width: 110 },
+    { key: "startDate", label: "Start Date",   hideable: true, width: 130 },
+    { key: "endDate",   label: "End Date",     hideable: true, width: 130 },
+  ]), []);
+  const allOwnershipTabularColumns = useMemo(() => {
+    const ddCols = ownershipDdFields.map((field) => ({
+      key: field.fieldId,
+      label: field.prompt,
+      field,
+      hideable: true,
+    }));
+    return [...baseOwnershipTabularColumns, ...ddCols].filter(Boolean);
+  }, [baseOwnershipTabularColumns, ownershipDdFields]);
+  const defaultOwnershipTabularOrder = useMemo(
+    () => allOwnershipTabularColumns.map((c) => c.key),
+    [allOwnershipTabularColumns]
+  );
   const normalizeTabularColumnKey = useCallback((key) => {
     const text = String(key || "").trim();
     if (text.startsWith("dd:dd:")) return `dd:${text.slice(6)}`;
@@ -1569,7 +1836,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       ? view.hidden.map(normalizeTabularColumnKey).filter((k) => allowed.has(k))
       : []);
     const visibleOrder = rawOrder.filter((k) => !hiddenSet.has(k));
-    return { id, name, columnOrder: visibleOrder };
+    const sort = view.sort?.key && (view.sort.dir === "asc" || view.sort.dir === "desc")
+      ? { key: view.sort.key, dir: view.sort.dir } : null;
+    const filters = (view.filters && typeof view.filters === "object") ? view.filters : {};
+    const columnWidths = {};
+    if (view.columnWidths && typeof view.columnWidths === "object") {
+      for (const [k, v] of Object.entries(view.columnWidths)) {
+        const n = Number(v); if (n > 0) columnWidths[k] = n;
+      }
+    }
+    return { id, name, nodeKind: view.nodeKind || null, columnOrder: visibleOrder, sort, filters, columnWidths };
   }, [defaultTabularOrder, normalizeTabularColumnKey]);
 
   const captureHomeScreen = useCallback(() => {
@@ -1925,7 +2201,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       // Any DD field whose prompt normalizes to one of these is redundant and excluded.
       const BUILTIN_SYNONYMS = new Set([
         "name", "company name", "entity name", "node name", "organization", "org name", "business name", "legal name", "entity or person s name",
-        "kind", "type", "node type", "entity type", "business type",
         "address", "street", "street address", "mailing address", "location", "addr",
         "work phone", "phone", "workphone", "office phone", "ph work", "business phone", "telephone", "tel", "phone number", "primary phone",
         "cell phone", "cell", "mobile", "mobile phone", "cellphone", "cell number", "personal phone",
@@ -1935,7 +2210,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
       // DD custom fields — exclude file type and any field redundant with a built-in, sorted by sortOrder
       const ddFields = [...dataDictionary]
-        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+        .sort((a, b) => String(a.prompt || "").localeCompare(String(b.prompt || ""), undefined, { sensitivity: "base" }))
         .filter((f) => f.dataType !== "file")
         .filter((f) => !BUILTIN_SYNONYMS.has(normalizeH(f.prompt)));
 
@@ -1944,8 +2219,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         if (Array.isArray(f.validValues) && f.validValues.length > 0) {
           parts.push(f.validValues.join(", "));
         }
-        if (f.appliesTo === "entity") parts.push("(Entities only)");
-        else if (f.appliesTo === "person") parts.push("(People only)");
+        { const _n = normalizeAppliesTo(f.appliesTo), all3 = _n.includes("entity") && _n.includes("person") && _n.includes("ownership"); if (!all3) { const ls = [_n.includes("entity") && "Entities", _n.includes("person") && "People", _n.includes("ownership") && "Ownerships"].filter(Boolean); if (ls.length) parts.push(`(${ls.join(" & ")} only)`); } }
         return { header: f.prompt, helper: parts.join(" ") };
       });
 
@@ -2017,7 +2291,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     setDdEntryDraft({
       prompt: entry.prompt,
       dataType: entry.dataType,
-      appliesTo: entry.appliesTo || "both",
+      appliesTo: normalizeAppliesTo(entry.appliesTo || "both"),
       multiValue: !!entry.multiValue,
       validValuesText: (entry.validValues || []).join("\n"),
       phoneTypesText: (entry.phoneTypes || []).join("\n"),
@@ -2120,6 +2394,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     if (field?.dataType === "boolean") {
       if (raw === "") return "";
       return raw === "true";
+    }
+    if (field?.dataType === "date") {
+      return normalizeDateInput(raw);
     }
     return raw;
   }, []);
@@ -2417,14 +2694,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   }, [pendingTableKeys, saveTableRow]);
 
   const tableRows = useMemo(() => {
+    const kindFilter = tabularSubMode === "entities" ? "entity" : tabularSubMode === "persons" ? "person" : null;
     const newRows = tableNewRows.filter((r) => {
+      if (kindFilter && (r.draft.kind || "entity") !== kindFilter) return false;
       if (!dirSearchLower) return true;
       const txt = `${r.draft.name || ""} ${r.draft.id || ""}`.toLowerCase();
       return txt.includes(dirSearchLower);
     }).map((r) => ({ key: r.key, isNew: true, node: r.draft }));
-    const existingRows = filteredAllNodes.map((n) => ({ key: n.id, isNew: false, node: n }));
+    const existingRows = filteredAllNodes
+      .filter((n) => !kindFilter || n.kind === kindFilter)
+      .map((n) => ({ key: n.id, isNew: false, node: n }));
     return [...newRows, ...existingRows];
-  }, [dirSearchLower, filteredAllNodes, tableNewRows]);
+  }, [dirSearchLower, filteredAllNodes, tableNewRows, tabularSubMode]);
 
   const activeTabularView = useMemo(() => {
     if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) {
@@ -2465,13 +2746,31 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   }, [allTabularColumns, tabularViewDraft.columnOrder]);
 
   const openTabularViewManager = useCallback(() => {
+    const nodeKind = tabularSubMode === "entities" ? "entity" : tabularSubMode === "persons" ? "person" : null;
     setTabularViewNameError("");
     setTabularViewDraft({
       name: activeTabularView.name || "",
+      nodeKind,
       columnOrder: [...(activeTabularView.columnOrder || defaultTabularOrder)],
+      sort: tabularSort,
+      filters: { ...tabularFilters },
+      columnWidths: { ...(activeTabularView.columnWidths || {}) },
     });
+    setTabularOrderInputs({});
     setTabularViewDialogOpen(true);
-  }, [activeTabularView, defaultTabularOrder]);
+  }, [activeTabularView, defaultTabularOrder, tabularSort, tabularFilters, tabularSubMode]);
+
+  const applyTabularOrder = useCallback((currentOrder, inputs) => {
+    const orderValues = {};
+    currentOrder.forEach((key, idx) => {
+      const raw = inputs[key];
+      const parsed = raw !== undefined && raw !== "" ? parseFloat(raw) : NaN;
+      orderValues[key] = isNaN(parsed) ? (idx + 1) : parsed;
+    });
+    const sorted = [...currentOrder].sort((a, b) => orderValues[a] - orderValues[b]);
+    setTabularViewDraft((prev) => ({ ...prev, columnOrder: sorted }));
+    setTabularOrderInputs({});
+  }, []);
 
   const moveTabularDraftColumn = useCallback((key, direction) => {
     setTabularViewDraft((prev) => {
@@ -2503,6 +2802,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const isDuplicateTabularViewName = useCallback((name, excludeId = "") => {
     const normalized = String(name || "").trim().toLowerCase();
     if (!normalized) return false;
+    if (normalized === "default") return true; // reserved name
     return tabularViews.some((v) =>
       v.id !== excludeId && String(v.name || "").trim().toLowerCase() === normalized
     );
@@ -2522,64 +2822,50 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   }, [apiRequest]);
 
   const saveTabularViewAsNew = useCallback(() => {
-    const name = String(tabularViewDraft.name || "").trim();
-    if (!name) {
-      setTabularViewNameError("Please enter a view name.");
-      return;
-    }
+    setTabularSaveAsNewName("");
+    setTabularSaveAsNewError("");
+    setTabularSaveAsNewOpen(true);
+  }, []);
+
+  const commitTabularSaveAsNew = useCallback(() => {
+    const name = tabularSaveAsNewName.trim();
+    if (!name) { setTabularSaveAsNewError("Please enter a name."); return; }
     if (isDuplicateTabularViewName(name)) {
-      setTabularViewNameError("A view with this name already exists.");
+      setTabularSaveAsNewError(name.toLowerCase() === "default"
+        ? '"Default" is a reserved name.'
+        : "A view with this name already exists.");
       return;
     }
-    setTabularViewNameError("");
     const id = `view-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const nextView = sanitizeTabularView({
-      id,
-      name,
-      columnOrder: tabularViewDraft.columnOrder,
-    });
+    const nextView = sanitizeTabularView({ ...tabularViewDraft, id, name });
     if (!nextView) return;
     const nextViews = [...tabularViews, nextView];
     setTabularViews(nextViews);
     setSelectedTabularViewId(nextView.id);
     persistTabularViewPrefs(nextViews, nextView.id);
+    setTabularSaveAsNewOpen(false);
     setTabularViewDialogOpen(false);
-  }, [isDuplicateTabularViewName, persistTabularViewPrefs, sanitizeTabularView, tabularViewDraft.columnOrder, tabularViewDraft.name, tabularViews]);
+  }, [isDuplicateTabularViewName, persistTabularViewPrefs, sanitizeTabularView, tabularSaveAsNewName, tabularViewDraft, tabularViews]);
 
   const updateCurrentTabularView = useCallback(() => {
-    const name = String(tabularViewDraft.name || "").trim();
-    if (!name) {
-      setTabularViewNameError("Please enter a view name.");
-      return;
-    }
-    if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) {
-      setTabularViewNameError("Select a saved view first, or use Save As New.");
-      return;
-    }
+    if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) return;
     const selectedExists = tabularViews.some((v) => v.id === selectedTabularViewId);
-    if (!selectedExists) {
-      setTabularViewNameError("Selected view no longer exists. Please reselect a view.");
-      return;
-    }
-    if (isDuplicateTabularViewName(name, selectedTabularViewId)) {
-      setTabularViewNameError("A view with this name already exists.");
-      return;
-    }
-    setTabularViewNameError("");
-
-    const nextView = sanitizeTabularView({
-      id: selectedTabularViewId,
-      name,
-      columnOrder: tabularViewDraft.columnOrder,
-    });
+    if (!selectedExists) return;
+    const name = tabularViewDraft.name || activeTabularView.name || "";
+    const nextView = sanitizeTabularView({ ...tabularViewDraft, id: selectedTabularViewId, name });
     if (!nextView) return;
     const nextViews = tabularViews.map((v) => (v.id === selectedTabularViewId ? nextView : v));
     setTabularViews(nextViews);
     persistTabularViewPrefs(nextViews, selectedTabularViewId);
     setTabularViewDialogOpen(false);
-  }, [isDuplicateTabularViewName, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularViewDraft.columnOrder, tabularViewDraft.name, tabularViews]);
+  }, [activeTabularView.name, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularViewDraft, tabularViews]);
 
   const deleteCurrentTabularView = useCallback(() => {
+    if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) return;
+    setTabularDeleteConfirmOpen(true);
+  }, [selectedTabularViewId]);
+
+  const confirmTabularViewDelete = useCallback(() => {
     if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) return;
     const nextViews = tabularViews.filter((v) => v.id !== selectedTabularViewId);
     setTabularViews(nextViews);
@@ -2602,8 +2888,557 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       }).catch(() => { });
     }
     setTabularViewNameError("");
+    setTabularDeleteConfirmOpen(false);
     setTabularViewDialogOpen(false);
   }, [apiRequest, getTabularPrefsPayload, homeScreen, persistTabularViewPrefs, selectedTabularViewId, tabularViews]);
+
+
+  // ── Ownership tabular view management ─────────────────────────────────────
+  const sanitizeOwnershipTabularView = useCallback((view) => {
+    if (!view || typeof view !== "object") return null;
+    const id = String(view.id || "").trim();
+    const name = String(view.name || "").trim();
+    if (!id || !name) return null;
+    const allowed = new Set(defaultOwnershipTabularOrder);
+    const rawOrder = Array.isArray(view.columnOrder)
+      ? view.columnOrder.filter((k) => allowed.has(k))
+      : [];
+    const sort = view.sort?.key && (view.sort.dir === "asc" || view.sort.dir === "desc")
+      ? { key: view.sort.key, dir: view.sort.dir } : null;
+    const filters = (view.filters && typeof view.filters === "object") ? view.filters : {};
+    const columnWidths = {};
+    if (view.columnWidths && typeof view.columnWidths === "object") {
+      for (const [k, v] of Object.entries(view.columnWidths)) {
+        const n = Number(v); if (n > 0) columnWidths[k] = n;
+      }
+    }
+    return { id, name, columnOrder: rawOrder, sort, filters, columnWidths };
+  }, [defaultOwnershipTabularOrder]);
+
+  const persistOwnershipTabularViewPrefs = useCallback((nextViews, nextSelectedId) => {
+    apiRequest("/api/auth/me", {
+      method: "PATCH",
+      body: JSON.stringify({
+        ownershipTabularViews: nextViews,
+        ownershipTabularViewsSelectedId: nextSelectedId,
+      }),
+    }).catch((err) => {
+      setRemoteStatus("error");
+      setRemoteError(err.message || "Unable to save ownership tabular view settings.");
+    });
+  }, [apiRequest]);
+
+  const isDuplicateOwnershipTabularViewName = useCallback((name, excludeId = null) => {
+    const normalized = String(name || "").trim().toLowerCase();
+    if (!normalized) return false;
+    if (normalized === "default") return true; // reserved name
+    return ownershipTabularViews.some((v) =>
+      v.id !== excludeId && String(v.name || "").trim().toLowerCase() === normalized
+    );
+  }, [ownershipTabularViews]);
+
+  const activeOwnershipTabularView = useMemo(() => {
+    if (selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID) {
+      return { id: DEFAULT_OWNERSHIP_TABULAR_VIEW_ID, name: "Default", columnOrder: defaultOwnershipTabularOrder };
+    }
+    const found = ownershipTabularViews.find((v) => v.id === selectedOwnershipTabularViewId);
+    return found || { id: DEFAULT_OWNERSHIP_TABULAR_VIEW_ID, name: "Default", columnOrder: defaultOwnershipTabularOrder };
+  }, [defaultOwnershipTabularOrder, ownershipTabularViews, selectedOwnershipTabularViewId]);
+
+  const visibleOwnershipTabularColumns = useMemo(() => {
+    const byKey = new Map(allOwnershipTabularColumns.map((c) => [c.key, c]));
+    const seen = new Set();
+    const middle = (activeOwnershipTabularView.columnOrder || [])
+      .map((key) => byKey.get(key))
+      .filter((col) => { if (!col || seen.has(col.key)) return false; seen.add(col.key); return true; });
+    return [{ key: "status", label: "Status" }, ...middle, { key: "actions", label: "Actions" }];
+  }, [activeOwnershipTabularView.columnOrder, allOwnershipTabularColumns]);
+
+  const availableOwnershipTabularColumns = useMemo(() => {
+    const selected = new Set(ownershipTabularViewDraft.columnOrder || []);
+    return allOwnershipTabularColumns.filter((c) => !selected.has(c.key));
+  }, [allOwnershipTabularColumns, ownershipTabularViewDraft.columnOrder]);
+
+  const openOwnershipTabularViewManager = useCallback(() => {
+    setOwnershipTabularViewNameError("");
+    setOwnershipTabularViewDraft({
+      name: activeOwnershipTabularView.name || "",
+      columnOrder: [...(activeOwnershipTabularView.columnOrder || defaultOwnershipTabularOrder)],
+      sort: ownershipTabularSort,
+      filters: { ...ownershipTabularFilters },
+      columnWidths: { ...(activeOwnershipTabularView.columnWidths || {}) },
+    });
+    setOwnershipOrderInputs({});
+    setOwnershipTabularViewDialogOpen(true);
+  }, [activeOwnershipTabularView, defaultOwnershipTabularOrder, ownershipTabularSort, ownershipTabularFilters]);
+
+  const applyOwnershipTabularOrder = useCallback((currentOrder, inputs) => {
+    const orderValues = {};
+    currentOrder.forEach((key, idx) => {
+      const raw = inputs[key];
+      const parsed = raw !== undefined && raw !== "" ? parseFloat(raw) : NaN;
+      orderValues[key] = isNaN(parsed) ? (idx + 1) : parsed;
+    });
+    const sorted = [...currentOrder].sort((a, b) => orderValues[a] - orderValues[b]);
+    setOwnershipTabularViewDraft((prev) => ({ ...prev, columnOrder: sorted }));
+    setOwnershipOrderInputs({});
+  }, []);
+
+  const moveOwnershipTabularDraftColumn = useCallback((key, direction) => {
+    setOwnershipTabularViewDraft((prev) => {
+      const idx = prev.columnOrder.indexOf(key);
+      if (idx < 0) return prev;
+      const nextIdx = idx + direction;
+      if (nextIdx < 0 || nextIdx >= prev.columnOrder.length) return prev;
+      const columnOrder = [...prev.columnOrder];
+      const tmp = columnOrder[idx]; columnOrder[idx] = columnOrder[nextIdx]; columnOrder[nextIdx] = tmp;
+      return { ...prev, columnOrder };
+    });
+  }, []);
+
+  const toggleOwnershipTabularDraftSelected = useCallback((key) => {
+    setOwnershipTabularViewDraft((prev) => {
+      const inOrder = prev.columnOrder.includes(key);
+      return inOrder
+        ? { ...prev, columnOrder: prev.columnOrder.filter((k) => k !== key) }
+        : { ...prev, columnOrder: [...prev.columnOrder, key] };
+    });
+  }, []);
+
+  const saveOwnershipTabularViewAsNew = useCallback(() => {
+    setOwnershipSaveAsNewName("");
+    setOwnershipSaveAsNewError("");
+    setOwnershipSaveAsNewOpen(true);
+  }, []);
+
+  const commitOwnershipSaveAsNew = useCallback(() => {
+    const name = ownershipSaveAsNewName.trim();
+    if (!name) { setOwnershipSaveAsNewError("Please enter a name."); return; }
+    if (isDuplicateOwnershipTabularViewName(name)) {
+      setOwnershipSaveAsNewError(name.toLowerCase() === "default"
+        ? '"Default" is a reserved name.'
+        : "A view with this name already exists.");
+      return;
+    }
+    const id = `ov-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const nextView = sanitizeOwnershipTabularView({ ...ownershipTabularViewDraft, id, name });
+    if (!nextView) return;
+    const nextViews = [...ownershipTabularViews, nextView];
+    setOwnershipTabularViews(nextViews);
+    setSelectedOwnershipTabularViewId(nextView.id);
+    persistOwnershipTabularViewPrefs(nextViews, nextView.id);
+    setOwnershipSaveAsNewOpen(false);
+    setOwnershipTabularViewDialogOpen(false);
+  }, [isDuplicateOwnershipTabularViewName, ownershipSaveAsNewName, ownershipTabularViewDraft, ownershipTabularViews, persistOwnershipTabularViewPrefs, sanitizeOwnershipTabularView]);
+
+  const updateCurrentOwnershipTabularView = useCallback(() => {
+    if (selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID) return;
+    const name = ownershipTabularViewDraft.name || activeOwnershipTabularView.name || "";
+    const nextView = sanitizeOwnershipTabularView({ ...ownershipTabularViewDraft, id: selectedOwnershipTabularViewId, name });
+    if (!nextView) return;
+    const nextViews = ownershipTabularViews.map((v) => (v.id === selectedOwnershipTabularViewId ? nextView : v));
+    setOwnershipTabularViews(nextViews);
+    persistOwnershipTabularViewPrefs(nextViews, selectedOwnershipTabularViewId);
+    setOwnershipTabularViewDialogOpen(false);
+  }, [activeOwnershipTabularView.name, ownershipTabularViewDraft, ownershipTabularViews, persistOwnershipTabularViewPrefs, sanitizeOwnershipTabularView, selectedOwnershipTabularViewId]);
+
+  const deleteCurrentOwnershipTabularView = useCallback(() => {
+    if (selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID) return;
+    setOwnershipDeleteConfirmOpen(true);
+  }, [selectedOwnershipTabularViewId]);
+
+  const confirmOwnershipTabularViewDelete = useCallback(() => {
+    if (selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID) return;
+    const nextViews = ownershipTabularViews.filter((v) => v.id !== selectedOwnershipTabularViewId);
+    setOwnershipTabularViews(nextViews);
+    setSelectedOwnershipTabularViewId(DEFAULT_OWNERSHIP_TABULAR_VIEW_ID);
+    persistOwnershipTabularViewPrefs(nextViews, DEFAULT_OWNERSHIP_TABULAR_VIEW_ID);
+    setOwnershipTabularViewNameError("");
+    setOwnershipDeleteConfirmOpen(false);
+    setOwnershipTabularViewDialogOpen(false);
+  }, [ownershipTabularViews, persistOwnershipTabularViewPrefs, selectedOwnershipTabularViewId]);
+
+  // ── Ownership tabular rows & save logic ───────────────────────────────────
+  const ownershipTableRows = useMemo(() => {
+    return ownerships.map((r) => ({ key: r.id, rel: r }));
+  }, [ownerships]);
+
+  // ── Sort / filter callbacks ───────────────────────────────────────────────
+  const handleTabularSort = useCallback((key) => {
+    setTabularSort((prev) => {
+      if (!prev || prev.key !== key) return { key, dir: "asc" };
+      if (prev.dir === "asc") return { key, dir: "desc" };
+      return null;
+    });
+  }, []);
+  const handleOwnershipTabularSort = useCallback((key) => {
+    setOwnershipTabularSort((prev) => {
+      if (!prev || prev.key !== key) return { key, dir: "asc" };
+      if (prev.dir === "asc") return { key, dir: "desc" };
+      return null;
+    });
+  }, []);
+
+  // ── Apply stored sort/filters when switching to a saved view ──────────────
+  const tabularViewsRef = useRef(tabularViews);
+  useEffect(() => { tabularViewsRef.current = tabularViews; }, [tabularViews]);
+  const ownershipTabularViewsRef = useRef(ownershipTabularViews);
+  useEffect(() => { ownershipTabularViewsRef.current = ownershipTabularViews; }, [ownershipTabularViews]);
+  useEffect(() => {
+    if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) return;
+    const view = tabularViewsRef.current.find((v) => v.id === selectedTabularViewId);
+    if (!view) return;
+    if (view.sort !== undefined) setTabularSort(view.sort || null);
+    if (view.filters !== undefined) setTabularFilters(view.filters || {});
+  }, [selectedTabularViewId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID) return;
+    const view = ownershipTabularViewsRef.current.find((v) => v.id === selectedOwnershipTabularViewId);
+    if (!view) return;
+    if (view.sort !== undefined) setOwnershipTabularSort(view.sort || null);
+    if (view.filters !== undefined) setOwnershipTabularFilters(view.filters || {});
+  }, [selectedOwnershipTabularViewId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleTabularFilter = useCallback((key, e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setTabularFilterPopoverPos({ top: rect.bottom + 4, left: rect.left });
+    setOpenTabularFilterKey((prev) => (prev === key ? null : key));
+  }, []);
+  const toggleOwnershipTabularFilter = useCallback((key, e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setOwnershipTabularFilterPopoverPos({ top: rect.bottom + 4, left: rect.left });
+    setOpenOwnershipTabularFilterKey((prev) => (prev === key ? null : key));
+  }, []);
+
+  // ── Filtered + sorted row derivations ────────────────────────────────────
+  const filteredSortedTableRows = useMemo(() => {
+    let rows = tableRows;
+    const active = Object.entries(tabularFilters).filter(([, f]) => !isFilterEmpty(f));
+    if (active.length > 0) {
+      const colMap = new Map(visibleTabularColumns.map((c) => [c.key, c]));
+      rows = rows.filter((row) => {
+        const node = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
+        return active.every(([key, filter]) => {
+          const col = colMap.get(key);
+          return col ? matchesTabularFilter(getNodeTabularValue(node, col), filter) : true;
+        });
+      });
+    }
+    if (tabularSort) {
+      const col = visibleTabularColumns.find((c) => c.key === tabularSort.key);
+      if (col) {
+        const { filterType } = getColumnFilterConfig(col);
+        rows = [...rows].sort((a, b) => {
+          const an = a.isNew ? a.node : (tableDrafts[a.key] || a.node);
+          const bn = b.isNew ? b.node : (tableDrafts[b.key] || b.node);
+          const av = getNodeTabularValue(an, col);
+          const bv = getNodeTabularValue(bn, col);
+          const aBlank = av == null || String(av).trim() === "";
+          const bBlank = bv == null || String(bv).trim() === "";
+          if (aBlank && bBlank) return 0;
+          if (aBlank) return 1;
+          if (bBlank) return -1;
+          const cmp = filterType === "range"
+            ? (Number(av) || 0) - (Number(bv) || 0)
+            : String(av ?? "").localeCompare(String(bv ?? ""), undefined, { sensitivity: "base" });
+          return tabularSort.dir === "asc" ? cmp : -cmp;
+        });
+      }
+    }
+    return rows;
+  }, [tableRows, tabularFilters, tabularSort, visibleTabularColumns, tableDrafts]);
+
+  const filteredSortedOwnershipTableRows = useMemo(() => {
+    let rows = ownershipTableRows;
+    const active = Object.entries(ownershipTabularFilters).filter(([, f]) => !isFilterEmpty(f));
+    if (active.length > 0) {
+      const colMap = new Map(visibleOwnershipTabularColumns.map((c) => [c.key, c]));
+      rows = rows.filter((row) => {
+        const rel = { ...row.rel, ...(ownershipTableDrafts[row.key] || {}) };
+        return active.every(([key, filter]) => {
+          const col = colMap.get(key);
+          return col ? matchesTabularFilter(getOwnershipTabularValue(rel, nodeList, col), filter) : true;
+        });
+      });
+    }
+    if (ownershipTabularSort) {
+      const col = visibleOwnershipTabularColumns.find((c) => c.key === ownershipTabularSort.key);
+      if (col) {
+        const { filterType } = getColumnFilterConfig(col);
+        rows = [...rows].sort((a, b) => {
+          const ar = { ...a.rel, ...(ownershipTableDrafts[a.key] || {}) };
+          const br = { ...b.rel, ...(ownershipTableDrafts[b.key] || {}) };
+          const av = getOwnershipTabularValue(ar, nodeList, col);
+          const bv = getOwnershipTabularValue(br, nodeList, col);
+          const aBlank = av == null || String(av).trim() === "";
+          const bBlank = bv == null || String(bv).trim() === "";
+          if (aBlank && bBlank) return 0;
+          if (aBlank) return 1;
+          if (bBlank) return -1;
+          const cmp = filterType === "range"
+            ? (Number(av) || 0) - (Number(bv) || 0)
+            : String(av ?? "").localeCompare(String(bv ?? ""), undefined, { sensitivity: "base" });
+          return ownershipTabularSort.dir === "asc" ? cmp : -cmp;
+        });
+      }
+    }
+    return rows;
+  }, [ownershipTableRows, ownershipTabularFilters, ownershipTabularSort, visibleOwnershipTabularColumns, nodeList, ownershipTableDrafts]);
+
+  const activeTabularFilterCount = useMemo(() =>
+    Object.values(tabularFilters).filter((f) => !isFilterEmpty(f)).length,
+  [tabularFilters]);
+  const activeOwnershipTabularFilterCount = useMemo(() =>
+    Object.values(ownershipTabularFilters).filter((f) => !isFilterEmpty(f)).length,
+  [ownershipTabularFilters]);
+
+  // ── Column width computation ───────────────────────────────────────────────
+  // Priority: 1) column.width (hand-set), 2) max data content width, 3) never > 40% of screen
+  const tabularColumnWidths = useMemo(() => {
+    const maxPx = (typeof window !== "undefined" ? window.innerWidth : 1280) * 0.4;
+    const CELL_FONT = 13;
+    const CELL_PAD = 32;   // td padding (8×2) + input padding (7×2) + input border (1×2)
+    const SELECT_ARROW = 28; // extra room for the dropdown chevron on enum columns
+
+    return visibleTabularColumns.map((column) => {
+      if (column.key === "status")  return 92;
+      if (column.key === "actions") return 300;
+      const viewW = activeTabularView.columnWidths?.[column.key];
+      if (viewW > 0)                return Math.min(viewW, maxPx);
+      if (column.width)             return Math.min(column.width, maxPx);
+
+      const { filterType } = getColumnFilterConfig(column);
+      const extraPad = filterType === "enum" ? SELECT_ARROW : 0;
+
+      // Auto: start with header label width
+      let maxW = 60; // minimum; header is excluded (it wraps)
+
+      // Measure every row's display value
+      for (const row of tableRows) {
+        const node = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
+        const val = String(getNodeTabularValue(node, column) ?? "");
+        const w = measureTextWidth(val, CELL_FONT) + CELL_PAD + extraPad;
+        if (w > maxW) maxW = w;
+      }
+
+      return Math.min(Math.max(Math.ceil(maxW), 80), maxPx);
+    });  
+  }, [visibleTabularColumns, tableRows, tableDrafts, activeTabularView]);
+
+  const ownershipTabularColumnWidths = useMemo(() => {
+    const maxPx = (typeof window !== "undefined" ? window.innerWidth : 1280) * 0.4;
+    const CELL_FONT = 13;
+    const CELL_PAD = 32;
+    const SELECT_ARROW = 28;
+
+    return visibleOwnershipTabularColumns.map((column) => {
+      if (column.key === "status")  return 92;
+      if (column.key === "actions") return 200;
+      const viewW = activeOwnershipTabularView.columnWidths?.[column.key];
+      if (viewW > 0)                return Math.min(viewW, maxPx);
+      if (column.width)             return Math.min(column.width, maxPx);
+
+      const { filterType } = getColumnFilterConfig(column);
+      const extraPad = filterType === "enum" ? SELECT_ARROW : 0;
+
+      let maxW = 60; // minimum; header is excluded (it wraps)
+
+      for (const row of ownershipTableRows) {
+        const rel = { ...row.rel, ...(ownershipTableDrafts[row.key] || {}) };
+        const val = String(getOwnershipTabularValue(rel, nodeList, column) ?? "");
+        const w = measureTextWidth(val, CELL_FONT) + CELL_PAD + extraPad;
+        if (w > maxW) maxW = w;
+      }
+
+      return Math.min(Math.max(Math.ceil(maxW), 80), maxPx);
+    });
+  }, [visibleOwnershipTabularColumns, ownershipTableRows, ownershipTableDrafts, nodeList, activeOwnershipTabularView]);
+
+  const updateOwnershipTableDraft = useCallback((relId, patch) => {
+    setOwnershipTableDrafts((prev) => ({ ...prev, [relId]: { ...(prev[relId] || {}), ...patch } }));
+    setOwnershipTableDirtyKeys((prev) => { const next = new Set(prev); next.add(relId); return next; });
+    setOwnershipTableRowErrors((prev) => { const next = { ...prev }; delete next[relId]; return next; });
+  }, []);
+
+  const saveOwnershipTableRow = useCallback(async (relId) => {
+    const original = ownerships.find((r) => r.id === relId);
+    if (!original) return false;
+    const draft = ownershipTableDrafts[relId];
+    if (!draft) {
+      setOwnershipTableDirtyKeys((prev) => { const next = new Set(prev); next.delete(relId); return next; });
+      return true;
+    }
+    setOwnershipTableSavingKeys((prev) => { const next = new Set(prev); next.add(relId); return next; });
+    try {
+      const payload = {
+        from: original.from,
+        to: original.to,
+        percent: draft.percent !== undefined ? (draft.percent !== "" ? Number(draft.percent) : null) : (original.percent ?? null),
+        startDate: draft.startDate !== undefined ? (draft.startDate || null) : (original.startDate || null),
+        endDate: draft.endDate !== undefined ? (draft.endDate || null) : (original.endDate || null),
+        customFields: { ...(original.customFields || {}), ...(draft.customFields || {}) },
+        client: clientId,
+      };
+      await apiRequest("/api/relationships/owns", { method: "PUT", body: JSON.stringify(payload) });
+      setRelList((prev) => prev.map((r) => r.id === relId ? { ...r, ...payload } : r));
+      setOwnershipTableDrafts((prev) => { const next = { ...prev }; delete next[relId]; return next; });
+      setOwnershipTableDirtyKeys((prev) => { const next = new Set(prev); next.delete(relId); return next; });
+      setOwnershipTableRowErrors((prev) => { const next = { ...prev }; delete next[relId]; return next; });
+      setRemoteStatus("connected");
+      return true;
+    } catch (err) {
+      setRemoteStatus("error");
+      setRemoteError(err.message);
+      setOwnershipTableRowErrors((prev) => ({ ...prev, [relId]: err.message || "Unable to save." }));
+      return false;
+    } finally {
+      setOwnershipTableSavingKeys((prev) => { const next = new Set(prev); next.delete(relId); return next; });
+    }
+  }, [apiRequest, clientId, ownerships, ownershipTableDrafts]);
+
+  const pendingOwnershipKeys = useMemo(() => ownershipTableDirtyKeys, [ownershipTableDirtyKeys]);
+
+  const saveAllOwnershipRows = useCallback(async () => {
+    for (const key of [...pendingOwnershipKeys]) {
+      // eslint-disable-next-line no-await-in-loop
+      await saveOwnershipTableRow(key);
+    }
+  }, [pendingOwnershipKeys, saveOwnershipTableRow]);
+
+  // ── Ownership tabular cell renderer ───────────────────────────────────────
+  const renderOwnershipTabularCell = useCallback((column, { row, rowRel, isSaving, isDirty, rowError }) => {
+    const draft = ownershipTableDrafts[row.key] || {};
+    const percent    = draft.percent    !== undefined ? draft.percent    : (rowRel.percent    ?? "");
+    const startDate  = draft.startDate  !== undefined ? draft.startDate  : (rowRel.startDate  || "");
+    const endDate    = draft.endDate    !== undefined ? draft.endDate    : (rowRel.endDate    || "");
+    const customFields = { ...(rowRel.customFields || {}), ...(draft.customFields || {}) };
+    const ownerNode = nodeList.find((n) => n.id === rowRel.from);
+    const ownedNode = nodeList.find((n) => n.id === rowRel.to);
+
+    switch (column.key) {
+      case "status":
+        return (
+          <td key={`${row.key}-status`}>
+            {rowError ? (
+              <span className="tabular-status tabular-status--error" title={rowError}>Error</span>
+            ) : isSaving ? (
+              <span className="tabular-status tabular-status--saving">Saving</span>
+            ) : isDirty ? (
+              <span className="tabular-status tabular-status--dirty">Unsaved</span>
+            ) : (
+              <span className="tabular-status tabular-status--saved">Saved</span>
+            )}
+          </td>
+        );
+      case "owner":
+        return <td key={`${row.key}-owner`}><span className="tabular-cell-ro">{ownerNode?.name || rowRel.from}</span></td>;
+      case "owned":
+        return <td key={`${row.key}-owned`}><span className="tabular-cell-ro">{ownedNode?.name || rowRel.to}</span></td>;
+      case "percent":
+        return (
+          <td key={`${row.key}-percent`}>
+            <input
+              className="tabular-cell-input"
+              type="number"
+              min="0" max="100" step="0.01"
+              value={percent}
+              onChange={(e) => updateOwnershipTableDraft(row.key, { percent: e.target.value })}
+              onBlur={() => saveOwnershipTableRow(row.key)}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              disabled={isSaving}
+            />
+          </td>
+        );
+      case "startDate":
+        return (
+          <td key={`${row.key}-startDate`}>
+            <input
+              className="tabular-cell-input"
+              type="date"
+              value={startDate}
+              onChange={(e) => updateOwnershipTableDraft(row.key, { startDate: e.target.value })}
+              onBlur={() => saveOwnershipTableRow(row.key)}
+              disabled={isSaving}
+            />
+          </td>
+        );
+      case "endDate":
+        return (
+          <td key={`${row.key}-endDate`}>
+            <input
+              className="tabular-cell-input"
+              type="date"
+              value={endDate}
+              onChange={(e) => updateOwnershipTableDraft(row.key, { endDate: e.target.value })}
+              onBlur={() => saveOwnershipTableRow(row.key)}
+              disabled={isSaving}
+            />
+          </td>
+        );
+      case "actions":
+        return (
+          <td key={`${row.key}-actions`}>
+            <div className="tabular-actions">
+              <Button type="button" variant="outline" onClick={() => saveOwnershipTableRow(row.key)} disabled={isSaving || !isDirty}>Save</Button>
+            </div>
+          </td>
+        );
+      default: {
+        if (!column.field) return <td key={`${row.key}-${column.key}`}></td>;
+        const field = column.field;
+        const validValues = Array.isArray(field.validValues) ? field.validValues.filter(Boolean) : [];
+        const currentVal = customFields?.[field.fieldId];
+        if (field.dataType === "boolean") {
+          return (
+            <td key={`${row.key}-${field.fieldId}`}>
+              <select
+                className="tabular-cell-input"
+                value={tableFieldToString(field, currentVal)}
+                onChange={(e) => updateOwnershipTableDraft(row.key, { customFields: { ...customFields, [field.fieldId]: parseTableFieldValue(field, e.target.value) } })}
+                onBlur={() => saveOwnershipTableRow(row.key)}
+                disabled={isSaving}
+              >
+                <option value="">-</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            </td>
+          );
+        }
+        if (validValues.length > 0) {
+          return (
+            <td key={`${row.key}-${field.fieldId}`}>
+              <select
+                className="tabular-cell-input"
+                value={tableFieldToString(field, currentVal)}
+                onChange={(e) => updateOwnershipTableDraft(row.key, { customFields: { ...customFields, [field.fieldId]: parseTableFieldValue(field, e.target.value) } })}
+                onBlur={() => saveOwnershipTableRow(row.key)}
+                disabled={isSaving}
+              >
+                <option value=""></option>
+                {validValues.map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </td>
+          );
+        }
+        return (
+          <td key={`${row.key}-${field.fieldId}`}>
+            <input
+              className="tabular-cell-input"
+              type={dataTypeToHtmlInput(field.dataType)}
+              value={tableFieldToString(field, currentVal)}
+              onChange={(e) => updateOwnershipTableDraft(row.key, { customFields: { ...customFields, [field.fieldId]: parseTableFieldValue(field, e.target.value) } })}
+              onBlur={() => saveOwnershipTableRow(row.key)}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              disabled={isSaving}
+              autoComplete="off"
+              data-lpignore="true"
+            />
+          </td>
+        );
+      }
+    }
+  }, [nodeList, ownershipTableDrafts, saveOwnershipTableRow, updateOwnershipTableDraft]);
 
   const renderTabularCell = useCallback((column, { row, rowNode, isSaving, isDirty, rowError, resolvedId }) => {
     switch (column.key) {
@@ -2840,7 +3675,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         if (!column.field) return <td key={`${row.key}-${column.key}`}></td>;
         {
           const field = column.field;
-          const applicable = field.appliesTo === "both" || field.appliesTo === rowNode.kind;
+          const applicable = normalizeAppliesTo(field.appliesTo).includes(rowNode.kind);
           const validValues = Array.isArray(field.validValues)
             ? field.validValues.filter(Boolean)
             : [];
@@ -3060,9 +3895,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         kind: node.kind,
         photo: node.photo || "",
         logo: node.logo || "",
-        operationalRole: node.operationalRole || "",
-        legalStatus: node.legalStatus || "",
-        personStatus: node.personStatus || "",
+        address: node.address || "",
+        workPhone: node.workPhone || "",
+        cellPhone: node.cellPhone || "",
+        emails: node.emails || "",
+        taxId: node.taxId || "",
         customFields: node.customFields || {},
       });
     }
@@ -3283,6 +4120,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           const views = data.tabularViews.map(sanitizeTabularView).filter(Boolean);
           setTabularViews(views);
           setSelectedTabularViewId(data?.tabularViewsSelectedId || DEFAULT_TABULAR_VIEW_ID);
+        }
+        if (Array.isArray(data?.ownershipTabularViews)) {
+          const oviews = data.ownershipTabularViews.map(sanitizeOwnershipTabularView).filter(Boolean);
+          setOwnershipTabularViews(oviews);
+          setSelectedOwnershipTabularViewId(data?.ownershipTabularViewsSelectedId || DEFAULT_OWNERSHIP_TABULAR_VIEW_ID);
         }
         if (!data?.homeScreen) return;
         setHomeScreen(data.homeScreen);
@@ -4617,208 +5459,687 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
         {viewMode === "tabular" && (
           <div className="tabular-grid">
-            <StatsStrip
-              allEntityNodes={sortedEntityNodes}
-              allPersonNodes={sortedPersonNodes}
-              filteredEntityNodes={filteredEntityNodes}
-              filteredPersonNodes={filteredPersonNodes}
-              dataDictionary={dataDictionary}
-              isFiltered={!!dirSearchLower}
-            />
-            <div className="directory-search-bar">
-              <Search size={15} style={{ color: "#9ca3af", flexShrink: 0 }} />
-              <input
-                type="text"
-                placeholder="Search entities and people…"
-                value={dirSearch}
-                onChange={(e) => setDirSearch(e.target.value)}
-                className="directory-search-input"
-              />
-              {dirSearch && (
-                <button className="directory-search-clear" onClick={() => setDirSearch("")} title="Clear">
-                  <X size={13} />
-                </button>
-              )}
-            </div>
 
-            <div className="tabular-toolbar">
-              <div className="tabular-toolbar-left">
-                <select
-                  className="tabular-view-select"
-                  value={selectedTabularViewId}
-                  onChange={(e) => setSelectedTabularViewId(e.target.value)}
-                >
-                  <option value={DEFAULT_TABULAR_VIEW_ID}>Default</option>
-                  {tabularViews.map((v) => (
-                    <option key={v.id} value={v.id}>{v.name}</option>
-                  ))}
-                </select>
-                <Button type="button" variant="outline" onClick={openTabularViewManager}>
-                  Customize
-                </Button>
-              </div>
-              <Button
+            {/* ── Sub-mode toggle: Entities | Persons | Ownerships ── */}
+            <div style={{ display: "flex", alignItems: "center", gap: 0, borderRadius: 6, overflow: "hidden", border: "1px solid #cbd5e1", alignSelf: "flex-start" }}>
+              <button
                 type="button"
-                onClick={saveAllTableRows}
-                disabled={pendingTableKeys.size === 0 || tableSavingKeys.size > 0}
+                onClick={() => setTabularSubMode("entities")}
+                style={{
+                  padding: "5px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
+                  borderRight: "1px solid #cbd5e1",
+                  background: tabularSubMode === "entities" ? "#1e293b" : "#fff",
+                  color: tabularSubMode === "entities" ? "#fff" : "#475569",
+                }}
               >
-                Save All ({pendingTableKeys.size})
-              </Button>
+                Entities
+              </button>
+              <button
+                type="button"
+                onClick={() => setTabularSubMode("persons")}
+                style={{
+                  padding: "5px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
+                  borderRight: "1px solid #cbd5e1",
+                  background: tabularSubMode === "persons" ? "#1e293b" : "#fff",
+                  color: tabularSubMode === "persons" ? "#fff" : "#475569",
+                }}
+              >
+                Persons
+              </button>
+              <button
+                type="button"
+                onClick={() => setTabularSubMode("ownerships")}
+                style={{
+                  padding: "5px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
+                  background: tabularSubMode === "ownerships" ? "#1e293b" : "#fff",
+                  color: tabularSubMode === "ownerships" ? "#fff" : "#475569",
+                }}
+              >
+                Ownerships
+              </button>
             </div>
 
-            <Card className="tabular-card">
-              <CardContent style={{ padding: 0 }}>
-                <div className="tabular-wrap">
-                  <table
-                    className="tabular-table"
-                    style={{ minWidth: `${Math.max(visibleTabularColumns.length * 150, 1000)}px` }}
-                  >
-                    <thead>
-                      <tr>
-                        {visibleTabularColumns.map((column) => (
-                          <th key={column.key}>{column.label}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {tableRows.length === 0 && (
-                        <tr>
-                          <td colSpan={visibleTabularColumns.length} className="tabular-empty">
-                            No matching rows.
-                          </td>
-                        </tr>
-                      )}
-                      {tableRows.map((row) => {
-                        const rowNode = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
-                        const isSaving = tableSavingKeys.has(row.key);
-                        const isDirty = pendingTableKeys.has(row.key);
-                        const rowError = tableRowErrors[row.key];
-                        const resolvedId = row.isNew
-                          ? makeNodeId(rowNode.kind, rowNode.name || "")
-                          : makeNodeId(rowNode.kind, rowNode.name || "", row.key);
-                        return (
-                          <tr key={row.key} className={rowError ? "tabular-row-error" : undefined}>
-                            {visibleTabularColumns.map((column) =>
-                              renderTabularCell(column, { row, rowNode, isSaving, isDirty, rowError, resolvedId })
-                            )}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+            {/* ── Entities / Persons sub-mode (shared node tabular infrastructure) ── */}
+            {(tabularSubMode === "entities" || tabularSubMode === "persons") && (
+              <>
+                <StatsStrip
+                  allEntityNodes={sortedEntityNodes}
+                  allPersonNodes={sortedPersonNodes}
+                  filteredEntityNodes={filteredEntityNodes}
+                  filteredPersonNodes={filteredPersonNodes}
+                  dataDictionary={dataDictionary}
+                  isFiltered={!!dirSearchLower}
+                />
+                <div className="directory-search-bar">
+                  <Search size={15} style={{ color: "#9ca3af", flexShrink: 0 }} />
+                  <input
+                    type="text"
+                    placeholder="Search entities and people…"
+                    value={dirSearch}
+                    onChange={(e) => setDirSearch(e.target.value)}
+                    className="directory-search-input"
+                  />
+                  {dirSearch && (
+                    <button className="directory-search-clear" onClick={() => setDirSearch("")} title="Clear">
+                      <X size={13} />
+                    </button>
+                  )}
                 </div>
-              </CardContent>
-            </Card>
 
-            {tabularViewDialogOpen && (
-              <Dialog open={tabularViewDialogOpen} onOpenChange={setTabularViewDialogOpen}>
-                <DialogContent style={{ width: "min(760px, 92vw)", maxWidth: "none" }}>
-                  <DialogHeader>
-                    <DialogTitle>Tabular View Columns</DialogTitle>
-                  </DialogHeader>
-                  <div className="tabular-view-editor">
-                    <div className="form-row">
-                      <label className="form-label">View Name</label>
-                      <input
-                        className="form-input"
-                        value={tabularViewDraft.name}
-                        onChange={(e) => {
-                          setTabularViewNameError("");
-                          setTabularViewDraft((prev) => ({ ...prev, name: e.target.value }));
-                        }}
-                        placeholder="My custom tabular view"
-                        autoComplete="off"
-                        data-lpignore="true"
-                      />
-                      {tabularViewNameError && (
-                        <div className="dup-warning" style={{ marginTop: 8 }}>
-                          {tabularViewNameError}
-                        </div>
-                      )}
-                    </div>
-                    <div className="tabular-view-columns">
-                      <div className="tabular-view-section-title" style={{ marginTop: 10, marginLeft: 10 }}>In View</div>
-                      {tabularViewDraft.columnOrder.map((key, idx) => {
-                        const col = allTabularColumns.find((c) => c.key === key);
-                        if (!col) return null;
-                        return (
-                          <div key={key} className="tabular-view-column-row">
-                            <label className="tabular-view-column-toggle">
-                              <input
-                                type="checkbox"
-                                checked
-                                onChange={() => toggleTabularDraftSelected(key)}
-                              />
-                              <span>{col.label}</span>
-                            </label>
-                            <div className="tabular-view-column-actions">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                onClick={() => moveTabularDraftColumn(key, -1)}
-                                disabled={idx === 0}
-                              >
-                                Up
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                onClick={() => moveTabularDraftColumn(key, 1)}
-                                disabled={idx === tabularViewDraft.columnOrder.length - 1}
-                              >
-                                Down
-                              </Button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                      <div className="tabular-view-section-title" style={{ marginBottom: 4, marginTop: 10, marginLeft: 10 }}>Available Fields</div>
-                      {availableTabularColumns.map((col) => (
-                        <div key={col.key} className="tabular-view-column-row">
-                          <label className="tabular-view-column-toggle">
-                            <input
-                              type="checkbox"
-                              checked={false}
-                              onChange={() => toggleTabularDraftSelected(col.key)}
-                            />
-                            <span>{col.label}</span>
-                          </label>
-
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <DialogFooter style={{ justifyContent: "space-between" }}>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <Button type="button" variant="outline" onClick={saveTabularViewAsNew}>
-                        Save As New
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={updateCurrentTabularView}
-                      >
-                        Update Selected
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={deleteCurrentTabularView}
-                        disabled={selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID}
-                      >
-                        Delete Selected
-                      </Button>
-                    </div>
-                    <Button type="button" variant="secondary" onClick={() => setTabularViewDialogOpen(false)}>
-                      Close
+                <div className="tabular-toolbar">
+                  <div className="tabular-toolbar-left">
+                    <select
+                      className="tabular-view-select"
+                      value={selectedTabularViewId}
+                      onChange={(e) => setSelectedTabularViewId(e.target.value)}
+                    >
+                      {(() => {
+                        const currentKind = tabularSubMode === "entities" ? "entity" : "person";
+                        const kindViews = tabularViews.filter((v) => !v.nodeKind || v.nodeKind === currentKind);
+                        if (kindViews.length === 0) return <option value={DEFAULT_TABULAR_VIEW_ID}>Default</option>;
+                        return kindViews.map((v) => <option key={v.id} value={v.id}>{v.name}</option>);
+                      })()}
+                    </select>
+                    <Button type="button" variant="outline" onClick={openTabularViewManager}>
+                      Customize
                     </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
+                    {activeTabularFilterCount > 0 && (
+                      <Button type="button" variant="outline" onClick={() => { setTabularFilters({}); setOpenTabularFilterKey(null); }}>
+                        Clear Filters ({activeTabularFilterCount})
+                      </Button>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => {
+                        const kind = tabularSubMode === "entities" ? "entity" : "person";
+                        setNewNode({ name: "", kind, photo: "", logo: "", customFields: {} });
+                        setOpenDialog({ type: "add-node" });
+                      }}
+                    >
+                      <Plus size={16} />
+                      Add
+                    </Button>
+                    <Button
+                      type="button"
+                      onClick={saveAllTableRows}
+                      disabled={pendingTableKeys.size === 0 || tableSavingKeys.size > 0}
+                    >
+                      Save Changes ({pendingTableKeys.size})
+                    </Button>
+                  </div>
+                </div>
+
+                <Card className="tabular-card">
+                  <CardContent style={{ padding: 0 }}>
+                    <div className="tabular-wrap">
+                      <table
+                        className="tabular-table"
+                        style={{ width: `${tabularColumnWidths.reduce((a, b) => a + b, 0)}px` }}
+                      >
+                        <colgroup>
+                          {tabularColumnWidths.map((w, i) => (
+                            <col key={i} style={{ width: `${w}px` }} />
+                          ))}
+                        </colgroup>
+                        <thead>
+                          <tr>
+                            {visibleTabularColumns.map((column) => {
+                              const { filterType, enumOptions } = getColumnFilterConfig(column);
+                              const isSorted = tabularSort?.key === column.key;
+                              const hasFilter = !isFilterEmpty(tabularFilters[column.key]);
+                              return (
+                                <th key={column.key} title={column.label} className={`${isSorted ? "tabular-th--sorted" : ""}${hasFilter ? " tabular-th--filtered" : ""}`}>
+                                  <div className="tabular-th-inner">
+                                    {filterType ? (
+                                      <span className="tabular-th-label" onClick={() => handleTabularSort(column.key)}>
+                                        {column.label}{isSorted && <span className="tabular-sort-icon">{tabularSort.dir === "asc" ? " ↑" : " ↓"}</span>}
+                                      </span>
+                                    ) : (
+                                      <span className="tabular-th-label-plain">{column.label}</span>
+                                    )}
+                                    {filterType && (
+                                      <button type="button" className={`tabular-filter-btn${hasFilter ? " tabular-filter-btn--active" : ""}`}
+                                        title={hasFilter ? "Filter active" : "Filter"}
+                                        onClick={(e) => { e.stopPropagation(); toggleTabularFilter(column.key, e); }}>
+                                        <Filter size={11} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </th>
+                              );
+                            })}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredSortedTableRows.length === 0 && (
+                            <tr>
+                              <td colSpan={visibleTabularColumns.length} className="tabular-empty">
+                                {tableRows.length === 0 ? "No matching rows." : "No rows match the active filters."}
+                              </td>
+                            </tr>
+                          )}
+                          {filteredSortedTableRows.map((row) => {
+                            const rowNode = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
+                            const isSaving = tableSavingKeys.has(row.key);
+                            const isDirty = pendingTableKeys.has(row.key);
+                            const rowError = tableRowErrors[row.key];
+                            const resolvedId = row.isNew
+                              ? makeNodeId(rowNode.kind, rowNode.name || "")
+                              : makeNodeId(rowNode.kind, rowNode.name || "", row.key);
+                            return (
+                              <tr key={row.key} className={rowError ? "tabular-row-error" : undefined}>
+                                {visibleTabularColumns.map((column) =>
+                                  renderTabularCell(column, { row, rowNode, isSaving, isDirty, rowError, resolvedId })
+                                )}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {openTabularFilterKey && (() => {
+                  const col = visibleTabularColumns.find((c) => c.key === openTabularFilterKey);
+                  if (!col) return null;
+                  const { filterType, enumOptions } = getColumnFilterConfig(col);
+                  return (
+                    <ColumnFilterPopover
+                      filterType={filterType}
+                      enumOptions={enumOptions || []}
+                      currentFilter={tabularFilters[openTabularFilterKey] || null}
+                      popoverPos={tabularFilterPopoverPos}
+                      onChange={(f) => setTabularFilters((p) => ({ ...p, [openTabularFilterKey]: f }))}
+                      onClose={() => setOpenTabularFilterKey(null)}
+                    />
+                  );
+                })()}
+
+                {tabularViewDialogOpen && (
+                  <Dialog open={tabularViewDialogOpen} onOpenChange={setTabularViewDialogOpen}>
+                    <DialogContent style={{ width: "min(760px, 92vw)", maxWidth: "none" }}>
+                      <DialogHeader>
+                        <DialogTitle>
+                          Customize View — Nodes
+                          <span style={{ fontWeight: 400, color: '#64748b', fontSize: '14px', marginLeft: 10 }}>{activeTabularView.name}</span>
+                        </DialogTitle>
+                      </DialogHeader>
+                      <div className="tabular-view-editor">
+                        <div className="tabular-view-meta-section">
+                          <div className="tabular-view-meta-row">
+                            <span className="tabular-view-label">Sort:</span>
+                            <select
+                              className="tabular-meta-select"
+                              value={tabularViewDraft.sort?.key || ""}
+                              onChange={(e) => {
+                                const k = e.target.value;
+                                setTabularViewDraft((prev) => k
+                                  ? { ...prev, sort: { key: k, dir: prev.sort?.dir || "asc" } }
+                                  : { ...prev, sort: null });
+                              }}
+                            >
+                              <option value="">— none —</option>
+                              {tabularViewDraft.columnOrder.map((k) => {
+                                const col = allTabularColumns.find((c) => c.key === k);
+                                if (!col) return null;
+                                const { filterType } = getColumnFilterConfig(col);
+                                if (!filterType) return null;
+                                return <option key={k} value={k}>{col.label}</option>;
+                              })}
+                            </select>
+                            {tabularViewDraft.sort?.key && (
+                              <select
+                                className="tabular-meta-select"
+                                value={tabularViewDraft.sort.dir || "asc"}
+                                onChange={(e) => setTabularViewDraft((prev) => ({ ...prev, sort: { ...prev.sort, dir: e.target.value } }))}
+                              >
+                                <option value="asc">Ascending</option>
+                                <option value="desc">Descending</option>
+                              </select>
+                            )}
+                            {tabularViewDraft.sort && (
+                              <button type="button" className="tabular-meta-clear" onClick={() => setTabularViewDraft((prev) => ({ ...prev, sort: null }))}>Clear</button>
+                            )}
+                          </div>
+                          {Object.entries(tabularViewDraft.filters || {}).filter(([, f]) => !isFilterEmpty(f)).length > 0 && (
+                            <div className="tabular-view-meta-row">
+                              <span className="tabular-view-label">Filters:</span>
+                              <div className="tabular-view-filter-pills">
+                                {Object.entries(tabularViewDraft.filters || {}).filter(([, f]) => !isFilterEmpty(f)).map(([fKey, filter]) => {
+                                  const col = allTabularColumns.find((c) => c.key === fKey);
+                                  if (!col) return null;
+                                  return (
+                                    <span key={fKey} className="tabular-filter-pill">
+                                      {col.label}: {formatFilterSummary(filter)}
+                                      <button type="button" className="tabular-filter-pill-x"
+                                        onClick={() => setTabularViewDraft((prev) => { const f = { ...(prev.filters || {}) }; delete f[fKey]; return { ...prev, filters: f }; })}
+                                      >×</button>
+                                    </span>
+                                  );
+                                })}
+                                <button type="button" className="tabular-meta-clear" onClick={() => setTabularViewDraft((prev) => ({ ...prev, filters: {} }))}>Clear all</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <div className="tabular-view-columns">
+                          <div className="tabular-view-section-title" style={{ marginTop: 10, marginLeft: 10 }}>In View</div>
+                          {tabularViewDraft.columnOrder.map((key, idx) => {
+                            const col = allTabularColumns.find((c) => c.key === key);
+                            if (!col) return null;
+                            return (
+                              <div key={key} className="tabular-view-column-row">
+                                <input
+                                  type="text"
+                                  className="tabular-order-input"
+                                  value={tabularOrderInputs[key] ?? (idx + 1)}
+                                  onChange={(e) => setTabularOrderInputs((prev) => ({ ...prev, [key]: e.target.value }))}
+                                  onBlur={() => applyTabularOrder(tabularViewDraft.columnOrder, tabularOrderInputs)}
+                                  onKeyDown={(e) => { if (e.key === 'Enter') applyTabularOrder(tabularViewDraft.columnOrder, tabularOrderInputs); }}
+                                  title="Display order (fractions allowed, e.g. 1.5)"
+                                />
+                                <label className="tabular-view-column-toggle">
+                                  <input type="checkbox" checked onChange={() => toggleTabularDraftSelected(key)} />
+                                  <span>{col.label}</span>
+                                </label>
+                                <input
+                                  type="number"
+                                  className="tabular-width-input"
+                                  placeholder="auto"
+                                  min="60"
+                                  step="1"
+                                  value={tabularViewDraft.columnWidths?.[key] || ""}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setTabularViewDraft((prev) => {
+                                      if (!v) { const cw = { ...(prev.columnWidths || {}) }; delete cw[key]; return { ...prev, columnWidths: cw }; }
+                                      return { ...prev, columnWidths: { ...(prev.columnWidths || {}), [key]: Number(v) } };
+                                    });
+                                  }}
+                                  title="Column width in pixels (blank = auto-size from data)"
+                                />
+                                <span className="tabular-width-px-label">px</span>
+                              </div>
+                            );
+                          })}
+                          <div className="tabular-view-section-title" style={{ marginBottom: 4, marginTop: 10, marginLeft: 10 }}>Available Fields</div>
+                          {availableTabularColumns.map((col) => (
+                            <div key={col.key} className="tabular-view-column-row">
+                              <label className="tabular-view-column-toggle">
+                                <input type="checkbox" checked={false} onChange={() => toggleTabularDraftSelected(col.key)} />
+                                <span>{col.label}</span>
+                              </label>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <DialogFooter style={{ justifyContent: "space-between" }}>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <Button type="button" variant="outline" onClick={updateCurrentTabularView} disabled={selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID}>Save</Button>
+                          {selectedTabularViewId !== DEFAULT_TABULAR_VIEW_ID && (
+                            <Button type="button" variant="outline" onClick={deleteCurrentTabularView}>Delete This View</Button>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <Button type="button" variant="outline" onClick={saveTabularViewAsNew}>Save As New…</Button>
+                          <Button type="button" variant="secondary" onClick={() => setTabularViewDialogOpen(false)}>Close</Button>
+                        </div>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+
+                {tabularSaveAsNewOpen && (
+                  <Dialog open={tabularSaveAsNewOpen} onOpenChange={(open) => { if (!open) setTabularSaveAsNewOpen(false); }}>
+                    <DialogContent style={{ width: "min(400px, 92vw)", maxWidth: "none" }}>
+                      <DialogHeader>
+                        <DialogTitle>Save as New View — Nodes</DialogTitle>
+                      </DialogHeader>
+                      <div style={{ padding: "8px 0" }}>
+                        <label className="form-label" style={{ marginBottom: 6, display: "block" }}>View name</label>
+                        <input
+                          className="form-input"
+                          value={tabularSaveAsNewName}
+                          onChange={(e) => { setTabularSaveAsNewError(""); setTabularSaveAsNewName(e.target.value); }}
+                          onKeyDown={(e) => { if (e.key === "Enter") commitTabularSaveAsNew(); }}
+                          placeholder="e.g. My Tax View"
+                          autoFocus
+                          autoComplete="off"
+                          data-lpignore="true"
+                        />
+                        {tabularSaveAsNewError && (
+                          <div className="dup-warning" style={{ marginTop: 8 }}>{tabularSaveAsNewError}</div>
+                        )}
+                      </div>
+                      <DialogFooter>
+                        <Button type="button" variant="secondary" onClick={() => setTabularSaveAsNewOpen(false)}>Cancel</Button>
+                        <Button type="button" onClick={commitTabularSaveAsNew}>Save</Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+
+                {tabularDeleteConfirmOpen && (
+                  <Dialog open={tabularDeleteConfirmOpen} onOpenChange={(open) => { if (!open) setTabularDeleteConfirmOpen(false); }}>
+                    <DialogContent style={{ width: "min(400px, 92vw)", maxWidth: "none" }}>
+                      <DialogHeader>
+                        <DialogTitle>Delete View</DialogTitle>
+                      </DialogHeader>
+                      <p style={{ padding: "4px 0 16px", color: "#374151", margin: 0 }}>
+                        Permanently delete <strong>&#8220;{activeTabularView.name}&#8221;</strong>? This cannot be undone.
+                      </p>
+                      <DialogFooter>
+                        <Button type="button" variant="secondary" onClick={() => setTabularDeleteConfirmOpen(false)}>Cancel</Button>
+                        <Button type="button" onClick={confirmTabularViewDelete} style={{ background: '#dc2626', borderColor: '#dc2626', color: '#fff' }}>Delete</Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+              </>
+            )}
+            {tabularSubMode === "ownerships" && (
+              <>
+                <div className="tabular-toolbar">
+                  <div className="tabular-toolbar-left">
+                    <select
+                      className="tabular-view-select"
+                      value={selectedOwnershipTabularViewId}
+                      onChange={(e) => setSelectedOwnershipTabularViewId(e.target.value)}
+                    >
+                      {ownershipTabularViews.length === 0 && <option value={DEFAULT_OWNERSHIP_TABULAR_VIEW_ID}>Default</option>}
+                      {ownershipTabularViews.map((v) => (
+                        <option key={v.id} value={v.id}>{v.name}</option>
+                      ))}
+                    </select>
+                    <Button type="button" variant="outline" onClick={openOwnershipTabularViewManager}>
+                      Customize
+                    </Button>
+                    {activeOwnershipTabularFilterCount > 0 && (
+                      <Button type="button" variant="outline" onClick={() => { setOwnershipTabularFilters({}); setOpenOwnershipTabularFilterKey(null); }}>
+                        Clear Filters ({activeOwnershipTabularFilterCount})
+                      </Button>
+                    )}
+                  </div>
+                  <Button
+                    type="button"
+                    onClick={saveAllOwnershipRows}
+                    disabled={pendingOwnershipKeys.size === 0 || ownershipTableSavingKeys.size > 0}
+                  >
+                    Save Changes ({pendingOwnershipKeys.size})
+                  </Button>
+                </div>
+
+                <Card className="tabular-card">
+                  <CardContent style={{ padding: 0 }}>
+                    <div className="tabular-wrap">
+                      <table
+                        className="tabular-table"
+                        style={{ width: `${ownershipTabularColumnWidths.reduce((a, b) => a + b, 0)}px` }}
+                      >
+                        <colgroup>
+                          {ownershipTabularColumnWidths.map((w, i) => (
+                            <col key={i} style={{ width: `${w}px` }} />
+                          ))}
+                        </colgroup>
+                        <thead>
+                          <tr>
+                            {visibleOwnershipTabularColumns.map((column) => {
+                              const { filterType, enumOptions } = getColumnFilterConfig(column);
+                              const isSorted = ownershipTabularSort?.key === column.key;
+                              const hasFilter = !isFilterEmpty(ownershipTabularFilters[column.key]);
+                              return (
+                                <th key={column.key} title={column.label} className={`${isSorted ? "tabular-th--sorted" : ""}${hasFilter ? " tabular-th--filtered" : ""}`}>
+                                  <div className="tabular-th-inner">
+                                    {filterType ? (
+                                      <span className="tabular-th-label" onClick={() => handleOwnershipTabularSort(column.key)}>
+                                        {column.label}{isSorted && <span className="tabular-sort-icon">{ownershipTabularSort.dir === "asc" ? " ↑" : " ↓"}</span>}
+                                      </span>
+                                    ) : (
+                                      <span className="tabular-th-label-plain">{column.label}</span>
+                                    )}
+                                    {filterType && (
+                                      <button type="button" className={`tabular-filter-btn${hasFilter ? " tabular-filter-btn--active" : ""}`}
+                                        title={hasFilter ? "Filter active" : "Filter"}
+                                        onClick={(e) => { e.stopPropagation(); toggleOwnershipTabularFilter(column.key, e); }}>
+                                        <Filter size={11} />
+                                      </button>
+                                    )}
+                                  </div>
+                                </th>
+                              );
+                            })}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredSortedOwnershipTableRows.length === 0 && (
+                            <tr>
+                              <td colSpan={visibleOwnershipTabularColumns.length} className="tabular-empty">
+                                {ownershipTableRows.length === 0 ? "No ownership records." : "No rows match the active filters."}
+                              </td>
+                            </tr>
+                          )}
+                          {filteredSortedOwnershipTableRows.map((row) => {
+                            const isSaving = ownershipTableSavingKeys.has(row.key);
+                            const isDirty = ownershipTableDirtyKeys.has(row.key);
+                            const rowError = ownershipTableRowErrors[row.key];
+                            return (
+                              <tr key={row.key} className={rowError ? "tabular-row-error" : undefined}>
+                                {visibleOwnershipTabularColumns.map((column) =>
+                                  renderOwnershipTabularCell(column, { row, rowRel: row.rel, isSaving, isDirty, rowError })
+                                )}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                {openOwnershipTabularFilterKey && (() => {
+                  const col = visibleOwnershipTabularColumns.find((c) => c.key === openOwnershipTabularFilterKey);
+                  if (!col) return null;
+                  const { filterType, enumOptions } = getColumnFilterConfig(col);
+                  return (
+                    <ColumnFilterPopover
+                      filterType={filterType}
+                      enumOptions={enumOptions || []}
+                      currentFilter={ownershipTabularFilters[openOwnershipTabularFilterKey] || null}
+                      popoverPos={ownershipTabularFilterPopoverPos}
+                      onChange={(f) => setOwnershipTabularFilters((p) => ({ ...p, [openOwnershipTabularFilterKey]: f }))}
+                      onClose={() => setOpenOwnershipTabularFilterKey(null)}
+                    />
+                  );
+                })()}
+
+                {ownershipTabularViewDialogOpen && (
+                  <Dialog open={ownershipTabularViewDialogOpen} onOpenChange={setOwnershipTabularViewDialogOpen}>
+                    <DialogContent style={{ width: "min(760px, 92vw)", maxWidth: "none" }}>
+                      <DialogHeader>
+                        <DialogTitle>
+                          Customize View — Ownerships
+                          <span style={{ fontWeight: 400, color: '#64748b', fontSize: '14px', marginLeft: 10 }}>{activeOwnershipTabularView.name}</span>
+                        </DialogTitle>
+                      </DialogHeader>
+                      <div className="tabular-view-editor">
+                        <div className="tabular-view-meta-section">
+                          <div className="tabular-view-meta-row">
+                            <span className="tabular-view-label">Sort:</span>
+                            <select
+                              className="tabular-meta-select"
+                              value={ownershipTabularViewDraft.sort?.key || ""}
+                              onChange={(e) => {
+                                const k = e.target.value;
+                                setOwnershipTabularViewDraft((prev) => k
+                                  ? { ...prev, sort: { key: k, dir: prev.sort?.dir || "asc" } }
+                                  : { ...prev, sort: null });
+                              }}
+                            >
+                              <option value="">— none —</option>
+                              {ownershipTabularViewDraft.columnOrder.map((k) => {
+                                const col = allOwnershipTabularColumns.find((c) => c.key === k);
+                                if (!col) return null;
+                                const { filterType } = getColumnFilterConfig(col);
+                                if (!filterType) return null;
+                                return <option key={k} value={k}>{col.label}</option>;
+                              })}
+                            </select>
+                            {ownershipTabularViewDraft.sort?.key && (
+                              <select
+                                className="tabular-meta-select"
+                                value={ownershipTabularViewDraft.sort.dir || "asc"}
+                                onChange={(e) => setOwnershipTabularViewDraft((prev) => ({ ...prev, sort: { ...prev.sort, dir: e.target.value } }))}
+                              >
+                                <option value="asc">Ascending</option>
+                                <option value="desc">Descending</option>
+                              </select>
+                            )}
+                            {ownershipTabularViewDraft.sort && (
+                              <button type="button" className="tabular-meta-clear" onClick={() => setOwnershipTabularViewDraft((prev) => ({ ...prev, sort: null }))}>Clear</button>
+                            )}
+                          </div>
+                          {Object.entries(ownershipTabularViewDraft.filters || {}).filter(([, f]) => !isFilterEmpty(f)).length > 0 && (
+                            <div className="tabular-view-meta-row">
+                              <span className="tabular-view-label">Filters:</span>
+                              <div className="tabular-view-filter-pills">
+                                {Object.entries(ownershipTabularViewDraft.filters || {}).filter(([, f]) => !isFilterEmpty(f)).map(([fKey, filter]) => {
+                                  const col = allOwnershipTabularColumns.find((c) => c.key === fKey);
+                                  if (!col) return null;
+                                  return (
+                                    <span key={fKey} className="tabular-filter-pill">
+                                      {col.label}: {formatFilterSummary(filter)}
+                                      <button type="button" className="tabular-filter-pill-x"
+                                        onClick={() => setOwnershipTabularViewDraft((prev) => { const f = { ...(prev.filters || {}) }; delete f[fKey]; return { ...prev, filters: f }; })}
+                                      >×</button>
+                                    </span>
+                                  );
+                                })}
+                                <button type="button" className="tabular-meta-clear" onClick={() => setOwnershipTabularViewDraft((prev) => ({ ...prev, filters: {} }))}>Clear all</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <div className="tabular-view-columns">
+                          <div className="tabular-view-section-title" style={{ marginTop: 10, marginLeft: 10 }}>In View</div>
+                          {ownershipTabularViewDraft.columnOrder.map((key, idx) => {
+                            const col = allOwnershipTabularColumns.find((c) => c.key === key);
+                            if (!col) return null;
+                            return (
+                              <div key={key} className="tabular-view-column-row">
+                                <input
+                                  type="text"
+                                  className="tabular-order-input"
+                                  value={ownershipOrderInputs[key] ?? (idx + 1)}
+                                  onChange={(e) => setOwnershipOrderInputs((prev) => ({ ...prev, [key]: e.target.value }))}
+                                  onBlur={() => applyOwnershipTabularOrder(ownershipTabularViewDraft.columnOrder, ownershipOrderInputs)}
+                                  onKeyDown={(e) => { if (e.key === 'Enter') applyOwnershipTabularOrder(ownershipTabularViewDraft.columnOrder, ownershipOrderInputs); }}
+                                  title="Display order (fractions allowed, e.g. 1.5)"
+                                />
+                                <label className="tabular-view-column-toggle">
+                                  <input type="checkbox" checked onChange={() => toggleOwnershipTabularDraftSelected(key)} />
+                                  <span>{col.label}</span>
+                                </label>
+                                <input
+                                  type="number"
+                                  className="tabular-width-input"
+                                  placeholder="auto"
+                                  min="60"
+                                  step="1"
+                                  value={ownershipTabularViewDraft.columnWidths?.[key] || ""}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setOwnershipTabularViewDraft((prev) => {
+                                      if (!v) { const cw = { ...(prev.columnWidths || {}) }; delete cw[key]; return { ...prev, columnWidths: cw }; }
+                                      return { ...prev, columnWidths: { ...(prev.columnWidths || {}), [key]: Number(v) } };
+                                    });
+                                  }}
+                                  title="Column width in pixels (blank = auto-size from data)"
+                                />
+                                <span className="tabular-width-px-label">px</span>
+                              </div>
+                            );
+                          })}
+                          <div className="tabular-view-section-title" style={{ marginBottom: 4, marginTop: 10, marginLeft: 10 }}>Available Fields</div>
+                          {availableOwnershipTabularColumns.map((col) => (
+                            <div key={col.key} className="tabular-view-column-row">
+                              <label className="tabular-view-column-toggle">
+                                <input type="checkbox" checked={false} onChange={() => toggleOwnershipTabularDraftSelected(col.key)} />
+                                <span>{col.label}</span>
+                              </label>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <DialogFooter style={{ justifyContent: "space-between" }}>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <Button type="button" variant="outline" onClick={updateCurrentOwnershipTabularView} disabled={selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID}>Save</Button>
+                          {selectedOwnershipTabularViewId !== DEFAULT_OWNERSHIP_TABULAR_VIEW_ID && (
+                            <Button type="button" variant="outline" onClick={deleteCurrentOwnershipTabularView}>Delete This View</Button>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <Button type="button" variant="outline" onClick={saveOwnershipTabularViewAsNew}>Save As New…</Button>
+                          <Button type="button" variant="secondary" onClick={() => setOwnershipTabularViewDialogOpen(false)}>Close</Button>
+                        </div>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+
+                {ownershipSaveAsNewOpen && (
+                  <Dialog open={ownershipSaveAsNewOpen} onOpenChange={(open) => { if (!open) setOwnershipSaveAsNewOpen(false); }}>
+                    <DialogContent style={{ width: "min(400px, 92vw)", maxWidth: "none" }}>
+                      <DialogHeader>
+                        <DialogTitle>Save as New View — Ownerships</DialogTitle>
+                      </DialogHeader>
+                      <div style={{ padding: "8px 0" }}>
+                        <label className="form-label" style={{ marginBottom: 6, display: "block" }}>View name</label>
+                        <input
+                          className="form-input"
+                          value={ownershipSaveAsNewName}
+                          onChange={(e) => { setOwnershipSaveAsNewError(""); setOwnershipSaveAsNewName(e.target.value); }}
+                          onKeyDown={(e) => { if (e.key === "Enter") commitOwnershipSaveAsNew(); }}
+                          placeholder="e.g. My Ownership View"
+                          autoFocus
+                          autoComplete="off"
+                          data-lpignore="true"
+                        />
+                        {ownershipSaveAsNewError && (
+                          <div className="dup-warning" style={{ marginTop: 8 }}>{ownershipSaveAsNewError}</div>
+                        )}
+                      </div>
+                      <DialogFooter>
+                        <Button type="button" variant="secondary" onClick={() => setOwnershipSaveAsNewOpen(false)}>Cancel</Button>
+                        <Button type="button" onClick={commitOwnershipSaveAsNew}>Save</Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+
+                {ownershipDeleteConfirmOpen && (
+                  <Dialog open={ownershipDeleteConfirmOpen} onOpenChange={(open) => { if (!open) setOwnershipDeleteConfirmOpen(false); }}>
+                    <DialogContent style={{ width: "min(400px, 92vw)", maxWidth: "none" }}>
+                      <DialogHeader>
+                        <DialogTitle>Delete View</DialogTitle>
+                      </DialogHeader>
+                      <p style={{ padding: "4px 0 16px", color: "#374151", margin: 0 }}>
+                        Permanently delete <strong>&#8220;{activeOwnershipTabularView.name}&#8221;</strong>? This cannot be undone.
+                      </p>
+                      <DialogFooter>
+                        <Button type="button" variant="secondary" onClick={() => setOwnershipDeleteConfirmOpen(false)}>Cancel</Button>
+                        <Button type="button" onClick={confirmOwnershipTabularViewDelete} style={{ background: '#dc2626', borderColor: '#dc2626', color: '#fff' }}>Delete</Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+              </>
             )}
           </div>
         )}
-
         {viewMode === "editor" && (
           <div className="editor-section">
             <Card>
@@ -4871,7 +6192,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           </div>
         )}
 
-        {viewMode !== "hierarchy" && (
+        {viewMode !== "hierarchy" && viewMode !== "tabular" && (
           <div className="fab-container">
             <Button
               type="button"
@@ -4925,86 +6246,74 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         </tr>
                       </thead>
                       <tbody>
-                        {/* Name — system field, always first, no edit/delete/reorder */}
+                        {/* Name — always first since it's the record identifier */}
                         <tr>
                           <td><em style={{ color: "#6b7280" }}>Name</em></td>
                           <td style={{ color: "#6b7280" }}>Short text</td>
-                          <td style={{ color: "#6b7280" }}>Both</td>
+                          <td style={{ color: "#6b7280" }}>All</td>
                           <td style={{ color: "#6b7280" }}>No</td>
                           <td style={{ color: "#6b7280" }}></td>
                           <td></td>
-                        </tr>
-                        {/* Photo / Logo — built-in image field, not editable or moveable */}
-                        <tr>
-                          <td><em style={{ color: "#6b7280" }}>Photo / Logo</em></td>
-                          <td style={{ color: "#6b7280" }}>File / Image</td>
-                          <td style={{ color: "#6b7280" }}>Both</td>
-                          <td style={{ color: "#6b7280" }}>No</td>
-                          <td style={{ color: "#6b7280" }}></td>
                           <td></td>
                         </tr>
-                        {/* Operational Role — built-in entity field */}
-                        <tr>
-                          <td><em style={{ color: "#6b7280" }}>Operational Role</em></td>
-                          <td style={{ color: "#6b7280" }}>Dropdown</td>
-                          <td style={{ color: "#6b7280" }}>Entity</td>
-                          <td style={{ color: "#6b7280" }}>No</td>
-                          <td style={{ color: "#6b7280" }}>Active, Passive, Mixed</td>
-                          <td style={{ color: "#6b7280" }}>✓</td>
-                          <td></td>
-                        </tr>
-                        {/* Legal Status — built-in entity field */}
-                        <tr>
-                          <td><em style={{ color: "#6b7280" }}>Legal Status</em></td>
-                          <td style={{ color: "#6b7280" }}>Dropdown</td>
-                          <td style={{ color: "#6b7280" }}>Entity</td>
-                          <td style={{ color: "#6b7280" }}>No</td>
-                          <td style={{ color: "#6b7280" }}>Good Standing, Dormant, Dissolved, Suspended</td>
-                          <td style={{ color: "#6b7280" }}>✓</td>
-                          <td></td>
-                        </tr>
-                        {/* Status — built-in person field */}
-                        <tr>
-                          <td><em style={{ color: "#6b7280" }}>Status</em></td>
-                          <td style={{ color: "#6b7280" }}>Dropdown</td>
-                          <td style={{ color: "#6b7280" }}>Person</td>
-                          <td style={{ color: "#6b7280" }}>No</td>
-                          <td style={{ color: "#6b7280" }}>Active, Inactive, Deceased, Former</td>
-                          <td style={{ color: "#6b7280" }}>✓</td>
-                          <td></td>
-                        </tr>
-                        {[...dataDictionary]
-                          .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
-                          .map((entry, idx, sorted) => (
-                            <tr key={entry.id}>
-                              <td>{entry.prompt}</td>
-                              <td>{DATA_TYPES.find((t) => t.value === entry.dataType)?.label ?? entry.dataType}</td>
-                              <td>
-                                {entry.appliesTo === "person" ? "Person" : entry.appliesTo === "entity" ? "Entity" : "Both"}
-                              </td>
-                              <td>{entry.multiValue ? "Yes" : "No"}</td>
-                              <td className="dd-valid-values">
-                                {entry.dataType === "link"
-                                  ? <span style={{ color: "#9ca3af" }}>URL</span>
-                                  : entry.dataType === "file"
-                                    ? <span style={{ color: "#9ca3af" }}>File / Image</span>
-                                    : (entry.validValues || []).length > 0
-                                      ? entry.validValues.join(", ")
-                                      : <span style={{ color: "#9ca3af" }}>Free-form</span>}
-                              </td>
-                              <td style={{ textAlign: "center" }}>
-                                {entry.showInStats ? "✓" : ""}
-                              </td>
-                              <td>
-                                <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                                  <Button type="button" variant="outline" style={{ padding: "3px 7px", fontSize: 12, visibility: idx === 0 ? "hidden" : "visible" }} onClick={() => reorderDdEntry(entry.id, "up")}>↑</Button>
-                                  <Button type="button" variant="outline" style={{ padding: "3px 7px", fontSize: 12, visibility: idx === sorted.length - 1 ? "hidden" : "visible" }} onClick={() => reorderDdEntry(entry.id, "down")}>↓</Button>
-                                  <Button type="button" variant="outline" style={{ padding: "4px 8px" }} title="Edit" onClick={() => openDdEntry(entry)}><Pencil size={13} /></Button>
-                                  <Button type="button" variant="outline" style={{ padding: "4px 8px" }} title="Delete" onClick={() => deleteDdEntry(entry.id)}><Trash2 size={13} /></Button>
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
+                        {/* Built-in fields + DD fields merged and sorted alphabetically */}
+                        {(() => {
+                          const builtIns = [
+                            { _builtin: true, prompt: "Address",       type: "Address",     appliesTo: "Entity, Person", multi: "No",  values: "" },
+                            { _builtin: true, prompt: "Cell Phone",    type: "Phone",       appliesTo: "Person",         multi: "No",  values: "" },
+                            { _builtin: true, prompt: "e-Mail",        type: "Email",       appliesTo: "Entity, Person", multi: "Yes", values: "" },
+                            { _builtin: true, prompt: "Primary Phone", type: "Phone",       appliesTo: "Entity, Person", multi: "No",  values: "" },
+                            { _builtin: true, prompt: "Tax ID",        type: "Short text",  appliesTo: "Entity",         multi: "No",  values: "" },
+                          ];
+                          const ddRows = [...dataDictionary].map((e) => ({ _builtin: false, _entry: e, prompt: e.prompt || "" }));
+                          const all = [...builtIns, ...ddRows].sort((a, b) =>
+                            String(a.prompt || "").localeCompare(String(b.prompt || ""), undefined, { sensitivity: "base" })
+                          );
+                          return all.map((row) => {
+                            if (row._builtin) {
+                              return (
+                                <tr key={`builtin-${row.prompt}`}>
+                                  <td><em style={{ color: "#6b7280" }}>{row.prompt}</em></td>
+                                  <td style={{ color: "#6b7280" }}>{row.type}</td>
+                                  <td style={{ color: "#6b7280" }}>{row.appliesTo}</td>
+                                  <td style={{ color: "#6b7280" }}>{row.multi}</td>
+                                  <td style={{ color: "#6b7280" }}>{row.values}</td>
+                                  <td></td>
+                                  <td></td>
+                                </tr>
+                              );
+                            }
+                            const entry = row._entry;
+                            return (
+                              <tr key={entry.id}>
+                                <td>{entry.prompt}</td>
+                                <td>{DATA_TYPES.find((t) => t.value === entry.dataType)?.label ?? entry.dataType}</td>
+                                <td>
+                                  {(() => { const n = normalizeAppliesTo(entry.appliesTo); return [n.includes("entity") && "Entity", n.includes("person") && "Person", n.includes("ownership") && "Ownership"].filter(Boolean).join(", ") || "—"; })()}
+                                </td>
+                                <td>{entry.multiValue ? "Yes" : "No"}</td>
+                                <td className="dd-valid-values">
+                                  {entry.dataType === "link"
+                                    ? <span style={{ color: "#9ca3af" }}>URL</span>
+                                    : entry.dataType === "file"
+                                      ? <span style={{ color: "#9ca3af" }}>File / Image</span>
+                                      : (entry.validValues || []).length > 0
+                                        ? entry.validValues.join(", ")
+                                        : <span style={{ color: "#9ca3af" }}>Free-form</span>}
+                                </td>
+                                <td style={{ textAlign: "center" }}>
+                                  {entry.showInStats ? "✓" : ""}
+                                </td>
+                                <td>
+                                  <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                                    <Button type="button" variant="outline" style={{ padding: "4px 8px" }} title="Edit" onClick={() => openDdEntry(entry)}><Pencil size={13} /></Button>
+                                    <Button type="button" variant="outline" style={{ padding: "4px 8px" }} title="Delete" onClick={() => deleteDdEntry(entry.id)}><Trash2 size={13} /></Button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          });
+                        })()}
                       </tbody>
                     </table>
                   </div>
@@ -5052,15 +6361,25 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 </div>
                 <div className="form-row">
                   <label className="form-label">Applies to</label>
-                  <select
-                    className="form-select"
-                    value={ddEntryDraft.appliesTo}
-                    onChange={(e) => setDdEntryDraft((prev) => ({ ...prev, appliesTo: e.target.value }))}
-                  >
-                    <option value="both">Entity &amp; Person</option>
-                    <option value="entity">Entity only</option>
-                    <option value="person">Person only</option>
-                  </select>
+                  <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+                    {["entity", "person", "ownership"].map((kind) => {
+                      const checked = normalizeAppliesTo(ddEntryDraft.appliesTo).includes(kind);
+                      return (
+                        <label key={kind} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 14 }}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              const cur = normalizeAppliesTo(ddEntryDraft.appliesTo);
+                              const next = checked ? cur.filter((k) => k !== kind) : [...cur, kind];
+                              setDdEntryDraft((prev) => ({ ...prev, appliesTo: next.length ? next : cur }));
+                            }}
+                          />
+                          {kind.charAt(0).toUpperCase() + kind.slice(1)}
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
                 {ddEntryDraft.dataType !== "link" && ddEntryDraft.dataType !== "file" && (
                   <div className="form-row">
@@ -5312,56 +6631,62 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     apiBase={apiBase}
                     token={token}
                   />
-                  {/* Built-in status fields */}
-                  {newNode.kind === "entity" && (
-                    <>
-                      <div className="form-row">
-                        <label className="form-label">Operational Role</label>
-                        <select
-                          className="form-input"
-                          value={newNode.operationalRole}
-                          onChange={(e) => setNewNode((prev) => ({ ...prev, operationalRole: e.target.value }))}
-                        >
-                          <option value="">— select —</option>
-                          <option value="Active">Active</option>
-                          <option value="Passive">Passive</option>
-                          <option value="Mixed">Mixed</option>
-                        </select>
-                      </div>
-                      <div className="form-row">
-                        <label className="form-label">Legal Status</label>
-                        <select
-                          className="form-input"
-                          value={newNode.legalStatus}
-                          onChange={(e) => setNewNode((prev) => ({ ...prev, legalStatus: e.target.value }))}
-                        >
-                          <option value="">— select —</option>
-                          <option value="Good Standing">Good Standing</option>
-                          <option value="Dormant">Dormant</option>
-                          <option value="Dissolved">Dissolved</option>
-                          <option value="Suspended">Suspended</option>
-                        </select>
-                      </div>
-                    </>
+                  {/* Built-in contact fields */}
+                  <div className="form-row">
+                    <label className="form-label">Address</label>
+                    <input
+                      className="form-input"
+                      type="text"
+                      value={newNode.address || ""}
+                      onChange={(e) => setNewNode((prev) => ({ ...prev, address: e.target.value }))}
+                      autoComplete="off"
+                      data-lpignore="true"
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">Primary Phone</label>
+                    <PhoneInputRow
+                      value={newNode.workPhone || ""}
+                      onCommit={(val) => setNewNode((prev) => ({ ...prev, workPhone: val }))}
+                    />
+                  </div>
+                  {newNode.kind === "person" && (
+                    <div className="form-row">
+                      <label className="form-label">Cell Phone</label>
+                      <PhoneInputRow
+                        value={newNode.cellPhone || ""}
+                        onCommit={(val) => setNewNode((prev) => ({ ...prev, cellPhone: val }))}
+                      />
+                    </div>
                   )}
                   {newNode.kind === "person" && (
                     <div className="form-row">
-                      <label className="form-label">Status</label>
-                      <select
+                      <label className="form-label">e-Mail</label>
+                      <input
                         className="form-input"
-                        value={newNode.personStatus}
-                        onChange={(e) => setNewNode((prev) => ({ ...prev, personStatus: e.target.value }))}
-                      >
-                        <option value="">— select —</option>
-                        <option value="Active">Active</option>
-                        <option value="Inactive">Inactive</option>
-                        <option value="Deceased">Deceased</option>
-                        <option value="Former">Former</option>
-                      </select>
+                        type="email"
+                        value={Array.isArray(newNode.emails) ? newNode.emails.join(", ") : (newNode.emails || "")}
+                        onChange={(e) => setNewNode((prev) => ({ ...prev, emails: e.target.value }))}
+                        autoComplete="off"
+                        data-lpignore="true"
+                      />
+                    </div>
+                  )}
+                  {newNode.kind === "entity" && (
+                    <div className="form-row">
+                      <label className="form-label">Tax ID</label>
+                      <input
+                        className="form-input"
+                        type="text"
+                        value={newNode.taxId || ""}
+                        onChange={(e) => setNewNode((prev) => ({ ...prev, taxId: e.target.value }))}
+                        autoComplete="off"
+                        data-lpignore="true"
+                      />
                     </div>
                   )}
                   {[...dataDictionary]
-                    .filter((f) => f.appliesTo === "both" || f.appliesTo === newNode.kind)
+                    .filter((f) => normalizeAppliesTo(f.appliesTo).includes(newNode.kind))
                     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
                     .map((field) => (
                       <React.Fragment key={field.fieldId}>
@@ -5405,9 +6730,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         client: clientId,
                         photo: newNode.kind === "person" ? (newNode.photo || "") : "",
                         logo: newNode.kind === "entity" ? (newNode.logo || "") : "",
-                        operationalRole: newNode.kind === "entity" ? (newNode.operationalRole || "") : "",
-                        legalStatus: newNode.kind === "entity" ? (newNode.legalStatus || "") : "",
-                        personStatus: newNode.kind === "person" ? (newNode.personStatus || "") : "",
+                        address: newNode.address || "",
+                        workPhone: newNode.workPhone || "",
+                        cellPhone: newNode.cellPhone || "",
+                        emails: newNode.emails || "",
+                        taxId: newNode.taxId || "",
                         customFields: newNode.customFields || {},
                       };
                       try {
@@ -5417,7 +6744,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         });
                         setNodeList((prev) => [...prev, payload]);
                         if (!focusId) setFocusId(id);
-                        setNewNode({ name: "", kind: newNode.kind, photo: "", logo: "", operationalRole: "", legalStatus: "", personStatus: "", customFields: {} });
+                        setNewNode({ name: "", kind: newNode.kind, photo: "", logo: "", address: "", workPhone: "", cellPhone: "", emails: "", taxId: "", customFields: {} });
                         setRemoteStatus("connected");
                         setOpenDialog(null);
                       } catch (err) {
@@ -5754,56 +7081,62 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     apiBase={apiBase}
                     token={token}
                   />
-                  {/* Built-in status fields */}
-                  {nodeDraft.kind === "entity" && (
-                    <>
-                      <div className="form-row">
-                        <label className="form-label">Operational Role</label>
-                        <select
-                          className="form-input"
-                          value={nodeDraft.operationalRole}
-                          onChange={(e) => setNodeDraft((prev) => ({ ...prev, operationalRole: e.target.value }))}
-                        >
-                          <option value="">— select —</option>
-                          <option value="Active">Active</option>
-                          <option value="Passive">Passive</option>
-                          <option value="Mixed">Mixed</option>
-                        </select>
-                      </div>
-                      <div className="form-row">
-                        <label className="form-label">Legal Status</label>
-                        <select
-                          className="form-input"
-                          value={nodeDraft.legalStatus}
-                          onChange={(e) => setNodeDraft((prev) => ({ ...prev, legalStatus: e.target.value }))}
-                        >
-                          <option value="">— select —</option>
-                          <option value="Good Standing">Good Standing</option>
-                          <option value="Dormant">Dormant</option>
-                          <option value="Dissolved">Dissolved</option>
-                          <option value="Suspended">Suspended</option>
-                        </select>
-                      </div>
-                    </>
+                  {/* Built-in contact fields */}
+                  <div className="form-row">
+                    <label className="form-label">Address</label>
+                    <input
+                      className="form-input"
+                      type="text"
+                      value={nodeDraft.address || ""}
+                      onChange={(e) => setNodeDraft((prev) => ({ ...prev, address: e.target.value }))}
+                      autoComplete="off"
+                      data-lpignore="true"
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label className="form-label">Primary Phone</label>
+                    <PhoneInputRow
+                      value={nodeDraft.workPhone || ""}
+                      onCommit={(val) => setNodeDraft((prev) => ({ ...prev, workPhone: val }))}
+                    />
+                  </div>
+                  {nodeDraft.kind === "person" && (
+                    <div className="form-row">
+                      <label className="form-label">Cell Phone</label>
+                      <PhoneInputRow
+                        value={nodeDraft.cellPhone || ""}
+                        onCommit={(val) => setNodeDraft((prev) => ({ ...prev, cellPhone: val }))}
+                      />
+                    </div>
                   )}
                   {nodeDraft.kind === "person" && (
                     <div className="form-row">
-                      <label className="form-label">Status</label>
-                      <select
+                      <label className="form-label">e-Mail</label>
+                      <input
                         className="form-input"
-                        value={nodeDraft.personStatus}
-                        onChange={(e) => setNodeDraft((prev) => ({ ...prev, personStatus: e.target.value }))}
-                      >
-                        <option value="">— select —</option>
-                        <option value="Active">Active</option>
-                        <option value="Inactive">Inactive</option>
-                        <option value="Deceased">Deceased</option>
-                        <option value="Former">Former</option>
-                      </select>
+                        type="email"
+                        value={Array.isArray(nodeDraft.emails) ? nodeDraft.emails.join(", ") : (nodeDraft.emails || "")}
+                        onChange={(e) => setNodeDraft((prev) => ({ ...prev, emails: e.target.value }))}
+                        autoComplete="off"
+                        data-lpignore="true"
+                      />
+                    </div>
+                  )}
+                  {nodeDraft.kind === "entity" && (
+                    <div className="form-row">
+                      <label className="form-label">Tax ID</label>
+                      <input
+                        className="form-input"
+                        type="text"
+                        value={nodeDraft.taxId || ""}
+                        onChange={(e) => setNodeDraft((prev) => ({ ...prev, taxId: e.target.value }))}
+                        autoComplete="off"
+                        data-lpignore="true"
+                      />
                     </div>
                   )}
                   {[...dataDictionary]
-                    .filter((f) => f.appliesTo === "both" || f.appliesTo === nodeDraft.kind)
+                    .filter((f) => normalizeAppliesTo(f.appliesTo).includes(nodeDraft.kind))
                     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
                     .map((field) => (
                       <React.Fragment key={field.fieldId}>
@@ -5942,9 +7275,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         newId: newId !== editNodeId ? newId : null,
                         photo: nodeDraft.kind === "person" ? (nodeDraft.photo || "") : "",
                         logo: nodeDraft.kind === "entity" ? (nodeDraft.logo || "") : "",
-                        operationalRole: nodeDraft.kind === "entity" ? (nodeDraft.operationalRole || "") : "",
-                        legalStatus: nodeDraft.kind === "entity" ? (nodeDraft.legalStatus || "") : "",
-                        personStatus: nodeDraft.kind === "person" ? (nodeDraft.personStatus || "") : "",
+                        address: nodeDraft.address || "",
+                        workPhone: nodeDraft.workPhone || "",
+                        cellPhone: nodeDraft.cellPhone || "",
+                        emails: nodeDraft.emails || "",
+                        taxId: nodeDraft.taxId || "",
                         customFields: nodeDraft.customFields || {},
                       };
                       apiRequest(`/api/nodes/${editNodeId}`, {
@@ -5962,9 +7297,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                   kind: nodeDraft.kind,
                                   photo: payload.photo,
                                   logo: payload.logo,
-                                  operationalRole: payload.operationalRole,
-                                  legalStatus: payload.legalStatus,
-                                  personStatus: payload.personStatus,
+                                  address: payload.address,
+                                  workPhone: payload.workPhone,
+                                  cellPhone: payload.cellPhone,
+                                  emails: payload.emails,
+                                  taxId: payload.taxId,
                                   customFields: payload.customFields,
                                   client: n.client || clientId,
                                 }

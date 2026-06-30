@@ -7,6 +7,7 @@ import XLSX from "xlsx";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
+import { normalizeDateInput } from "./dateUtils.js";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   getNode,
@@ -285,7 +286,13 @@ const parseOwnershipCsv = (csvText) => {
     }
     const percentText = String(rawPercent ?? "").trim();
     const percent = percentText === "" ? Number.NaN : Number(percentText);
-    rows.push({ owner, owned, percent });
+    const startDateRaw = record[getColumnIndex(records[0] ?? [], ["start", "start date", "startdate", "effective"], -1)] ?? "";
+    const endDateRaw   = record[getColumnIndex(records[0] ?? [], ["end",   "end date",   "enddate",   "expiry"],    -1)] ?? "";
+    rows.push({
+      owner, owned, percent,
+      startDate: normalizeDateInput(startDateRaw) || null,
+      endDate:   normalizeDateInput(endDateRaw)   || null,
+    });
   }
 
   return { rows, skipped };
@@ -1013,10 +1020,14 @@ const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preload
     if (!existing) { notFoundList.push(name); continue; }
 
     // Remap extra column values from raw header name → DD fieldId.
+    // Normalize date values according to the field's dataType.
+    const fieldTypeMap = new Map(ddFields.map((f) => [f.fieldId, f.dataType]));
     const remappedExtra = {};
     for (const [rawHeader, value] of Object.entries(extraValues)) {
       const fieldId = headerToFieldId[rawHeader];
-      if (fieldId) remappedExtra[fieldId] = value;
+      if (!fieldId) continue;
+      const dataType = fieldTypeMap.get(fieldId);
+      remappedExtra[fieldId] = dataType === "date" ? (normalizeDateInput(value) || value) : value;
     }
 
     // Merge customFields: preserve existing keys; add/overwrite only keys present in this import.
@@ -1401,7 +1412,18 @@ const VALID_DATA_TYPES = new Set([
   "boolean", "date", "time", "phone", "email", "link", "file", "address", "year",
 ]);
 
-const VALID_APPLIES_TO = new Set(["entity", "person", "both"]);
+const VALID_APPLIES_TO = new Set(["entity", "person", "both", "ownership", "entity,ownership", "person,ownership", "entity,person,ownership"]);
+// Accept arrays by serializing them to a canonical string
+function serializeAppliesTo(v) {
+  if (Array.isArray(v)) {
+    const vals = [...new Set(v)].filter((s) => ["entity", "person", "ownership"].includes(s)).sort();
+    if (!vals.length) return "both";
+    if (vals.length === 1) return vals[0];
+    if (vals.join(",") === "entity,person") return "both";
+    return vals.join(",");
+  }
+  return v;
+}
 
 const toDDResponse = ({ clientId: _c, ...rest }) => rest;
 
@@ -1421,7 +1443,8 @@ app.get("/api/data-dictionary", async (req, res) => {
 app.post("/api/data-dictionary", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { prompt, dataType, appliesTo, multiValue, validValues, phoneTypes, showInStats } = req.body || {};
+    const { prompt, dataType, multiValue, validValues, phoneTypes, showInStats } = req.body || {};
+    const appliesTo = serializeAppliesTo(req.body?.appliesTo);
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: "prompt is required" });
     }
@@ -1462,7 +1485,8 @@ app.put("/api/data-dictionary/:fieldId", async (req, res) => {
   try {
     const client = req.auth.clientId;
     const fieldId = req.params.fieldId;
-    const { prompt, dataType, appliesTo, multiValue, validValues, phoneTypes, showInStats } = req.body || {};
+    const { prompt, dataType, multiValue, validValues, phoneTypes, showInStats } = req.body || {};
+    const appliesTo = serializeAppliesTo(req.body?.appliesTo);
     if (!prompt || !prompt.trim()) {
       return res.status(400).json({ error: "prompt is required" });
     }
