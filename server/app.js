@@ -800,6 +800,62 @@ const resolveOwnershipRows = async (rows, client) => {
   });
   return { resolved, errors };
 };
+// Evaluates the total ownership percentages for each owned entity, ensuring that the sum of
+// ownership percentages is either exactly 0 or 100, and tracks rows with invalid percent values.
+
+const evaluateOwnershipTotals = (rows) => {
+  const groups = new Map();
+  rows.forEach((row, idx) => {
+    const owned = String(row.owned || "").trim();
+    if (!owned) return;
+    if (!groups.has(owned)) {
+      groups.set(owned, {
+        owned,
+        total: 0,
+        rowCount: 0,
+        invalidPercentRows: [],
+      });
+    }
+    const group = groups.get(owned);
+    group.rowCount += 1;
+    const pct = Number(row.percent);
+    if (Number.isFinite(pct)) {
+      group.total += pct;
+    } else {
+      group.invalidPercentRows.push(idx + 1);
+    }
+  });
+
+  const EPS = 0.0001;
+  const offendingEntities = [];
+  for (const group of groups.values()) {
+    const totalRounded = Math.round(group.total * 10000) / 10000;
+    const totalIsZero = Math.abs(totalRounded - 0) <= EPS;
+    const totalIsHundred = Math.abs(totalRounded - 100) <= EPS;
+    const hasInvalidPercent = group.invalidPercentRows.length > 0;
+    if (hasInvalidPercent || (!totalIsZero && !totalIsHundred)) {
+      offendingEntities.push({
+        owned: group.owned,
+        total: totalRounded,
+        rowCount: group.rowCount,
+        invalidPercentRows: group.invalidPercentRows,
+        reason: hasInvalidPercent
+          ? "one or more rows have an invalid percent"
+          : "total ownership must be exactly 0 or 100",
+      });
+    }
+  }
+
+  offendingEntities.sort((a, b) =>
+    String(a.owned).localeCompare(String(b.owned), undefined, { sensitivity: "base" })
+  );
+
+  return {
+    valid: offendingEntities.length === 0,
+    offendingCount: offendingEntities.length,
+    offendingEntities,
+  };
+};
 
 const importOwnershipRows = async (resolved, client) => {
   const now = new Date().toISOString();
@@ -894,13 +950,21 @@ app.post("/api/import/preview/upload", upload.single("file"), async (req, res) =
     if (importType === "ownership") {
       const csv = isXlsx ? xlsxBufferToCsv(req.file.buffer) : req.file.buffer.toString("utf-8");
       const { rows, skipped } = parseOwnershipCsv(csv);
+      const ownershipValidation = evaluateOwnershipTotals(rows);
       const headers = ["Owner", "Owned", "Percent"];
       const previewRows = rows.slice(0, MAX_PREVIEW).map((r) => ({
         Owner: r.owner,
         Owned: r.owned,
         Percent: Number.isNaN(r.percent) ? "" : String(r.percent),
       }));
-      return res.json({ headers, rows: previewRows, total: rows.length, skipped, truncated: rows.length > MAX_PREVIEW });
+      return res.json({
+        headers,
+        rows: previewRows,
+        total: rows.length,
+        skipped,
+        truncated: rows.length > MAX_PREVIEW,
+        ownershipValidation,
+      });
     }
 
     // entity or person

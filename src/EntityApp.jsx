@@ -2,10 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import * as XLSX from "xlsx";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet } from "lucide-react";
 import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved, estimatePosterPageCount, generateOrgChartPoster } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone, normalizeDateInput } from "./utils/helpers";
+import { ENTITY_OWNERSHIP_SUMMARY_FIELD, getEntityOwnershipSummary } from "./utils/ownershipSummary";
 import { Input } from "./components/ui/input";
 import {
   Dialog,
@@ -306,8 +307,20 @@ const NodeImageField = ({ kind, value, onChange, apiBase, token }) => {
   );
 };
 
-const renderDdField = (field, value, onChange, { apiBase, token } = {}) => {
+const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList, relList } = {}) => {
   const { fieldId, prompt, dataType, multiValue, validValues, phoneTypes } = field;
+
+  if (field?._virtual) {
+    const computed = getEntityOwnershipSummary(node, nodeList, relList);
+    return (
+      <div className="form-row" key={fieldId}>
+        <label className="form-label">{prompt}</label>
+        <div className="form-input" style={{ minHeight: 38, display: "flex", alignItems: "center", color: computed ? "#111827" : "#9ca3af", background: "#f8fafc" }}>
+          {computed || "No ownership records"}
+        </div>
+      </div>
+    );
+  }
 
   if (dataType === "link") {
     return <DdLinkField key={fieldId} prompt={prompt} value={value} onChange={onChange} />;
@@ -540,6 +553,17 @@ const formatRel = (rel) => {
     return rel.role ? `employs (${rel.role})` : "employs";
   }
   return rel.type;
+};
+
+const parseOwnershipPercent = (rawValue) => {
+  if (rawValue === "" || rawValue == null) {
+    return { ok: true, value: null };
+  }
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) {
+    return { ok: false, message: "Ownership percent must be between 0 and 100." };
+  }
+  return { ok: true, value: parsed };
 };
 
 const TreeNode = ({
@@ -1245,7 +1269,7 @@ function measureTextWidth(text, fontSize = 13) {
   return s.length * fontSize * 0.65;
 }
 
-function getNodeTabularValue(node, column) {
+function getNodeTabularValue(node, column, nodeList = [], relList = []) {
   if (!node) return "";
   switch (column.key) {
     case "type": return node.kind || "";
@@ -1258,7 +1282,12 @@ function getNodeTabularValue(node, column) {
     case "operationalRole": return node.operationalRole || "";
     case "legalStatus": return node.legalStatus || "";
     case "personStatus": return node.personStatus || "";
-    default: return column.field ? (node.customFields?.[column.field.fieldId] ?? "") : "";
+    default:
+      if (!column.field) return "";
+      if (column.field._virtual) {
+        return getEntityOwnershipSummary(node, nodeList, relList);
+      }
+      return node.customFields?.[column.field.fieldId] ?? "";
   }
 }
 
@@ -1400,7 +1429,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const settingsRef = useRef(null);
   const exportMenuRef = useRef(null);
   const homeButtonRef = useRef(null);
+  const quickFindRef = useRef(null);
+  const quickFindInputRef = useRef(null);
   const focusBoxRef = useRef(null);
+  const hierarchyStageRef = useRef(null);
   const hierarchyContainerRef = useRef(null);
   const explodedAnchorSnapshotRef = useRef(null);
   const hierarchyPanRef = useRef({
@@ -1589,6 +1621,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   const [editNodeId, setEditNodeId] = useState(() => (token ? "" : (initialNodes[0]?.id ?? "")));
   const [nodeDraft, setNodeDraft] = useState({
+    id: "",
     name: "",
     kind: "entity",
     customFields: {},
@@ -1611,6 +1644,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     startDate: "",
     endDate: "",
   });
+  const newOwnershipPercentInvalid =
+    newOwnership.percent !== "" && !parseOwnershipPercent(newOwnership.percent).ok;
+  const editOwnershipPercentInvalid =
+    ownershipDraft.percent !== "" && !parseOwnershipPercent(ownershipDraft.percent).ok;
 
   const [newEmployment, setNewEmployment] = useState({
     from: "",
@@ -1697,6 +1734,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [cloneClientResult, setCloneClientResult] = useState(null);
   const [collapsedOwnerNodes, setCollapsedOwnerNodes] = useState(() => new Set());
   const [collapsedOwnedNodes, setCollapsedOwnedNodes] = useState(() => new Set());
+  const [quickFindQuery, setQuickFindQuery] = useState("");
+  const [quickFindOpen, setQuickFindOpen] = useState(false);
+  const [quickFindHighlight, setQuickFindHighlight] = useState(-1);
+  const [quickViewNodeId, setQuickViewNodeId] = useState("");
 
   const [dataDictionary, setDataDictionary] = useState([]);
   const emptyDdDraft = { prompt: "", dataType: "string", appliesTo: ["entity", "person"], multiValue: false, validValuesText: "", phoneTypesText: "", showInStats: false };
@@ -1705,6 +1746,72 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [isSavingDdEntry, setIsSavingDdEntry] = useState(false);
 
   const focusNode = useMemo(() => getNode(nodeList, focusId), [nodeList, focusId]);
+  const quickFindMatches = useMemo(() => {
+    const q = String(quickFindQuery || "").trim().toLowerCase();
+    if (q.length < 2) return [];
+    const scored = nodeList.map((node) => {
+      const name = String(node.name || "");
+      const id = String(node.id || "");
+      const kind = String(node.kind || "");
+      const nameLc = name.toLowerCase();
+      const idLc = id.toLowerCase();
+      const kindLc = kind.toLowerCase();
+
+      let score = -1;
+      if (nameLc === q) score = 100;
+      else if (nameLc.startsWith(q)) score = 90;
+      else if (nameLc.includes(q)) score = 75;
+      else if (idLc.includes(q)) score = 55;
+      else if (kindLc.includes(q)) score = 35;
+
+      return score >= 0 ? { node, score } : null;
+    }).filter(Boolean);
+
+    return scored
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return String(a.node.name || a.node.id || "").localeCompare(String(b.node.name || b.node.id || ""), undefined, { sensitivity: "base" });
+      })
+      .slice(0, 12)
+      .map((entry) => entry.node);
+  }, [nodeList, quickFindQuery]);
+
+  const quickViewNode = useMemo(() => getNode(nodeList, quickViewNodeId), [nodeList, quickViewNodeId]);
+  const quickViewOwners = useMemo(
+    () => (quickViewNodeId ? getOwnersOf(relList, quickViewNodeId) : []),
+    [quickViewNodeId, relList]
+  );
+  const quickViewOwned = useMemo(
+    () => (quickViewNodeId ? getOwnedBy(relList, quickViewNodeId) : []),
+    [quickViewNodeId, relList]
+  );
+  const quickViewDescCount = useMemo(
+    () => (quickViewNodeId ? getAllDescendants(relList, quickViewNodeId).size : 0),
+    [quickViewNodeId, relList]
+  );
+  const quickViewOwnershipSummary = useMemo(() => {
+    if (!quickViewNode || quickViewNode.kind !== "entity") return "";
+    const raw = String(getEntityOwnershipSummary(quickViewNode, nodeList, relList) || "").trim();
+    if (!raw) return "";
+    return raw.split(";").map((part) => part.trim()).filter(Boolean).join("\n");
+  }, [nodeList, quickViewNode, relList]);
+  const quickViewEmailText = useMemo(() => {
+    if (!quickViewNode) return "";
+    const emails = quickViewNode.emails;
+    if (Array.isArray(emails)) {
+      const vals = emails.map((v) => String(v || "").trim()).filter(Boolean);
+      return vals.join(", ");
+    }
+    const txt = String(emails || "").trim();
+    return txt;
+  }, [quickViewNode]);
+  const quickViewPhoneText = useMemo(() => {
+    if (!quickViewNode) return "";
+    const vals = [quickViewNode.workPhone, quickViewNode.cellPhone]
+      .map((v) => String(v || "").trim())
+      .filter(Boolean);
+    return vals.join(" / ");
+  }, [quickViewNode]);
   const ownerships = useMemo(
     () => relList.filter((r) => r.type === "owns"),
     [relList]
@@ -1757,7 +1864,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return sorted.filter((n) => (n.name || n.id || "").toLowerCase().includes(dirSearchLower));
   }, [nodeList, dirSearchLower]);
   const tableDdFields = useMemo(
-    () => [...dataDictionary]
+    () => [...dataDictionary, ENTITY_OWNERSHIP_SUMMARY_FIELD]
       .filter((f) => { const n = normalizeAppliesTo(f.appliesTo); return n.includes("entity") || n.includes("person"); })
       .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)),
     [dataDictionary]
@@ -1769,7 +1876,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     [dataDictionary]
   );
   const baseTabularColumns = useMemo(() => ([
-    { key: "status",          label: "Status",           hideable: false },
     { key: "name",            label: "Name",             hideable: true },
     { key: "address",         label: "Address",          hideable: true },
     { key: "workPhone",       label: "Primary Phone",    hideable: true,  width: 160 },
@@ -1788,7 +1894,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       field,
       hideable: true,
     }));
-    const selectableBaseColumns = baseTabularColumns.filter((c) => c.key !== "status" && c.key !== "actions");
+    const selectableBaseColumns = baseTabularColumns.filter((c) => c.key !== "actions");
     return [...selectableBaseColumns, ...ddCols].filter(Boolean);
   }, [baseTabularColumns, tableDdFields]);
   const defaultTabularOrder = useMemo(
@@ -2014,6 +2120,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       setUploadSummary(null);
       setUploadProgress({ current: 0, total: 0 });
 
+      if (uploadType === "ownership" && uploadPreview?.ownershipValidation && !uploadPreview.ownershipValidation.valid) {
+        setUploadStatus("error");
+        setUploadError("Import blocked: each owned entity must total exactly 0% or 100% ownership.");
+        return;
+      }
+
       if (uploadType === "ownership") {
         const ext = (uploadFile.name || "").split(".").pop().toLowerCase();
         let csvText;
@@ -2157,6 +2269,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       setUploadPreviewLoading(false);
     }
   };
+
+  const ownershipPreviewValidation = useMemo(() => {
+    if (uploadType !== "ownership" || !uploadPreview) {
+      return { valid: true, offendingEntities: [] };
+    }
+    const validation = uploadPreview.ownershipValidation;
+    if (validation && Array.isArray(validation.offendingEntities)) {
+      return {
+        valid: !!validation.valid,
+        offendingEntities: validation.offendingEntities,
+      };
+    }
+    return { valid: true, offendingEntities: [] };
+  }, [uploadType, uploadPreview]);
 
   const downloadErrorsCsv = () => {
     const errors = uploadSummary?.errors || [];
@@ -2707,21 +2833,45 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return [...newRows, ...existingRows];
   }, [dirSearchLower, filteredAllNodes, tableNewRows, tabularSubMode]);
 
+  const currentTabularNodeKind = useMemo(() => {
+    if (tabularSubMode === "entities") return "entity";
+    if (tabularSubMode === "persons") return "person";
+    return null;
+  }, [tabularSubMode]);
+
+  const tabularViewsForCurrentKind = useMemo(() => {
+    if (!currentTabularNodeKind) return tabularViews;
+    return tabularViews.filter((v) => !v.nodeKind || v.nodeKind === currentTabularNodeKind);
+  }, [currentTabularNodeKind, tabularViews]);
+
+  const effectiveSelectedTabularViewId = useMemo(() => {
+    if (!currentTabularNodeKind) return selectedTabularViewId;
+    if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) return DEFAULT_TABULAR_VIEW_ID;
+    const existsForKind = tabularViewsForCurrentKind.some((v) => v.id === selectedTabularViewId);
+    return existsForKind ? selectedTabularViewId : DEFAULT_TABULAR_VIEW_ID;
+  }, [currentTabularNodeKind, selectedTabularViewId, tabularViewsForCurrentKind]);
+
+  useEffect(() => {
+    if (!currentTabularNodeKind) return;
+    if (selectedTabularViewId === effectiveSelectedTabularViewId) return;
+    setSelectedTabularViewId(effectiveSelectedTabularViewId);
+  }, [currentTabularNodeKind, effectiveSelectedTabularViewId, selectedTabularViewId]);
+
   const activeTabularView = useMemo(() => {
-    if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) {
+    if (effectiveSelectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) {
       return {
         id: DEFAULT_TABULAR_VIEW_ID,
         name: "Default",
         columnOrder: defaultTabularOrder,
       };
     }
-    const found = tabularViews.find((v) => v.id === selectedTabularViewId);
+    const found = tabularViewsForCurrentKind.find((v) => v.id === effectiveSelectedTabularViewId);
     return found || {
       id: DEFAULT_TABULAR_VIEW_ID,
       name: "Default",
       columnOrder: defaultTabularOrder,
     };
-  }, [defaultTabularOrder, selectedTabularViewId, tabularViews]);
+  }, [defaultTabularOrder, effectiveSelectedTabularViewId, tabularViewsForCurrentKind]);
 
   const visibleTabularColumns = useMemo(() => {
     const byKey = new Map(allTabularColumns.map((c) => [c.key, c]));
@@ -2733,11 +2883,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         seen.add(col.key);
         return true;
       });
-    return [
-      { key: "status", label: "Status" },
-      ...middle,
-      { key: "actions", label: "Actions" },
-    ];
+    return middle;
   }, [activeTabularView.columnOrder, allTabularColumns]);
 
   const availableTabularColumns = useMemo(() => {
@@ -2951,7 +3097,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     const middle = (activeOwnershipTabularView.columnOrder || [])
       .map((key) => byKey.get(key))
       .filter((col) => { if (!col || seen.has(col.key)) return false; seen.add(col.key); return true; });
-    return [{ key: "status", label: "Status" }, ...middle, { key: "actions", label: "Actions" }];
+    return middle;
   }, [activeOwnershipTabularView.columnOrder, allOwnershipTabularColumns]);
 
   const availableOwnershipTabularColumns = useMemo(() => {
@@ -3085,12 +3231,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const ownershipTabularViewsRef = useRef(ownershipTabularViews);
   useEffect(() => { ownershipTabularViewsRef.current = ownershipTabularViews; }, [ownershipTabularViews]);
   useEffect(() => {
-    if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) return;
-    const view = tabularViewsRef.current.find((v) => v.id === selectedTabularViewId);
+    if (effectiveSelectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) return;
+    const view = tabularViewsRef.current.find((v) => v.id === effectiveSelectedTabularViewId);
     if (!view) return;
     if (view.sort !== undefined) setTabularSort(view.sort || null);
     if (view.filters !== undefined) setTabularFilters(view.filters || {});
-  }, [selectedTabularViewId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [effectiveSelectedTabularViewId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID) return;
     const view = ownershipTabularViewsRef.current.find((v) => v.id === selectedOwnershipTabularViewId);
@@ -3120,7 +3266,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         const node = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
         return active.every(([key, filter]) => {
           const col = colMap.get(key);
-          return col ? matchesTabularFilter(getNodeTabularValue(node, col), filter) : true;
+          return col ? matchesTabularFilter(getNodeTabularValue(node, col, nodeList, relList), filter) : true;
         });
       });
     }
@@ -3131,8 +3277,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         rows = [...rows].sort((a, b) => {
           const an = a.isNew ? a.node : (tableDrafts[a.key] || a.node);
           const bn = b.isNew ? b.node : (tableDrafts[b.key] || b.node);
-          const av = getNodeTabularValue(an, col);
-          const bv = getNodeTabularValue(bn, col);
+          const av = getNodeTabularValue(an, col, nodeList, relList);
+          const bv = getNodeTabularValue(bn, col, nodeList, relList);
           const aBlank = av == null || String(av).trim() === "";
           const bBlank = bv == null || String(bv).trim() === "";
           if (aBlank && bBlank) return 0;
@@ -3146,7 +3292,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       }
     }
     return rows;
-  }, [tableRows, tabularFilters, tabularSort, visibleTabularColumns, tableDrafts]);
+  }, [tableRows, tabularFilters, tabularSort, visibleTabularColumns, tableDrafts, nodeList, relList]);
 
   const filteredSortedOwnershipTableRows = useMemo(() => {
     let rows = ownershipTableRows;
@@ -3192,6 +3338,48 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     Object.values(ownershipTabularFilters).filter((f) => !isFilterEmpty(f)).length,
   [ownershipTabularFilters]);
 
+  const exportActiveTabularViewToExcel = useCallback(() => {
+    const isOwnershipView = tabularSubMode === "ownerships";
+    const viewName = isOwnershipView
+      ? (activeOwnershipTabularView.name || "Ownerships")
+      : (activeTabularView.name || (tabularSubMode === "entities" ? "Entities" : "Persons"));
+    const visibleColumns = isOwnershipView ? visibleOwnershipTabularColumns : visibleTabularColumns;
+    const rows = isOwnershipView ? filteredSortedOwnershipTableRows : filteredSortedTableRows;
+    const headers = visibleColumns.map((column) => column.label);
+    const dataRows = rows.map((row) => {
+      const values = visibleColumns.map((column) => {
+        const raw = isOwnershipView
+          ? getOwnershipTabularValue({ ...row.rel, ...(ownershipTableDrafts[row.key] || {}) }, nodeList, column)
+          : getNodeTabularValue(row.isNew ? row.node : (tableDrafts[row.key] || row.node), column, nodeList, relList);
+        if (raw == null) return "";
+        if (Array.isArray(raw)) return raw.join(", ");
+        if (typeof raw === "object") return JSON.stringify(raw);
+        return String(raw);
+      });
+      return values;
+    });
+
+    const worksheet = XLSX.utils.aoa_to_sheet([headers, ...dataRows]);
+    worksheet["!cols"] = headers.map((header, idx) => {
+      const maxLen = Math.max(
+        String(header || "").length,
+        ...dataRows.map((row) => String(row[idx] || "").length),
+      );
+      return { wch: Math.min(Math.max(maxLen + 2, 10), 60) };
+    });
+
+    const workbook = XLSX.utils.book_new();
+    const sheetName = String(viewName || "Tabular View").slice(0, 31);
+    XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    const exportClientName = clientDisplayName || toSentenceCase(clientId) || "export";
+    const safeFileName = `${exportClientName}-${tabularSubMode}-${viewName}`
+      .replace(/[^\w\s.-]/g, "")
+      .replace(/\s+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "") || "tabular-view";
+    XLSX.writeFile(workbook, `${safeFileName}.xlsx`);
+  }, [activeOwnershipTabularView.name, activeTabularView.name, clientDisplayName, clientId, filteredSortedOwnershipTableRows, filteredSortedTableRows, nodeList, ownershipTableDrafts, relList, tableDrafts, tabularSubMode, visibleOwnershipTabularColumns, visibleTabularColumns]);
+
   // ── Column width computation ───────────────────────────────────────────────
   // Priority: 1) column.width (hand-set), 2) max data content width, 3) never > 40% of screen
   const tabularColumnWidths = useMemo(() => {
@@ -3201,8 +3389,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     const SELECT_ARROW = 28; // extra room for the dropdown chevron on enum columns
 
     return visibleTabularColumns.map((column) => {
-      if (column.key === "status")  return 92;
-      if (column.key === "actions") return 300;
       const viewW = activeTabularView.columnWidths?.[column.key];
       if (viewW > 0)                return Math.min(viewW, maxPx);
       if (column.width)             return Math.min(column.width, maxPx);
@@ -3216,14 +3402,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       // Measure every row's display value
       for (const row of tableRows) {
         const node = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
-        const val = String(getNodeTabularValue(node, column) ?? "");
+        const val = String(getNodeTabularValue(node, column, nodeList, relList) ?? "");
         const w = measureTextWidth(val, CELL_FONT) + CELL_PAD + extraPad;
         if (w > maxW) maxW = w;
       }
 
       return Math.min(Math.max(Math.ceil(maxW), 80), maxPx);
     });  
-  }, [visibleTabularColumns, tableRows, tableDrafts, activeTabularView]);
+  }, [visibleTabularColumns, tableRows, tableDrafts, activeTabularView, nodeList, relList]);
 
   const ownershipTabularColumnWidths = useMemo(() => {
     const maxPx = (typeof window !== "undefined" ? window.innerWidth : 1280) * 0.4;
@@ -3232,8 +3418,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     const SELECT_ARROW = 28;
 
     return visibleOwnershipTabularColumns.map((column) => {
-      if (column.key === "status")  return 92;
-      if (column.key === "actions") return 200;
       const viewW = activeOwnershipTabularView.columnWidths?.[column.key];
       if (viewW > 0)                return Math.min(viewW, maxPx);
       if (column.width)             return Math.min(column.width, maxPx);
@@ -3268,12 +3452,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       setOwnershipTableDirtyKeys((prev) => { const next = new Set(prev); next.delete(relId); return next; });
       return true;
     }
+
+    const rawPercent = draft.percent !== undefined ? draft.percent : (original.percent ?? null);
+    const parsedPercent = parseOwnershipPercent(rawPercent);
+    if (!parsedPercent.ok) {
+      setOwnershipTableRowErrors((prev) => ({ ...prev, [relId]: parsedPercent.message }));
+      return false;
+    }
+
     setOwnershipTableSavingKeys((prev) => { const next = new Set(prev); next.add(relId); return next; });
     try {
       const payload = {
         from: original.from,
         to: original.to,
-        percent: draft.percent !== undefined ? (draft.percent !== "" ? Number(draft.percent) : null) : (original.percent ?? null),
+        percent: parsedPercent.value,
         startDate: draft.startDate !== undefined ? (draft.startDate || null) : (original.startDate || null),
         endDate: draft.endDate !== undefined ? (draft.endDate || null) : (original.endDate || null),
         customFields: { ...(original.customFields || {}), ...(draft.customFields || {}) },
@@ -3621,54 +3813,27 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         );
       case "actions":
         return (
-          <td key={`${row.key}-actions`}>
-            <div className="tabular-actions">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => saveTableRow(row.key)}
-                disabled={isSaving || !isDirty}
-              >
-                Save
-              </Button>
-              {!row.isNew && (
-                <>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => {
-                      setFocusId(row.key);
-                      setViewMode("hierarchy");
-                    }}
-                  >
-                    Focus
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => openNodeBookPrintDialog(row.key)}
-                  >
-                    Print Book
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => openNodePosterPrintDialog(row.key)}
-                  >
-                    Print Org
-                  </Button>
-                </>
-              )}
-              {row.isNew && (
+          <td key={`${row.key}-actions`} className="tabular-row-actions-cell">
+            {row.isNew ? (
+              <div className="tabular-actions">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => saveTableRow(row.key)}
+                  disabled={isSaving || !isDirty}
+                >
+                  Save
+                </Button>
                 <Button
                   type="button"
                   variant="outline"
                   onClick={() => removeTableNewRow(row.key)}
+                  disabled={isSaving}
                 >
                   Cancel
                 </Button>
-              )}
-            </div>
+              </div>
+            ) : null}
           </td>
         );
       default:
@@ -3676,6 +3841,17 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         {
           const field = column.field;
           const applicable = normalizeAppliesTo(field.appliesTo).includes(rowNode.kind);
+          if (field._virtual) {
+            if (!applicable) {
+              return <td key={`${row.key}-${field.fieldId}`} className="tabular-na">-</td>;
+            }
+            const virtualValue = getEntityOwnershipSummary(rowNode, nodeList, relList);
+            return (
+              <td key={`${row.key}-${field.fieldId}`} className="tabular-cell-wrap" title={virtualValue || ""}>
+                {virtualValue || ""}
+              </td>
+            );
+          }
           const validValues = Array.isArray(field.validValues)
             ? field.validValues.filter(Boolean)
             : [];
@@ -3757,10 +3933,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         }
     }
   }, [
+    nodeList,
+    relList,
     parseTableFieldValue,
     removeTableNewRow,
     saveTableRow,
+    setEditNodeId,
     setFocusId,
+    setOpenDialog,
     setViewMode,
     tableFieldToString,
     updateTableRowDraft,
@@ -3790,6 +3970,19 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const saveOwnerEditor = async () => {
     const targetId = openDialog?.targetId;
     if (!targetId) return;
+
+    const hasOutOfRangePercent = ownerEditorRows.some((r) => {
+      if (r.percent === "") return false;
+      return !parseOwnershipPercent(r.percent).ok;
+    });
+    if (hasOutOfRangePercent) return;
+
+    const ownerTotal = ownerEditorRows.reduce(
+      (s, r) => s + (r.percent !== "" && !isNaN(Number(r.percent)) ? Number(r.percent) : 0), 0
+    );
+    const ownerTotalInvalid = Math.abs(ownerTotal - 100) > 0.0001;
+    if (ownerTotalInvalid) return;
+
     setIsSavingOwners(true);
     try {
       const removedRows = ownerEditorOriginal.filter(
@@ -3891,6 +4084,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     const node = getNode(nodeList, editNodeId);
     if (node) {
       setNodeDraft({
+        id: node.id,
         name: node.name,
         kind: node.kind,
         photo: node.photo || "",
@@ -4317,28 +4511,35 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   useEffect(() => {
     if (viewMode !== "hierarchy") return;
-    const shouldCenterVertically = directOwners.length > 0;
     const center = (behavior) => {
-      if (!focusBoxRef.current || !hierarchyContainerRef.current) return;
+      if (!focusBoxRef.current || !hierarchyContainerRef.current || !hierarchyStageRef.current) return;
       const container = hierarchyContainerRef.current;
-      const box = focusBoxRef.current;
+      const focusBox = focusBoxRef.current;
+      const stage = hierarchyStageRef.current;
       const containerRect = container.getBoundingClientRect();
-      const boxRect = box.getBoundingClientRect();
-      const deltaY = shouldCenterVertically
-        ? (boxRect.top + box.clientHeight / 2) - (containerRect.top + container.clientHeight / 2)
-        : 0;
-      const deltaX = (boxRect.left + box.clientWidth / 2) - (containerRect.left + container.clientWidth / 2);
-      container.scrollTo({
-        left: container.scrollLeft + deltaX,
-        top: container.scrollTop + deltaY,
-        behavior,
-      });
+      const stageRect = stage.getBoundingClientRect();
+      const focusRect = focusBox.getBoundingClientRect();
+      const clamp = (value, min, max) => (min <= max ? Math.min(Math.max(value, min), max) : value);
+      const centeredDeltaX = (stageRect.left + stageRect.width / 2) - (containerRect.left + container.clientWidth / 2);
+      const centeredDeltaY = (stageRect.top + stageRect.height / 2) - (containerRect.top + container.clientHeight / 2);
+
+      // Keep the focused entity inside a small safety inset so it never scrolls off screen.
+      const insetX = Math.min(24, Math.max(0, Math.floor(container.clientWidth / 4)));
+      const insetY = Math.min(24, Math.max(0, Math.floor(container.clientHeight / 4)));
+      const focusMinDeltaX = (focusRect.right - containerRect.left) - (container.clientWidth - insetX);
+      const focusMaxDeltaX = (focusRect.left - containerRect.left) - insetX;
+      const focusMinDeltaY = (focusRect.bottom - containerRect.top) - (container.clientHeight - insetY);
+      const focusMaxDeltaY = (focusRect.top - containerRect.top) - insetY;
+
+      const nextLeft = container.scrollLeft + clamp(centeredDeltaX, focusMinDeltaX, focusMaxDeltaX);
+      const nextTop = container.scrollTop + clamp(centeredDeltaY, focusMinDeltaY, focusMaxDeltaY);
+      container.scrollTo({ left: nextLeft, top: nextTop, behavior });
     };
     requestAnimationFrame(() => center("smooth"));
     // Re-center after images in the focus box have loaded (photos/logos load asynchronously)
-    const t = setTimeout(() => center("instant"), 300);
+    const t = setTimeout(() => center("auto"), 300);
     return () => clearTimeout(t);
-  }, [directOwners.length, focusId, viewMode, nodeList]);
+  }, [focusId, viewMode, nodeList, explodedNodes.size]);
 
   // Reset exploded child nodes whenever the focused entity changes
   useEffect(() => {
@@ -4410,6 +4611,51 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return () => document.removeEventListener("mousedown", handler);
   }, [exportMenuOpen]);
 
+  useEffect(() => {
+    if (quickFindMatches.length === 0) {
+      setQuickFindHighlight(-1);
+      return;
+    }
+    setQuickFindHighlight((prev) => {
+      if (prev < 0 || prev >= quickFindMatches.length) return 0;
+      return prev;
+    });
+  }, [quickFindMatches]);
+
+  useEffect(() => {
+    const q = String(quickFindQuery || "").trim();
+    if (q.length < 2) {
+      setQuickFindOpen(false);
+    }
+  }, [quickFindQuery]);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (quickFindRef.current && !quickFindRef.current.contains(e.target)) {
+        setQuickFindOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    const onKeydown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && String(e.key || "").toLowerCase() === "k") {
+        e.preventDefault();
+        quickFindInputRef.current?.focus();
+        const q = String(quickFindQuery || "").trim();
+        if (q.length >= 2) setQuickFindOpen(true);
+        return;
+      }
+      if (e.key === "Escape" && quickViewNodeId) {
+        setQuickViewNodeId("");
+      }
+    };
+    window.addEventListener("keydown", onKeydown);
+    return () => window.removeEventListener("keydown", onKeydown);
+  }, [quickFindQuery, quickViewNodeId]);
+
 
   const initialHydrationLoading = profileLoading || !directoryLoaded;
   const activePrintFocusId = printTargetNodeId || focusId;
@@ -4430,6 +4676,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     setPosterConfirmed(false);
     setPrintDialogOpen(true);
   }, []);
+  const handleQuickFindSelect = useCallback((nodeId) => {
+    const node = getNode(nodeList, nodeId);
+    setQuickViewNodeId(nodeId);
+    if (node?.name) setQuickFindQuery(node.name);
+    setQuickFindOpen(false);
+  }, [nodeList]);
   const focusNodeAndPersistPrimary = useCallback((nodeId) => {
     const nextFocusId = String(nodeId || "");
     if (!nextFocusId) return;
@@ -4550,25 +4802,75 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Button
-              ref={homeButtonRef}
-              type="button"
-              variant="outline"
-              className="btn-icon"
-              aria-label="Go home"
-              title="Home"
-              onClick={() => {
-                if (homeScreen) {
-                  restoreHomeScreen(homeScreen);
-                } else {
-                  setViewMode("hierarchy");
-                }
-              }}
-            >
-              <Home size={18} />
-            </Button>
+            <div className="quick-find quick-find--header-right" ref={quickFindRef}>
+              <div className="quick-find-input-wrap">
+                <Search size={14} className="quick-find-icon" />
+                <input
+                  ref={quickFindInputRef}
+                  type="text"
+                  className="quick-find-input"
+                  style={{ border: "none", fontSize: 16 }}
+                  placeholder="Lightning search..."
+                  value={quickFindQuery}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    setQuickFindQuery(next);
+                    setQuickFindOpen(next.trim().length >= 2);
+                  }}
+                  onFocus={() => {
+                    if (quickFindQuery.trim().length >= 2) setQuickFindOpen(true);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      if (!quickFindOpen && quickFindMatches.length > 0) {
+                        setQuickFindOpen(true);
+                        return;
+                      }
+                      setQuickFindHighlight((prev) => {
+                        if (quickFindMatches.length === 0) return -1;
+                        return Math.min((prev < 0 ? 0 : prev + 1), quickFindMatches.length - 1);
+                      });
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setQuickFindHighlight((prev) => {
+                        if (quickFindMatches.length === 0) return -1;
+                        return Math.max((prev < 0 ? 0 : prev - 1), 0);
+                      });
+                    } else if (e.key === "Enter") {
+                      if (!quickFindOpen || quickFindHighlight < 0 || quickFindHighlight >= quickFindMatches.length) return;
+                      e.preventDefault();
+                      handleQuickFindSelect(quickFindMatches[quickFindHighlight].id);
+                    } else if (e.key === "Escape") {
+                      setQuickFindOpen(false);
+                    }
+                  }}
+                />
+              </div>
+              {quickFindOpen && (
+                <div className="quick-find-menu">
+                  {quickFindMatches.length === 0 ? (
+                    <div className="quick-find-empty">No matches. Keep typing...</div>
+                  ) : (
+                    quickFindMatches.map((n, idx) => (
+                      <button
+                        key={n.id}
+                        type="button"
+                        className={`quick-find-item${idx === quickFindHighlight ? " is-active" : ""}`}
+                        onMouseEnter={() => setQuickFindHighlight(idx)}
+                        onClick={() => handleQuickFindSelect(n.id)}
+                      >
+                        <span className="quick-find-item-name">{n.name || n.id}</span>
+                        <span className="quick-find-item-meta">{toSentenceCase(n.kind)} · {n.id}</span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
             <div className="settings-anchor" ref={settingsRef}>
               <Button
+                ref={homeButtonRef}
                 type="button"
                 variant="outline"
                 className="btn-icon"
@@ -4944,6 +5246,23 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 {uploadStatus === "error" && uploadError && (
                   <div style={{ color: "#dc2626", fontSize: 14 }}>{uploadError}</div>
                 )}
+                {uploadType === "ownership" && !ownershipPreviewValidation.valid && (
+                  <div style={{ border: "1px solid #fca5a5", background: "#fff1f2", color: "#9f1239", borderRadius: 8, padding: 10, display: "grid", gap: 6 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>
+                      Import blocked: each owned entity must total exactly 0% or 100% ownership.
+                    </div>
+                    <div style={{ fontSize: 12 }}>
+                      Offending entities:
+                    </div>
+                    <div style={{ maxHeight: 140, overflowY: "auto", overscrollBehavior: "contain", fontSize: 12 }}>
+                      {ownershipPreviewValidation.offendingEntities.map((entry, idx) => (
+                        <div key={`${entry.owned}-${idx}`}>
+                          {entry.owned}: {entry.total}% ({entry.reason})
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -5004,7 +5323,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   <Button
                     type="button"
                     onClick={handleUploadCsv}
-                    disabled={uploadStatus === "uploading" || uploadPreview.total === 0}
+                    disabled={
+                      uploadStatus === "uploading" ||
+                      uploadPreview.total === 0 ||
+                      (uploadType === "ownership" && !ownershipPreviewValidation.valid)
+                    }
                   >
                     {uploadStatus === "uploading"
                       ? <><Loader2 size={14} className="animate-spin" style={{ marginRight: 6 }} />Importing…</>
@@ -5051,7 +5374,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               onPointerCancel={onHierarchyPointerCancel}
               onClickCapture={onHierarchyClickCapture}
             >
-              <div className="hv-stage">
+              <div className="hv-stage" ref={hierarchyStageRef}>
 
                 <div className="hv-above">
                   {/* ── OWNERS (above the focus box) ── */}
@@ -5478,7 +5801,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 type="button"
                 onClick={() => setTabularSubMode("persons")}
                 style={{
-                  padding: "5px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
+                  padding: "15px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
                   borderRight: "1px solid #cbd5e1",
                   background: tabularSubMode === "persons" ? "#1e293b" : "#fff",
                   color: tabularSubMode === "persons" ? "#fff" : "#475569",
@@ -5530,15 +5853,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   <div className="tabular-toolbar-left">
                     <select
                       className="tabular-view-select"
-                      value={selectedTabularViewId}
+                      value={effectiveSelectedTabularViewId}
                       onChange={(e) => setSelectedTabularViewId(e.target.value)}
                     >
-                      {(() => {
-                        const currentKind = tabularSubMode === "entities" ? "entity" : "person";
-                        const kindViews = tabularViews.filter((v) => !v.nodeKind || v.nodeKind === currentKind);
-                        if (kindViews.length === 0) return <option value={DEFAULT_TABULAR_VIEW_ID}>Default</option>;
-                        return kindViews.map((v) => <option key={v.id} value={v.id}>{v.name}</option>);
-                      })()}
+                      <option value={DEFAULT_TABULAR_VIEW_ID}>Default</option>
+                      {tabularViewsForCurrentKind.map((v) => (
+                        <option key={v.id} value={v.id}>{v.name}</option>
+                      ))}
                     </select>
                     <Button type="button" variant="outline" onClick={openTabularViewManager}>
                       Customize
@@ -5550,6 +5871,17 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     )}
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={exportActiveTabularViewToExcel}
+                      disabled={tabularSubMode === "entities" || tabularSubMode === "persons"
+                        ? filteredSortedTableRows.length === 0
+                        : filteredSortedOwnershipTableRows.length === 0}
+                    >
+                      <FileSpreadsheet size={16} />
+                      Export
+                    </Button>
                     <Button
                       type="button"
                       variant="outline"
@@ -5586,12 +5918,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         </colgroup>
                         <thead>
                           <tr>
-                            {visibleTabularColumns.map((column) => {
+                            {visibleTabularColumns.map((column, colIdx) => {
                               const { filterType, enumOptions } = getColumnFilterConfig(column);
                               const isSorted = tabularSort?.key === column.key;
                               const hasFilter = !isFilterEmpty(tabularFilters[column.key]);
+                              const headClass = `${isSorted ? "tabular-th--sorted" : ""}${hasFilter ? " tabular-th--filtered" : ""}${colIdx === 0 ? " tabular-col-frozen" : ""}`;
                               return (
-                                <th key={column.key} title={column.label} className={`${isSorted ? "tabular-th--sorted" : ""}${hasFilter ? " tabular-th--filtered" : ""}`}>
+                                <th key={column.key} title={column.label} className={headClass}>
                                   <div className="tabular-th-inner">
                                     {filterType ? (
                                       <span className="tabular-th-label" onClick={() => handleTabularSort(column.key)}>
@@ -5631,9 +5964,76 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                               : makeNodeId(rowNode.kind, rowNode.name || "", row.key);
                             return (
                               <tr key={row.key} className={rowError ? "tabular-row-error" : undefined}>
-                                {visibleTabularColumns.map((column) =>
-                                  renderTabularCell(column, { row, rowNode, isSaving, isDirty, rowError, resolvedId })
-                                )}
+                                {visibleTabularColumns.map((column, colIdx) => {
+                                  const cell = renderTabularCell(column, { row, rowNode, isSaving, isDirty, rowError, resolvedId });
+                                  if (!React.isValidElement(cell)) return cell;
+
+                                  let nextCell = cell;
+                                  if (colIdx === 0 && !row.isNew) {
+                                    nextCell = React.cloneElement(nextCell, {
+                                      className: `${nextCell.props.className || ""} tabular-actions-anchor`.trim(),
+                                      children: (
+                                        <div className="tabular-actions-anchor-box">
+                                          {nextCell.props.children}
+                                          <div className="tabular-row-hover-actions" onClick={(e) => e.stopPropagation()}>
+                                            <button
+                                              className="hv-neighbor-action-btn"
+                                              type="button"
+                                              title="Edit"
+                                              aria-label="Edit"
+                                              onClick={() => {
+                                                setEditNodeId(row.key);
+                                                setOpenDialog({ type: "edit-node" });
+                                              }}
+                                              disabled={isSaving}
+                                            >
+                                              <Pencil size={11} />
+                                            </button>
+                                            <button
+                                              className="hv-neighbor-action-btn"
+                                              type="button"
+                                              title="Print Book Pages (PDF)"
+                                              aria-label="Print Book Pages"
+                                              onClick={() => openNodeBookPrintDialog(row.key)}
+                                              disabled={isSaving}
+                                            >
+                                              <BookOpen size={11} />
+                                            </button>
+                                            <button
+                                              className="hv-neighbor-action-btn"
+                                              type="button"
+                                              title="Print Org Chart Poster"
+                                              aria-label="Print Org Chart Poster"
+                                              onClick={() => openNodePosterPrintDialog(row.key)}
+                                              disabled={isSaving}
+                                            >
+                                              <GitFork size={11} />
+                                            </button>
+                                            <button
+                                              className="hv-neighbor-action-btn"
+                                              type="button"
+                                              title="Focus in Hierarchy"
+                                              aria-label="Focus in Hierarchy"
+                                              onClick={() => {
+                                                setFocusId(row.key);
+                                                setViewMode("hierarchy");
+                                              }}
+                                              disabled={isSaving}
+                                            >
+                                              <Crosshair size={11} />
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ),
+                                    });
+                                  }
+
+                                  const extraClass = `${colIdx === 0 ? "tabular-col-frozen" : ""}${colIdx === 0 && isDirty ? " tabular-col-dirty" : ""}`.trim();
+                                  if (!extraClass) return nextCell;
+                                  return React.cloneElement(nextCell, {
+                                    className: `${nextCell.props.className || ""} ${extraClass}`.trim(),
+                                  });
+                                })}
                               </tr>
                             );
                           })}
@@ -5887,12 +6287,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         </colgroup>
                         <thead>
                           <tr>
-                            {visibleOwnershipTabularColumns.map((column) => {
+                            {visibleOwnershipTabularColumns.map((column, colIdx) => {
                               const { filterType, enumOptions } = getColumnFilterConfig(column);
                               const isSorted = ownershipTabularSort?.key === column.key;
                               const hasFilter = !isFilterEmpty(ownershipTabularFilters[column.key]);
+                              const headClass = `${isSorted ? "tabular-th--sorted" : ""}${hasFilter ? " tabular-th--filtered" : ""}${colIdx === 0 ? " tabular-col-frozen" : ""}`;
                               return (
-                                <th key={column.key} title={column.label} className={`${isSorted ? "tabular-th--sorted" : ""}${hasFilter ? " tabular-th--filtered" : ""}`}>
+                                <th key={column.key} title={column.label} className={headClass}>
                                   <div className="tabular-th-inner">
                                     {filterType ? (
                                       <span className="tabular-th-label" onClick={() => handleOwnershipTabularSort(column.key)}>
@@ -5928,9 +6329,15 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                             const rowError = ownershipTableRowErrors[row.key];
                             return (
                               <tr key={row.key} className={rowError ? "tabular-row-error" : undefined}>
-                                {visibleOwnershipTabularColumns.map((column) =>
-                                  renderOwnershipTabularCell(column, { row, rowRel: row.rel, isSaving, isDirty, rowError })
-                                )}
+                                {visibleOwnershipTabularColumns.map((column, colIdx) => {
+                                  const cell = renderOwnershipTabularCell(column, { row, rowRel: row.rel, isSaving, isDirty, rowError });
+                                  if (!React.isValidElement(cell)) return cell;
+                                  const extraClass = `${colIdx === 0 ? "tabular-col-frozen" : ""}${colIdx === 0 && isDirty ? " tabular-col-dirty" : ""}`.trim();
+                                  if (!extraClass) return cell;
+                                  return React.cloneElement(cell, {
+                                    className: `${cell.props.className || ""} ${extraClass}`.trim(),
+                                  });
+                                })}
                               </tr>
                             );
                           })}
@@ -6227,11 +6634,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 <DialogTitle>Data Dictionary — {clientDisplayName || toSentenceCase(clientId)}</DialogTitle>
               </DialogHeader>
               <div className="dialog-body">
-                {dataDictionary.length === 0 ? (
-                  <div style={{ color: "#6b7280", fontSize: 14, padding: "12px 0" }}>
-                    No fields defined yet. Use <strong>Add Field</strong> to create one.
-                  </div>
-                ) : (
+                <>
+                  {dataDictionary.length === 0 && (
+                    <div style={{ color: "#6b7280", fontSize: 14, padding: "12px 0" }}>
+                      No custom fields defined yet. Use <strong>Add Field</strong> to create one.
+                    </div>
+                  )}
                   <div style={{ overflowX: "clip" }}>
                     <table className="dd-table">
                       <thead>
@@ -6262,6 +6670,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                             { _builtin: true, prompt: "Address",       type: "Address",     appliesTo: "Entity, Person", multi: "No",  values: "" },
                             { _builtin: true, prompt: "Cell Phone",    type: "Phone",       appliesTo: "Person",         multi: "No",  values: "" },
                             { _builtin: true, prompt: "e-Mail",        type: "Email",       appliesTo: "Entity, Person", multi: "Yes", values: "" },
+                            { _builtin: true, prompt: "Ownership Records", type: "Computed", appliesTo: "Entity",       multi: "No",  values: "Read-only" },
                             { _builtin: true, prompt: "Primary Phone", type: "Phone",       appliesTo: "Entity, Person", multi: "No",  values: "" },
                             { _builtin: true, prompt: "Tax ID",        type: "Short text",  appliesTo: "Entity",         multi: "No",  values: "" },
                           ];
@@ -6317,7 +6726,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       </tbody>
                     </table>
                   </div>
-                )}
+                </>
               </div>
               <DialogFooter style={{ justifyContent: "space-between", marginTop: 16 }}>
                 <Button type="button" variant="outline" onClick={openNewDdEntry}>
@@ -6449,6 +6858,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               (s, r) => s + (r.percent !== "" && !isNaN(Number(r.percent)) ? Number(r.percent) : 0), 0
             );
             const overLimit = ownerTotal > 100;
+            const hasOutOfRangePercent = ownerEditorRows.some((r) => {
+              if (r.percent === "") return false;
+              return !parseOwnershipPercent(r.percent).ok;
+            });
+            const ownerTotalInvalid = Math.abs(ownerTotal - 100) > 0.0001;
             const searchQ = ownerSearch.trim().toLowerCase();
             const searchResults = searchQ
               ? nodeList.filter(
@@ -6500,6 +6914,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   <div className={`owner-editor-total ${overLimit ? "over" : ""}`}>
                     Total:&nbsp;<strong>{ownerTotal}%</strong>
                     {overLimit && <span className="owner-editor-over-msg"> — exceeds 100%</span>}
+                    {hasOutOfRangePercent && <span className="owner-editor-over-msg"> — each owner percent must be 0-100</span>}
+                    {!overLimit && ownerTotalInvalid && <span className="owner-editor-over-msg"> — must equal 100% to save</span>}
                   </div>
 
                   <div className="owner-search-section">
@@ -6564,7 +6980,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     if (prevDialog) { setOpenDialog(prevDialog); setPrevDialog(null); }
                     else setOpenDialog(null);
                   }}>Cancel</Button>
-                  <Button type="button" disabled={isSavingOwners} onClick={saveOwnerEditor}>
+                  <Button type="button" disabled={isSavingOwners || ownerTotalInvalid || hasOutOfRangePercent} onClick={saveOwnerEditor}>
                     {isSavingOwners ? "Saving…" : "Save"}
                   </Button>
                 </DialogFooter>
@@ -6685,7 +7101,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       />
                     </div>
                   )}
-                  {[...dataDictionary]
+                  {[...dataDictionary, ENTITY_OWNERSHIP_SUMMARY_FIELD]
                     .filter((f) => normalizeAppliesTo(f.appliesTo).includes(newNode.kind))
                     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
                     .map((field) => (
@@ -6694,7 +7110,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           field,
                           newNode.customFields?.[field.fieldId],
                           (val) => setNewNode((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
-                          { apiBase, token }
+                          { apiBase, token, node: newNode, nodeList, relList }
                         )}
                       </React.Fragment>
                     ))
@@ -6824,6 +7240,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       }))
                     }
                   />
+                  {newOwnershipPercentInvalid && (
+                    <div className="dup-warning">Ownership percent must be between 0 and 100.</div>
+                  )}
                 </div>
                 <div className="form-row">
                   <label className="form-label">Start date</label>
@@ -6858,17 +7277,21 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
                 <Button
                   type="button"
-                  disabled={isAddingOwnership}
+                  disabled={isAddingOwnership || newOwnershipPercentInvalid}
                   onClick={async () => {
                     if (isAddingOwnership) return;
                     if (!newOwnership.from || !newOwnership.to) return;
+                    const parsedPercent = parseOwnershipPercent(newOwnership.percent);
+                    if (!parsedPercent.ok) {
+                      setRemoteStatus("error");
+                      setRemoteError(parsedPercent.message);
+                      return;
+                    }
                     setIsAddingOwnership(true);
                     const payload = {
                       from: newOwnership.from,
                       to: newOwnership.to,
-                      percent: newOwnership.percent
-                        ? Number(newOwnership.percent)
-                        : null,
+                      percent: parsedPercent.value,
                       startDate: newOwnership.startDate || null,
                       endDate: newOwnership.endDate || null,
                       client: clientId,
@@ -7135,7 +7558,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       />
                     </div>
                   )}
-                  {[...dataDictionary]
+                  {[...dataDictionary, ENTITY_OWNERSHIP_SUMMARY_FIELD]
                     .filter((f) => normalizeAppliesTo(f.appliesTo).includes(nodeDraft.kind))
                     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
                     .map((field) => (
@@ -7144,7 +7567,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           field,
                           nodeDraft.customFields?.[field.fieldId],
                           (val) => setNodeDraft((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
-                          { apiBase, token }
+                          { apiBase, token, node: nodeDraft, nodeList, relList }
                         )}
                       </React.Fragment>
                     ))
@@ -7430,6 +7853,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       }))
                     }
                   />
+                  {editOwnershipPercentInvalid && (
+                    <div className="dup-warning">Ownership percent must be between 0 and 100.</div>
+                  )}
                 </div>
                 <div className="form-row">
                   <label className="form-label">Start date</label>
@@ -7505,14 +7931,19 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 </Button>
                 <Button
                   type="button"
+                  disabled={editOwnershipPercentInvalid}
                   onClick={() => {
                     if (!editOwnershipId) return;
+                    const parsedPercent = parseOwnershipPercent(ownershipDraft.percent);
+                    if (!parsedPercent.ok) {
+                      setRemoteStatus("error");
+                      setRemoteError(parsedPercent.message);
+                      return;
+                    }
                     const payload = {
                       from: ownershipDraft.from,
                       to: ownershipDraft.to,
-                      percent: ownershipDraft.percent
-                        ? Number(ownershipDraft.percent)
-                        : null,
+                      percent: parsedPercent.value,
                       startDate: ownershipDraft.startDate || null,
                       endDate: ownershipDraft.endDate || null,
                       client: clientId,
@@ -8517,6 +8948,61 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         </Dialog>
 
       </div>{/* end app-content */}
+
+      {quickViewNode && (
+        <aside className="quick-view-panel">
+          <div className="quick-view-header">
+            <div>
+              <div className="quick-view-title">Quick View</div>
+              <div className="quick-view-subtitle">{quickViewNode.name || quickViewNode.id}</div>
+            </div>
+            <button
+              type="button"
+              className="quick-view-close"
+              onClick={() => setQuickViewNodeId("")}
+              aria-label="Close quick view"
+              title="Close"
+            >
+              <X size={14} />
+            </button>
+          </div>
+          <div className="quick-view-section">
+            <div className="quick-view-row"><span>Type</span><strong>{toSentenceCase(quickViewNode.kind || "")}</strong></div>
+            {quickViewNode.address && <div className="quick-view-row"><span>Address</span><strong>{quickViewNode.address}</strong></div>}
+            {quickViewEmailText && <div className="quick-view-row"><span>Email</span><strong>{quickViewEmailText}</strong></div>}
+            {quickViewPhoneText && <div className="quick-view-row"><span>Phone</span><strong>{quickViewPhoneText}</strong></div>}
+            <div className="quick-view-row"><span>Owners</span><strong>{quickViewOwners.length}</strong></div>
+            <div className="quick-view-row"><span>Entities owned</span><strong>{quickViewOwned.length} ({quickViewDescCount})</strong></div>
+            {quickViewNode.kind === "entity" && (
+              <div className="quick-view-block">
+                <div className="quick-view-label">Ownership Summary - {quickViewOwners.length} owner{quickViewOwners.length === 1 ? "" : "s"}</div>
+                <div className="quick-view-summary">{quickViewOwnershipSummary || "No ownership records"}</div>
+              </div>
+            )}
+          </div>
+          <div className="quick-view-actions">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setEditNodeId(quickViewNode.id);
+                setOpenDialog({ type: "edit-node" });
+              }}
+            >
+              <Pencil size={14} /> Edit
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                setFocusId(quickViewNode.id);
+                setViewMode("hierarchy");
+              }}
+            >
+              <Crosshair size={14} /> Focus
+            </Button>
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

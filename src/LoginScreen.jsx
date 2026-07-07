@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_URL || "";
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5174";
 
 export default function LoginScreen({ onLogin, sessionExpired }) {
   const [loginId, setLoginId] = useState("");
@@ -18,8 +18,25 @@ export default function LoginScreen({ onLogin, sessionExpired }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ loginId: loginId.trim().toLowerCase(), password }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Login failed");
+
+      // Parse defensively so empty/non-JSON responses show a useful error.
+      const raw = await res.text();
+      let data = {};
+      if (raw) {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          if (!res.ok) {
+            throw new Error(`Server returned ${res.status} ${res.statusText}`);
+          }
+          throw new Error("Server returned an invalid login response");
+        }
+      }
+
+      if (!res.ok) throw new Error(data.error || `Login failed (${res.status})`);
+      if (!data.token || !data.clientId) {
+        throw new Error("Login response is missing required fields");
+      }
       onLogin(data.token, data.clientId, data.personId || null);
     } catch (err) {
       setError(err.message);

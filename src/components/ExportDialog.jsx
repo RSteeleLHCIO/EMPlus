@@ -21,6 +21,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "./ui/button";
 import { formatPhone } from "../utils/helpers";
+import { ENTITY_OWNERSHIP_SUMMARY_FIELD, getEntityOwnershipSummary } from "../utils/ownershipSummary";
 import {
   Dialog,
   DialogContent,
@@ -77,65 +78,6 @@ const KIND_BADGE = {
   both:   { label: "Both",   color: "#059669" },
 };
 
-// ─── Virtual fields (not in DD, computed from relationships) ──────────────────
-
-const VIRTUAL_FIELDS = [
-  {
-    fieldId: "__virtual__owners",
-    prompt: "Entity Owners",
-    dataType: "virtual",
-    appliesTo: "entity",
-    sortOrder: -2,
-    _virtual: true,
-  },
-  {
-    fieldId: "__virtual__owned",
-    prompt: "Owned Entities",
-    dataType: "virtual",
-    appliesTo: "both",
-    sortOrder: -1,
-    _virtual: true,
-  },
-];
-
-const getVirtualValue = (fieldId, node, nodeList, relList) => {
-  if (fieldId === "__virtual__owners") {
-    // Only meaningful for entities
-    if (node.kind === "person") return "";
-    const owners = (relList || [])
-      .filter((r) => r.type === "owns" && r.to === node.id)
-      .sort((a, b) => (Number(b.percent) || 0) - (Number(a.percent) || 0));
-    if (owners.length === 0) return "";
-    return owners
-      .map((r) => {
-        const ownerNode = (nodeList || []).find((n) => n.id === r.from);
-        const name = ownerNode?.name || r.from;
-        const pct = r.percent != null && Number.isFinite(Number(r.percent))
-          ? ` ${Number(r.percent)}%`
-          : "";
-        return `${name}${pct}`;
-      })
-      .join("; ");
-  }
-  if (fieldId === "__virtual__owned") {
-    const owned = (relList || [])
-      .filter((r) => r.type === "owns" && r.from === node.id)
-      .sort((a, b) => (Number(b.percent) || 0) - (Number(a.percent) || 0));
-    if (owned.length === 0) return "";
-    return owned
-      .map((r) => {
-        const ownedNode = (nodeList || []).find((n) => n.id === r.to);
-        const name = ownedNode?.name || r.to;
-        const pct = r.percent != null && Number.isFinite(Number(r.percent))
-          ? ` ${Number(r.percent)}%`
-          : "";
-        return `${name}${pct}`;
-      })
-      .join("; ");
-  }
-  return "";
-};
-
 // ─── ExportDialog ─────────────────────────────────────────────────────────────
 
 export default function ExportDialog({
@@ -161,7 +103,7 @@ export default function ExportDialog({
   const nameRef = useRef(null);
 
   const sortedFields = [
-    ...VIRTUAL_FIELDS,
+    ENTITY_OWNERSHIP_SUMMARY_FIELD,
     ...[...(dataDictionary || [])].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)),
   ];
 
@@ -266,7 +208,7 @@ export default function ExportDialog({
         const row = { Name: node.name, Type: node.kind };
         checkedFields.forEach((field) => {
           if (field._virtual) {
-            row[field.prompt] = getVirtualValue(field.fieldId, node, nodeList, relList);
+            row[field.prompt] = getEntityOwnershipSummary(node, nodeList, relList);
           } else {
             row[field.prompt] = formatFieldValue(field, node.customFields?.[field.fieldId]);
           }

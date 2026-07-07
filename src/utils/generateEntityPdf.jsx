@@ -19,6 +19,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import { formatPhone } from "./helpers";
+import { ENTITY_OWNERSHIP_SUMMARY_FIELD, getEntityOwnershipSummary } from "./ownershipSummary";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,7 @@ const formatDate = (iso) => {
 const formatFieldValue = (field, value) => {
   if (value == null || value === "" || value === false) return "";
   const { dataType } = field;
+  if (dataType === "virtual") return String(value || "");
   if (dataType === "boolean") return value ? "Yes" : "No";
   if (dataType === "date") return formatDate(String(value));
   if (dataType === "currency") {
@@ -269,8 +271,14 @@ export function EntityInfoPageContent({ nodeId, nodeList, relList, dataDictionar
   const owners = getOwnersOf(relList, nodeId);
   const owned = getOwnedBy(relList, nodeId);
 
-  const fields = [...(dataDictionary || [])]
-    .filter((f) => f.appliesTo === "both" || f.appliesTo === node.kind)
+  const normalizeAppliesTo = (v) =>
+    Array.isArray(v) ? v :
+    v === "both" ? ["entity", "person"] :
+    v && String(v).includes(",") ? String(v).split(",").map((x) => x.trim()) :
+    v ? [String(v)] : ["entity", "person"];
+
+  const fields = [ENTITY_OWNERSHIP_SUMMARY_FIELD, ...(dataDictionary || [])]
+    .filter((f) => normalizeAppliesTo(f.appliesTo).includes(node.kind))
     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
   const labelStyle = { fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" };
@@ -329,7 +337,9 @@ export function EntityInfoPageContent({ nodeId, nodeList, relList, dataDictionar
       {fields.length > 0 && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 24px" }}>
           {fields.map((field) => {
-            const raw = node.customFields?.[field.fieldId];
+            const raw = field._virtual
+              ? getEntityOwnershipSummary(node, nodeList, relList)
+              : node.customFields?.[field.fieldId];
             const display = formatFieldValue(field, raw);
             if (!display) return null;
             return (
