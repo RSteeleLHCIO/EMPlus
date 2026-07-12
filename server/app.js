@@ -14,14 +14,22 @@ import {
   putNode,
   deleteNode,
   queryNodes,
-  batchPutNodes,
+  putNodeHistory,
+  deleteNodeHistory,
+  queryNodeHistory,
   getRel,
   putRel,
   deleteRel,
   queryRels,
   queryRelsByFrom,
   queryRelsByTo,
-  batchPutRels,
+  putOwnershipCurrent,
+  deleteOwnershipCurrent,
+  queryOwnershipCurrent,
+  putOwnershipHistory,
+  queryOwnershipHistory,
+  deleteOwnershipHistory,
+  batchPutOwnershipHistory,
   makeRelKey,
   getDDField,
   putDDField,
@@ -400,6 +408,123 @@ const buildNodeItem = (
   updatedAt,
 });
 
+const makeNodeHistoryKey = ({ nodeId, effectiveFrom, versionId }) =>
+  `NODE#${nodeId}#AT#${effectiveFrom}#VER#${versionId}`;
+
+const isNodeActiveAt = (row, asOf) => {
+  const start = row.effectiveFrom || "0001-01-01";
+  const end = row.effectiveTo || "9999-12-31";
+  return start <= asOf && end > asOf;
+};
+
+const listNodeRows = async (clientId, asOf = null) => {
+  const targetAsOf = asOf || null;
+  if (targetAsOf) {
+    try {
+      const historyRows = await queryNodeHistory(clientId);
+      const activeRows = historyRows
+        .filter((row) => isNodeActiveAt(row, targetAsOf))
+        .sort((a, b) => {
+          const as = a.effectiveFrom || "0001-01-01";
+          const bs = b.effectiveFrom || "0001-01-01";
+          return bs.localeCompare(as);
+        });
+
+      const byNodeId = new Map();
+      activeRows.forEach((row) => {
+        if (!row.nodeId) return;
+        if (!byNodeId.has(row.nodeId)) byNodeId.set(row.nodeId, row);
+      });
+      if (byNodeId.size > 0) return [...byNodeId.values()];
+    } catch (err) {
+      console.warn("listNodeRows: history query failed, falling back to current nodes:", err.message);
+    }
+  }
+  return queryNodes(clientId);
+};
+
+const persistNodeVersion = async ({ clientId, nodeItem, asOfDate, changedBy, mode = "upsert" }) => {
+  if (!nodeItem?.nodeId) {
+    throw Object.assign(new Error("nodeItem.nodeId is required"), { status: 400 });
+  }
+  const now = new Date().toISOString();
+  const effectiveFrom = normalizeDateInput(asOfDate) || now.slice(0, 10);
+  const versionId = `${effectiveFrom}-${randomBytes(8).toString("hex")}`;
+  const nodeId = nodeItem.nodeId;
+
+  const allHistory = await queryNodeHistory(clientId);
+  const nodeHistoryAll = allHistory.filter((row) => row.nodeId === nodeId);
+  const sameStartRows = nodeHistoryAll.filter(
+    (row) => normalizeDateInput(row.effectiveFrom) === effectiveFrom
+  );
+  await Promise.all(
+    sameStartRows.map((row) => deleteNodeHistory(clientId, row.nodeHistoryKey))
+  );
+
+  const nodeHistory = nodeHistoryAll.filter(
+    (row) => normalizeDateInput(row.effectiveFrom) !== effectiveFrom
+  );
+
+  const nextStartAfterIncoming = nodeHistory
+    .map((row) => normalizeDateInput(row.effectiveFrom))
+    .filter(Boolean)
+    .filter((start) => start > effectiveFrom)
+    .sort((a, b) => a.localeCompare(b))[0] || null;
+
+  const activeAtIncoming = nodeHistory.filter((row) => isNodeActiveAt(row, effectiveFrom));
+  await Promise.all(
+    activeAtIncoming
+      .filter((row) => (row.effectiveFrom || "0001-01-01") < effectiveFrom)
+      .map((row) =>
+        putNodeHistory({
+          ...row,
+          effectiveTo: effectiveFrom,
+          closedAt: now,
+          closedBy: changedBy || null,
+        })
+      )
+  );
+
+  const shouldReplaceCurrent = !nextStartAfterIncoming;
+  if (shouldReplaceCurrent) {
+    await Promise.all(
+      nodeHistory
+        .filter((row) => !row.effectiveTo)
+        .map((row) =>
+          putNodeHistory({
+            ...row,
+            effectiveTo: effectiveFrom,
+            closedAt: now,
+            closedBy: changedBy || null,
+          })
+        )
+    );
+  }
+
+  if (mode === "delete") {
+    if (shouldReplaceCurrent) await deleteNode(clientId, nodeId);
+    return null;
+  }
+
+  const historyItem = {
+    ...nodeItem,
+    clientId,
+    nodeHistoryKey: makeNodeHistoryKey({ nodeId, effectiveFrom, versionId }),
+    effectiveFrom,
+    effectiveTo: nextStartAfterIncoming,
+    versionId,
+    changedAt: now,
+    changedBy: changedBy || null,
+  };
+  await putNodeHistory(historyItem);
+
+  if (shouldReplaceCurrent) {
+    await putNode(nodeItem);
+    return nodeItem;
+  }
+  return historyItem;
+};
+
 const buildOwnsItem = (
   { from, to, percent, startDate, endDate, client, createdAt, updatedAt }
 ) => ({
@@ -416,6 +541,202 @@ const buildOwnsItem = (
   createdAt,
   updatedAt,
 });
+
+const makeOwnershipCurrentKey = (from, to) => `OWNS#${from}#${to}`;
+
+const makeOwnershipHistoryKey = ({ to, effectiveFrom, from, setId }) =>
+  `OWNED#${to}#FROM#${from}#AT#${effectiveFrom}#SET#${setId}`;
+
+const isOwnershipActiveAt = (rel, asOf) => {
+  const start = rel.effectiveFrom || "0001-01-01";
+  const end = rel.effectiveTo || "9999-12-31";
+  return start <= asOf && end > asOf;
+};
+
+const dedupeOwnershipRows = (rows) => {
+  const map = new Map();
+  (rows || []).forEach((row) => {
+    if (!row?.from || !row?.to) return;
+    map.set(`${row.from}=>${row.to}`, row);
+  });
+  return [...map.values()];
+};
+
+const validateOwnershipSet = (rows, ownedId = null) => {
+  const EPS = 0.0001;
+  const total = rows.reduce((sum, row) => sum + (Number(row.percent) || 0), 0);
+  const totalRounded = Math.round(total * 10000) / 10000;
+  const totalIsZero = Math.abs(totalRounded) <= EPS;
+  const totalIsHundred = Math.abs(totalRounded - 100) <= EPS;
+  if (!totalIsZero && !totalIsHundred) {
+    const entityInfo = ownedId ? ` for entity "${ownedId}"` : "";
+    throw Object.assign(
+      new Error(`ownership total must be exactly 0 or 100 (got ${totalRounded})${entityInfo}`),
+      { status: 400 }
+    );
+  }
+};
+
+const listOwnershipRows = async (clientId, asOf = null) => {
+  const targetAsOf = asOf || null;
+  if (targetAsOf) {
+    try {
+      const historyRows = await queryOwnershipHistory(clientId);
+      const ownsRows = historyRows.filter((r) => r.type === "owns");
+
+      // Compute effectiveTo for each row: the start of the next ownership set for the same owned entity.
+      const startsByTo = {};
+      ownsRows.forEach((r) => {
+        if (!r.to || !r.effectiveFrom) return;
+        if (!startsByTo[r.to]) startsByTo[r.to] = new Set();
+        startsByTo[r.to].add(r.effectiveFrom);
+      });
+      const sortedStartsByTo = {};
+      Object.keys(startsByTo).forEach((to) => {
+        sortedStartsByTo[to] = [...startsByTo[to]].sort();
+      });
+
+      const withEffectiveTo = ownsRows.map((r) => {
+        const starts = sortedStartsByTo[r.to] || [];
+        const idx = starts.indexOf(r.effectiveFrom);
+        const nextStart = (idx >= 0 && idx < starts.length - 1) ? starts[idx + 1] : null;
+        return { ...r, effectiveTo: nextStart || r.effectiveTo || null };
+      });
+
+      const active = withEffectiveTo.filter((r) => isOwnershipActiveAt(r, targetAsOf));
+      // Return the filtered result regardless — even if empty.
+      // An empty result correctly means "no ownership records active on this date".
+      // Do NOT fall through to the legacy fallback, which has no date filtering.
+      return dedupeOwnershipRows(active);
+    } catch (err) {
+      console.warn("listOwnershipRows: history query failed, falling back to current:", err.message);
+      // Only fall through on exception — not on legitimately empty results.
+    }
+  } else {
+    try {
+      const currentRows = await queryOwnershipCurrent(clientId);
+      const currentOwns = currentRows.filter((r) => r.type === "owns");
+      if (currentOwns.length > 0) return dedupeOwnershipRows(currentOwns);
+    } catch (err) {
+      console.warn("listOwnershipRows: current query failed, falling back to legacy:", err.message);
+    }
+  }
+
+  // Backward-compat fallback during migration: keep serving legacy ownership rows
+  // when the new ownership tables are empty (no asOf date path only).
+  const legacy = await queryRels(clientId);
+  return legacy
+    .filter((r) => r.type === "owns")
+    .filter((r) => (targetAsOf ? relActiveAt(r, targetAsOf) : true));
+};
+
+const persistOwnershipSet = async ({ clientId, ownedId, rows, asOfDate, changedBy }) => {
+  const setRows = (rows || []).map((row) => ({
+    from: row.from,
+    to: ownedId,
+    percent: Number(row.percent),
+  }));
+  if (setRows.length === 0) {
+    throw Object.assign(new Error("ownership set must contain at least one owner"), { status: 400 });
+  }
+  if (setRows.some((row) => !row.from || !Number.isFinite(row.percent))) {
+    throw Object.assign(new Error("each ownership row requires from and numeric percent"), { status: 400 });
+  }
+  validateOwnershipSet(setRows, ownedId);
+
+  const now = new Date().toISOString();
+  const effectiveFrom = normalizeDateInput(asOfDate);
+  if (!effectiveFrom) {
+    throw Object.assign(new Error("asOfDate (YYYY-MM-DD) is required"), { status: 400 });
+  }
+  const setId = `${effectiveFrom}-${randomBytes(8).toString("hex")}`;
+
+  const [allCurrent, allHistory] = await Promise.all([
+    queryOwnershipCurrent(clientId),
+    queryOwnershipHistory(clientId),
+  ]);
+
+  const currentForOwned = allCurrent.filter((r) => r.type === "owns" && r.to === ownedId);
+  const historyForOwnedAll = allHistory.filter((r) => r.type === "owns" && r.to === ownedId);
+  const sameStartRows = historyForOwnedAll.filter(
+    (row) => normalizeDateInput(row.effectiveFrom) === effectiveFrom
+  );
+
+  // Same effectiveFrom means "replace that dated set", not append a duplicate set.
+  await Promise.all(
+    sameStartRows.map((row) => deleteOwnershipHistory(clientId, row.ownershipHistoryKey))
+  );
+
+  const historyForOwned = historyForOwnedAll.filter(
+    (row) => normalizeDateInput(row.effectiveFrom) !== effectiveFrom
+  );
+
+  const nextStartAfterIncoming = historyForOwned
+    .map((row) => normalizeDateInput(row.effectiveFrom))
+    .filter(Boolean)
+    .filter((start) => start > effectiveFrom)
+    .sort((a, b) => a.localeCompare(b))[0] || null;
+
+  // With computed effectiveTo, we don't need to "close" existing periods - their end dates
+  // are automatically computed from the next period's start date when fetching.
+  // Just delete any duplicate sets with the same effectiveFrom (replace logic).
+  
+  const shouldReplaceCurrent = !nextStartAfterIncoming;
+  if (shouldReplaceCurrent) {
+    // This new period is the latest, so it becomes the "current" period
+    // Delete any old current records for this entity
+    await Promise.all(
+      currentForOwned.map((r) => deleteOwnershipCurrent(clientId, r.ownershipKey))
+    );
+  }
+
+  const historyItems = setRows.map((row) => ({
+    clientId,
+    ownershipHistoryKey: makeOwnershipHistoryKey({
+      to: ownedId,
+      effectiveFrom,
+      from: row.from,
+      setId,
+    }),
+    id: `owns-${row.from}-${ownedId}`,
+    type: "owns",
+    from: row.from,
+    to: ownedId,
+    percent: row.percent,
+    effectiveFrom,
+    // Do NOT store effectiveTo - it will be computed from next period's effectiveFrom
+    setId,
+    changedAt: now,
+    changedBy: changedBy || null,
+  }));
+
+  const currentItems = setRows.map((row) => ({
+    clientId,
+    ownershipKey: makeOwnershipCurrentKey(row.from, ownedId),
+    id: `owns-${row.from}-${ownedId}`,
+    type: "owns",
+    from: row.from,
+    to: ownedId,
+    percent: row.percent,
+    effectiveFrom,
+    // Do NOT store effectiveTo - it will be computed from next period's effectiveFrom
+    setId,
+    changedAt: now,
+    changedBy: changedBy || null,
+  }));
+
+  await batchPutOwnershipHistory(historyItems);
+  console.log(`[persistOwnershipSet] Wrote ${historyItems.length} history items for ${ownedId} as of ${effectiveFrom}`);
+  
+  if (shouldReplaceCurrent) {
+    console.log(`[persistOwnershipSet] Writing ${currentItems.length} current items for ${ownedId} (latest period)`);
+    await Promise.all(currentItems.map((item) => putOwnershipCurrent(item)));
+    console.log(`[persistOwnershipSet] Successfully wrote ${currentItems.length} current items for ${ownedId}`);
+    return currentItems;
+  }
+
+  return historyItems;
+};
 
 const buildEmploysItem = (
   { from, to, role, startDate, endDate, client, createdAt, updatedAt }
@@ -435,7 +756,19 @@ const buildEmploysItem = (
 });
 
 // Strip DynamoDB-internal keys before sending to the frontend.
-const toNodeResponse = ({ clientId: _c, nodeId: _n, ...rest }) => rest;
+const toNodeResponse = ({
+  clientId: _c,
+  nodeId: _n,
+  nodeHistoryKey: _h,
+  effectiveFrom: _ef,
+  effectiveTo: _et,
+  versionId: _v,
+  changedAt: _ca,
+  changedBy: _cb,
+  closedAt: _clA,
+  closedBy: _clB,
+  ...rest
+}) => rest;
 const toRelResponse = ({ clientId: _c, relKey: _r, ...rest }) => rest;
 
 // Check whether a relationship is active on a given date string (YYYY-MM-DD).
@@ -453,6 +786,92 @@ const deleteRelsForNode = async (clientId, nodeId) => {
   ]);
   await Promise.all(
     [...fromRels, ...toRels].map((r) => deleteRel(clientId, r.relKey))
+  );
+};
+
+const rekeyNodeHistoryForNode = async (clientId, oldNodeId, newNodeId) => {
+  const allHistory = await queryNodeHistory(clientId);
+  const rows = allHistory.filter((row) => row.nodeId === oldNodeId);
+  if (rows.length === 0) return;
+
+  await Promise.all(rows.map((row) => deleteNodeHistory(clientId, row.nodeHistoryKey)));
+  await Promise.all(
+    rows.map((row) => {
+      const effectiveFrom = row.effectiveFrom || "0001-01-01";
+      const versionId = row.versionId || "legacy";
+      return putNodeHistory({
+        ...row,
+        id: newNodeId,
+        nodeId: newNodeId,
+        nodeHistoryKey: makeNodeHistoryKey({ nodeId: newNodeId, effectiveFrom, versionId }),
+      });
+    })
+  );
+};
+
+const rekeyOwnershipForNode = async (clientId, oldNodeId, newNodeId) => {
+  const [currentRows, historyRows] = await Promise.all([
+    queryOwnershipCurrent(clientId),
+    queryOwnershipHistory(clientId),
+  ]);
+
+  const currentToRewrite = currentRows.filter((r) => r.from === oldNodeId || r.to === oldNodeId);
+  const historyToRewrite = historyRows.filter((r) => r.from === oldNodeId || r.to === oldNodeId);
+
+  await Promise.all(currentToRewrite.map((r) => deleteOwnershipCurrent(clientId, r.ownershipKey)));
+  await Promise.all(historyToRewrite.map((r) => deleteOwnershipHistory(clientId, r.ownershipHistoryKey)));
+
+  await Promise.all(
+    currentToRewrite.map((row) => {
+      const from = row.from === oldNodeId ? newNodeId : row.from;
+      const to = row.to === oldNodeId ? newNodeId : row.to;
+      return putOwnershipCurrent({
+        ...row,
+        from,
+        to,
+        id: `owns-${from}-${to}`,
+        ownershipKey: makeOwnershipCurrentKey(from, to),
+      });
+    })
+  );
+
+  await Promise.all(
+    historyToRewrite.map((row) => {
+      const from = row.from === oldNodeId ? newNodeId : row.from;
+      const to = row.to === oldNodeId ? newNodeId : row.to;
+      const setId = row.setId || "legacy";
+      const effectiveFrom = row.effectiveFrom || row.startDate || "0001-01-01";
+      return putOwnershipHistory({
+        ...row,
+        from,
+        to,
+        id: `owns-${from}-${to}`,
+        ownershipHistoryKey: makeOwnershipHistoryKey({ to, effectiveFrom, from, setId }),
+      });
+    })
+  );
+};
+
+const deleteOwnershipReferencesForNode = async (clientId, nodeId) => {
+  const [currentRows, historyRows] = await Promise.all([
+    queryOwnershipCurrent(clientId),
+    queryOwnershipHistory(clientId),
+  ]);
+  const nowIso = new Date().toISOString();
+  const today = nowIso.slice(0, 10);
+  const currentMatches = currentRows.filter((r) => r.from === nodeId || r.to === nodeId);
+  const openHistoryMatches = historyRows.filter((r) => (r.from === nodeId || r.to === nodeId) && !r.effectiveTo);
+
+  await Promise.all(currentMatches.map((r) => deleteOwnershipCurrent(clientId, r.ownershipKey)));
+  await Promise.all(
+    openHistoryMatches.map((row) =>
+      putOwnershipHistory({
+        ...row,
+        effectiveTo: today,
+        closedAt: nowIso,
+        closedBy: "system",
+      })
+    )
   );
 };
 
@@ -613,48 +1032,56 @@ app.post("/api/graph", async (req, res) => {
     }
     const focusKey = normalizeClientId(clientId, focusId);
 
-    // Fetch focus node and all rels referencing it in parallel.
-    const [focusItem, fromRels, toRels] = await Promise.all([
-      getNode(clientId, focusKey),
+    // Fetch focus node and current employs relationships in parallel.
+    const [nodeRows, fromRels, toRels, ownershipRows] = await Promise.all([
+      listNodeRows(clientId, asOf),
       queryRelsByFrom(focusKey),
       queryRelsByTo(focusKey),
+      listOwnershipRows(clientId, asOf),
     ]);
+
+    const nodeById = new Map(nodeRows.map((item) => [item.id, item]));
+    const focusItem = nodeById.get(focusKey) || null;
 
     if (!focusItem) {
       return res.status(404).json({ error: "node not found" });
     }
 
-    const activeFrom = fromRels.filter((r) => relActiveAt(r, asOf));
-    const activeTo = toRels.filter((r) => relActiveAt(r, asOf));
+    const activeFrom = fromRels
+      .filter((r) => r.type === "employs")
+      .filter((r) => relActiveAt(r, asOf));
+    const activeTo = toRels
+      .filter((r) => r.type === "employs")
+      .filter((r) => relActiveAt(r, asOf));
+    const ownershipToFocus = ownershipRows.filter((r) => r.to === focusKey);
+    const ownershipFromFocus = ownershipRows.filter((r) => r.from === focusKey);
 
     // Fetch all neighbor nodes in parallel.
     const neighborIds = new Set([
+      ...ownershipToFocus.map((r) => r.from),
+      ...ownershipFromFocus.map((r) => r.to),
       ...activeFrom.map((r) => r.to),
       ...activeTo.map((r) => r.from),
     ]);
-    const neighborItems = await Promise.all(
-      [...neighborIds].map((nid) => getNode(clientId, nid))
-    );
     const neighborMap = new Map(
-      neighborItems.filter(Boolean).map((item) => [item.id, toNodeResponse(item)])
+      [...neighborIds]
+        .map((nid) => nodeById.get(nid))
+        .filter(Boolean)
+        .map((item) => [item.id, toNodeResponse(item)])
     );
 
     res.json({
       node: toNodeResponse(focusItem),
-      owners: activeTo
-        .filter((r) => r.type === "owns")
+      owners: ownershipToFocus
         .map((r) => ({ node: neighborMap.get(r.from) || null, rel: toRelResponse(r), direction: "in" }))
         .filter((x) => x.node),
-      owns: activeFrom
-        .filter((r) => r.type === "owns")
+      owns: ownershipFromFocus
         .map((r) => ({ node: neighborMap.get(r.to) || null, rel: toRelResponse(r), direction: "out" }))
         .filter((x) => x.node),
       employees: activeFrom
-        .filter((r) => r.type === "employs")
         .map((r) => ({ node: neighborMap.get(r.to) || null, rel: toRelResponse(r), direction: "out" }))
         .filter((x) => x.node),
       employers: activeTo
-        .filter((r) => r.type === "employs")
         .map((r) => ({ node: neighborMap.get(r.from) || null, rel: toRelResponse(r), direction: "in" }))
         .filter((x) => x.node),
     });
@@ -667,13 +1094,17 @@ app.post("/api/graph", async (req, res) => {
 app.post("/api/directory", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const [nodeItems, relItems] = await Promise.all([
-      queryNodes(client),
+    const { asOf } = req.body || {};
+    console.log(`/api/directory called: client=${client} asOf=${asOf || "null"}`);
+    const [nodeItems, relItems, ownershipRows] = await Promise.all([
+      listNodeRows(client, null),
       queryRels(client),
+      listOwnershipRows(client, asOf || null),
     ]);
+    const employs = relItems.filter((r) => r.type === "employs");
     res.json({
       nodes: nodeItems.map(toNodeResponse),
-      rels: relItems.map(toRelResponse),
+      rels: [...ownershipRows, ...employs].map(toRelResponse),
     });
   } catch (err) {
     console.error("/api/directory error", err);
@@ -688,6 +1119,7 @@ app.post("/api/nodes", async (req, res) => {
       id, name, kind, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo, customFields,
       operationalRole, legalStatus, personStatus,
+      asOfDate,
     } = req.body || {};
     if (!id || !name || !kind) {
       return res.status(400).json({ error: "id, name, kind are required" });
@@ -702,7 +1134,13 @@ app.post("/api/nodes", async (req, res) => {
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     });
-    await putNode(item);
+    await persistNodeVersion({
+      clientId: client,
+      nodeItem: item,
+      asOfDate,
+      changedBy: req.auth.loginId,
+      mode: "upsert",
+    });
     res.json(toNodeResponse(item));
   } catch (err) {
     console.error("/api/nodes error", err);
@@ -712,26 +1150,36 @@ app.post("/api/nodes", async (req, res) => {
 
 // ─── Helper shared by both nodes-csv endpoints ────────────────────────────────
 
-const importNodeRows = async (rows, client) => {
+const importNodeRows = async (rows, client, asOfDate) => {
   const now = new Date().toISOString();
   const importBatchId = now;
+  const effectiveAsOf = normalizeDateInput(asOfDate);
+  if (!effectiveAsOf) {
+    throw Object.assign(new Error("asOfDate (YYYY-MM-DD) is required for node imports"), { status: 400 });
+  }
   const items = rows.map((row) =>
     buildNodeItem({
       id: row.id, name: row.name, kind: row.kind, client,
       createdAt: now, updatedAt: now,
     })
   );
-  // Preserve existing createdAt values in a single batch read + write pass.
-  // For simplicity at import scale we batch-write directly (upsert semantics).
-  Object.assign(items, items.map((item) => ({ ...item, importBatchId })));
-  await batchPutNodes(items.map((item) => ({ ...item, importBatchId })));
+  for (const item of items) {
+    // eslint-disable-next-line no-await-in-loop
+    await persistNodeVersion({
+      clientId: client,
+      nodeItem: { ...item, importBatchId },
+      asOfDate: effectiveAsOf,
+      changedBy: "import",
+      mode: "upsert",
+    });
+  }
   return { importBatchId, entities: rows.filter((r) => r.kind === "entity").length, persons: rows.filter((r) => r.kind === "person").length };
 };
 
 app.post("/api/import/nodes-csv", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { csv, defaultKind } = req.body || {};
+    const { csv, defaultKind, asOfDate } = req.body || {};
     if (!csv) {
       return res.status(400).json({ error: "csv is required" });
     }
@@ -739,7 +1187,7 @@ app.post("/api/import/nodes-csv", async (req, res) => {
     if (!rows.length) {
       return res.status(400).json({ error: "no valid rows found in csv" });
     }
-    const { importBatchId, entities, persons } = await importNodeRows(rows, client);
+    const { importBatchId, entities, persons } = await importNodeRows(rows, client, asOfDate);
     res.json({ ok: true, total: rows.length, entities, persons, skipped, importBatchId });
   } catch (err) {
     console.error("/api/import/nodes-csv error", err);
@@ -751,6 +1199,7 @@ app.post("/api/import/nodes-csv/upload", upload.single("file"), async (req, res)
   try {
     const client = req.auth.clientId;
     const defaultKind = req.body?.defaultKind || "entity";
+    const asOfDate = req.body?.asOfDate || null;
     if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
 
     const ext = (req.file.originalname || "").split(".").pop().toLowerCase();
@@ -760,7 +1209,7 @@ app.post("/api/import/nodes-csv/upload", upload.single("file"), async (req, res)
     if (!rows.length) {
       return res.status(400).json({ error: "no valid rows found in csv" });
     }
-    const { importBatchId, entities, persons } = await importNodeRows(rows, client);
+    const { importBatchId, entities, persons } = await importNodeRows(rows, client, asOfDate);
     res.json({ ok: true, total: rows.length, entities, persons, skipped, importBatchId });
   } catch (err) {
     console.error("/api/import/nodes-csv/upload error", err);
@@ -774,8 +1223,10 @@ const resolveOwnershipRows = async (rows, client) => {
   // Load all nodes for this client once and build a name→id map in memory.
   const allNodes = await queryNodes(client);
   const nameMap = new Map();
+  const validNodeIds = new Set();
   allNodes.forEach((item) => {
     if (item.name) nameMap.set(item.name.toLowerCase(), item.id);
+    if (item.id) validNodeIds.add(item.id);
   });
 
   const resolved = [];
@@ -792,8 +1243,8 @@ const resolveOwnershipRows = async (rows, client) => {
       ? normalizeClientId(client, ownedRaw)
       : nameMap.get(ownedRaw.toLowerCase());
 
-    if (!ownerId) { errors.push({ row: idx + 1, reason: "owner not found", owner: ownerRaw }); return; }
-    if (!ownedId) { errors.push({ row: idx + 1, reason: "owned entity not found", owned: ownedRaw }); return; }
+    if (!ownerId || !validNodeIds.has(ownerId)) { errors.push({ row: idx + 1, reason: "owner not found", owner: ownerRaw }); return; }
+    if (!ownedId || !validNodeIds.has(ownedId)) { errors.push({ row: idx + 1, reason: "owned entity not found", owned: ownedRaw }); return; }
     if (!Number.isFinite(percent)) { errors.push({ row: idx + 1, reason: "percent missing or invalid", percent: row.percent }); return; }
 
     resolved.push({ from: ownerId, to: ownedId, percent });
@@ -857,20 +1308,52 @@ const evaluateOwnershipTotals = (rows) => {
   };
 };
 
-const importOwnershipRows = async (resolved, client) => {
-  const now = new Date().toISOString();
-  const importBatchId = now;
-  const items = resolved.map((r) =>
-    buildOwnsItem({ ...r, client, createdAt: now, updatedAt: now, importBatchId })
-  );
-  await batchPutRels(items);
-  return importBatchId;
+const importOwnershipRows = async (resolved, client, asOfDate) => {
+  const importBatchId = new Date().toISOString();
+  const effectiveAsOf = normalizeDateInput(asOfDate);
+  if (!effectiveAsOf) {
+    throw Object.assign(new Error("asOfDate (YYYY-MM-DD) is required for ownership imports"), { status: 400 });
+  }
+  const groups = new Map();
+  resolved.forEach((row) => {
+    const key = row.to;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  });
+
+  console.log(`[importOwnershipRows] Processing ${groups.size} entity groups from ${resolved.length} resolved rows`);
+  const skippedGroups = [];
+  const EPS = 0.0001;
+
+  for (const [ownedId, rows] of groups.entries()) {
+    // Re-validate totals after resolution — some rows may have been dropped due to
+    // unresolvable owner names, leaving the group with an incomplete percentage total.
+    const total = Math.round(rows.reduce((sum, r) => sum + (Number(r.percent) || 0), 0) * 10000) / 10000;
+    const totalIsZero = Math.abs(total) <= EPS;
+    const totalIsHundred = Math.abs(total - 100) <= EPS;
+    if (!totalIsZero && !totalIsHundred) {
+      skippedGroups.push({ ownedId, total, rowCount: rows.length, reason: `ownership rows sum to ${total}% after resolving names — likely some owner names were not found` });
+      console.log(`[importOwnershipRows] Skipped ${ownedId}: ${rows.length} rows sum to ${total}%`);
+      continue;
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await persistOwnershipSet({
+      clientId: client,
+      ownedId,
+      rows,
+      asOfDate: effectiveAsOf,
+      changedBy: "import",
+    });
+    console.log(`[importOwnershipRows] Successfully persisted ${rows.length} rows for ${ownedId}`);
+  }
+  console.log(`[importOwnershipRows] Complete: ${groups.size - skippedGroups.length} groups persisted, ${skippedGroups.length} skipped`);
+  return { importBatchId, skippedGroups };
 };
 
 app.post("/api/import/ownerships-csv", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { csv } = req.body || {};
+    const { csv, asOfDate } = req.body || {};
     if (!csv) {
       return res.status(400).json({ error: "csv is required" });
     }
@@ -878,12 +1361,21 @@ app.post("/api/import/ownerships-csv", async (req, res) => {
     if (!rows.length) {
       return res.status(400).json({ error: "no valid rows found in csv" });
     }
+    console.log(`[/api/import/ownerships-csv] CSV parsed: ${rows.length} rows, ${skipped} parse errors`);
     const { resolved, errors } = await resolveOwnershipRows(rows, client);
+    console.log(`[/api/import/ownerships-csv] Name resolution: ${resolved.length} valid, ${errors.length} errors`);
     if (!resolved.length) {
       return res.status(400).json({ error: "no valid ownership rows to import", skipped: skipped + errors.length, errors });
     }
-    const importBatchId = await importOwnershipRows(resolved, client);
-    res.json({ ok: true, total: rows.length, imported: resolved.length, skipped: skipped + errors.length, errors, importBatchId });
+    const { importBatchId, skippedGroups } = await importOwnershipRows(resolved, client, asOfDate);
+    console.log(`[/api/import/ownerships-csv] Import complete: ${resolved.length} resolved rows, ${skippedGroups.length} skipped groups`);
+    
+    const responseData = { ok: true, total: rows.length, imported: resolved.length, skipped: skipped + errors.length, errors, skippedGroups, importBatchId };
+    const responseJson = JSON.stringify(responseData);
+    console.log(`[/api/import/ownerships-csv] Sending response: ${responseJson.length} bytes`);
+    
+    res.json(responseData);
+    console.log(`[/api/import/ownerships-csv] Response sent successfully`);
   } catch (err) {
     console.error("/api/import/ownerships-csv error", err);
     res.status(err.status || 500).json({ error: err.message });
@@ -893,6 +1385,7 @@ app.post("/api/import/ownerships-csv", async (req, res) => {
 app.post("/api/import/ownerships-csv/upload", upload.single("file"), async (req, res) => {
   try {
     const client = req.auth.clientId;
+    const asOfDate = req.body?.asOfDate || null;
     if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
 
     const ext = (req.file.originalname || "").split(".").pop().toLowerCase();
@@ -906,8 +1399,8 @@ app.post("/api/import/ownerships-csv/upload", upload.single("file"), async (req,
     if (!resolved.length) {
       return res.status(400).json({ error: "no valid ownership rows to import", skipped: skipped + errors.length, errors });
     }
-    const importBatchId = await importOwnershipRows(resolved, client);
-    res.json({ ok: true, total: rows.length, imported: resolved.length, skipped: skipped + errors.length, errors, importBatchId });
+    const { importBatchId, skippedGroups } = await importOwnershipRows(resolved, client, asOfDate);
+    res.json({ ok: true, total: rows.length, imported: resolved.length, skipped: skipped + errors.length, errors, skippedGroups, importBatchId });
   } catch (err) {
     console.error("/api/import/ownerships-csv/upload error", err);
     res.status(err.status || 500).json({ error: err.message });
@@ -1031,7 +1524,7 @@ const resolveExtraHeaders = async (extraHeaders, client, existingFields = null) 
   return headerToFieldId;
 };
 
-const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preloadedDdFields = null) => {
+const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preloadedDdFields = null, asOfDate = null, changedBy = null) => {
   const [allNodes, ddFields] = await Promise.all([
     queryNodes(client),
     preloadedDdFields != null ? Promise.resolve(preloadedDdFields) : queryDDFields(client),
@@ -1072,6 +1565,10 @@ const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preload
   const nameMap = new Map(allNodes.map((n) => [String(n.name || "").toLowerCase(), n]));
 
   const now = new Date().toISOString();
+  const effectiveAsOf = normalizeDateInput(asOfDate);
+  if (!effectiveAsOf) {
+    throw Object.assign(new Error("asOfDate (YYYY-MM-DD) is required for details imports"), { status: 400 });
+  }
   const importBatchId = now;
   const updated = [];
   const notFoundList = [];
@@ -1118,7 +1615,16 @@ const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preload
     updated.push({ ...item, importBatchId });
   }
 
-  if (updated.length) await batchPutNodes(updated);
+  for (const item of updated) {
+    // eslint-disable-next-line no-await-in-loop
+    await persistNodeVersion({
+      clientId: client,
+      nodeItem: item,
+      asOfDate: effectiveAsOf,
+      changedBy: changedBy || "import",
+      mode: "upsert",
+    });
+  }
   const ddCreated = Object.entries(headerToFieldId);
   return {
     updated: updated.length,
@@ -1131,7 +1637,7 @@ const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preload
 app.post("/api/import/details-csv", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { csv } = req.body || {};
+    const { csv, asOfDate } = req.body || {};
     if (!csv) return res.status(400).json({ error: "csv is required" });
 
     const ddFields = await queryDDFields(client);
@@ -1140,7 +1646,7 @@ app.post("/api/import/details-csv", async (req, res) => {
     const { rows, extraHeaders, mapping, skipped } = parseDetailsCsv(csv, ddPromptsSet);
     if (!rows.length) return res.status(400).json({ error: "no valid rows found", mapping, skipped });
 
-    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {}, ddFields);
+    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {}, ddFields, asOfDate, req.auth.loginId);
     res.json({ ok: true, ...result, skipped, mapping });
   } catch (err) {
     console.error("/api/import/details-csv error", err);
@@ -1151,6 +1657,7 @@ app.post("/api/import/details-csv", async (req, res) => {
 app.post("/api/import/details-csv/upload", upload.single("file"), async (req, res) => {
   try {
     const client = req.auth.clientId;
+    const asOfDate = req.body?.asOfDate || null;
     if (!req.file?.buffer) return res.status(400).json({ error: "file is required" });
 
     const ddFields = await queryDDFields(client);
@@ -1164,7 +1671,7 @@ app.post("/api/import/details-csv/upload", upload.single("file"), async (req, re
 
     if (!rows.length) return res.status(400).json({ error: "no valid rows found", mapping, skipped });
 
-    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {}, ddFields);
+    const result = await applyDetailRows(rows, extraHeaders, client, mapping.guessed || {}, ddFields, asOfDate, req.auth.loginId);
     res.json({ ok: true, ...result, skipped, mapping });
   } catch (err) {
     console.error("/api/import/details-csv/upload error", err);
@@ -1180,6 +1687,7 @@ app.put("/api/nodes/:id", async (req, res) => {
       name, kind, newId, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo, customFields,
       operationalRole, legalStatus, personStatus,
+      asOfDate,
     } = req.body || {};
     if (!id || !name || !kind) {
       return res.status(400).json({ error: "id, name, kind are required" });
@@ -1202,7 +1710,13 @@ app.put("/api/nodes/:id", async (req, res) => {
       createdAt: existing.createdAt || now,
       updatedAt: now,
     });
-    await putNode(item);
+    await persistNodeVersion({
+      clientId: client,
+      nodeItem: item,
+      asOfDate,
+      changedBy: req.auth.loginId,
+      mode: "upsert",
+    });
 
     // If the ID changed, re-key every relationship that referenced the old ID.
     if (finalId !== normalizedId) {
@@ -1220,6 +1734,8 @@ app.put("/api/nodes/:id", async (req, res) => {
             .then(() => deleteRel(client, r.relKey))
         ),
       ]);
+      await rekeyNodeHistoryForNode(client, normalizedId, finalId);
+      await rekeyOwnershipForNode(client, normalizedId, finalId);
       await deleteNode(client, normalizedId);
     }
 
@@ -1234,13 +1750,21 @@ app.delete("/api/nodes/:id", async (req, res) => {
   try {
     const id = req.params.id;
     const client = req.auth.clientId;
+    const asOfDate = req.body?.asOfDate || null;
     if (!id) {
       return res.status(400).json({ error: "id is required" });
     }
     const normalizedId = normalizeClientId(client, id);
     // Detach-delete: remove all relationships first, then the node.
     await deleteRelsForNode(client, normalizedId);
-    await deleteNode(client, normalizedId);
+    await deleteOwnershipReferencesForNode(client, normalizedId);
+    await persistNodeVersion({
+      clientId: client,
+      nodeItem: { id: normalizedId, nodeId: normalizedId, clientId: client },
+      asOfDate,
+      changedBy: req.auth.loginId,
+      mode: "delete",
+    });
     res.json({ id: normalizedId });
   } catch (err) {
     console.error("/api/nodes/:id (delete) error", err);
@@ -1253,22 +1777,31 @@ app.delete("/api/nodes/:id", async (req, res) => {
 app.post("/api/relationships/owns", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { from, to, percent, startDate, endDate } = req.body || {};
+    const { from, to, percent, asOfDate } = req.body || {};
     if (!from || !to) {
       return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
-    const relKey = makeRelKey("owns", fromId, toId);
-    const now = new Date().toISOString();
-    const existing = await getRel(client, relKey);
-    const item = buildOwnsItem({
-      from: fromId, to: toId, percent: percent ?? null,
-      startDate: startDate || null, endDate: endDate || null, client,
-      createdAt: existing?.createdAt || now, updatedAt: now,
+    const allCurrent = await queryOwnershipCurrent(client);
+    const currentForOwned = allCurrent.filter((r) => r.type === "owns" && r.to === toId);
+    const existingIdx = currentForOwned.findIndex((r) => r.from === fromId);
+    const nextRows = currentForOwned.map((r) => ({ from: r.from, to: toId, percent: r.percent }));
+    const nextRow = { from: fromId, to: toId, percent: percent ?? null };
+    if (existingIdx >= 0) {
+      nextRows[existingIdx] = nextRow;
+    } else {
+      nextRows.push(nextRow);
+    }
+    const rows = await persistOwnershipSet({
+      clientId: client,
+      ownedId: toId,
+      rows: nextRows,
+      asOfDate,
+      changedBy: req.auth.loginId,
     });
-    await putRel(item);
-    res.json(toRelResponse(item));
+    const saved = rows.find((r) => r.from === fromId && r.to === toId) || rows[0];
+    res.json(toRelResponse(saved));
   } catch (err) {
     console.error("/api/relationships/owns error", err);
     res.status(err.status || 500).json({ error: err.message });
@@ -1278,22 +1811,27 @@ app.post("/api/relationships/owns", async (req, res) => {
 app.put("/api/relationships/owns", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { from, to, percent, startDate, endDate } = req.body || {};
+    const { from, to, percent, asOfDate } = req.body || {};
     if (!from || !to) {
       return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
-    const relKey = makeRelKey("owns", fromId, toId);
-    const existing = await getRel(client, relKey);
-    if (!existing) return res.status(404).json({ error: "relationship not found" });
-    const item = buildOwnsItem({
-      from: fromId, to: toId, percent: percent ?? null,
-      startDate: startDate || null, endDate: endDate || null, client,
-      createdAt: existing.createdAt, updatedAt: new Date().toISOString(),
+    const allCurrent = await queryOwnershipCurrent(client);
+    const currentForOwned = allCurrent.filter((r) => r.type === "owns" && r.to === toId);
+    const existingIdx = currentForOwned.findIndex((r) => r.from === fromId);
+    if (existingIdx < 0) return res.status(404).json({ error: "relationship not found" });
+    const nextRows = currentForOwned.map((r) => ({ from: r.from, to: toId, percent: r.percent }));
+    nextRows[existingIdx] = { from: fromId, to: toId, percent: percent ?? null };
+    const rows = await persistOwnershipSet({
+      clientId: client,
+      ownedId: toId,
+      rows: nextRows,
+      asOfDate,
+      changedBy: req.auth.loginId,
     });
-    await putRel(item);
-    res.json(toRelResponse(item));
+    const saved = rows.find((r) => r.from === fromId && r.to === toId) || rows[0];
+    res.json(toRelResponse(saved));
   } catch (err) {
     console.error("/api/relationships/owns (put) error", err);
     res.status(err.status || 500).json({ error: err.message });
@@ -1303,16 +1841,254 @@ app.put("/api/relationships/owns", async (req, res) => {
 app.delete("/api/relationships/owns", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { from, to } = req.body || {};
+    const { from, to, asOfDate } = req.body || {};
     if (!from || !to) {
       return res.status(400).json({ error: "from and to are required" });
     }
     const fromId = normalizeClientId(client, from);
     const toId = normalizeClientId(client, to);
-    await deleteRel(client, makeRelKey("owns", fromId, toId));
+    const allCurrent = await queryOwnershipCurrent(client);
+    const currentForOwned = allCurrent.filter((r) => r.type === "owns" && r.to === toId);
+    const nextRows = currentForOwned
+      .filter((r) => r.from !== fromId)
+      .map((r) => ({ from: r.from, to: toId, percent: r.percent }));
+    await persistOwnershipSet({
+      clientId: client,
+      ownedId: toId,
+      rows: nextRows,
+      asOfDate,
+      changedBy: req.auth.loginId,
+    });
     res.json({ from: fromId, to: toId });
   } catch (err) {
     console.error("/api/relationships/owns (delete) error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── Fetch ownership history timeline for an entity ────────────────────────
+
+app.get("/api/ownership/history/:entityId", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const entityId = req.params.entityId;
+    const toId = normalizeClientId(client, entityId);
+
+    // Only query EMPlusOwnershipHistory — persistOwnershipSet always writes every period
+    // to history (via batchPutOwnershipHistory), so history is the single source of truth
+    // for all periods including the current one. Querying current as well would double-count.
+    const historyRows = await queryOwnershipHistory(client);
+    const historyForEntity = historyRows.filter((r) => r.type === "owns" && r.to === toId);
+
+    // Group records by setId to get distinct ownership periods
+    const periodsBySetId = new Map();
+
+    historyForEntity.forEach((row) => {
+      if (!row.setId) return;
+      if (!periodsBySetId.has(row.setId)) {
+        periodsBySetId.set(row.setId, {
+          setId: row.setId,
+          effectiveFrom: row.effectiveFrom || "0001-01-01",
+          owners: [],
+          changedAt: row.changedAt || null,
+          changedBy: row.changedBy || null,
+        });
+      }
+      periodsBySetId.get(row.setId).owners.push({
+        from: row.from,
+        percent: row.percent,
+      });
+    });
+
+    // Convert to array and sort by effectiveFrom (oldest first for computing effectiveTo)
+    let periods = Array.from(periodsBySetId.values()).sort((a, b) => {
+      const aDate = a.effectiveFrom || "0001-01-01";
+      const bDate = b.effectiveFrom || "0001-01-01";
+      return aDate.localeCompare(bDate); // oldest first
+    });
+
+    // Compute effectiveTo for each period (= next period's effectiveFrom - 1 day)
+    // effectiveTo is not stored — derived from adjacent periods to prevent gaps
+    periods = periods.map((period, index) => {
+      if (index < periods.length - 1) {
+        // Not the last period: effectiveTo = next period's effectiveFrom - 1 day
+        const nextPeriodStart = periods[index + 1].effectiveFrom;
+        const nextDate = new Date(nextPeriodStart + 'T00:00:00Z');
+        nextDate.setUTCDate(nextDate.getUTCDate() - 1);
+        const year = nextDate.getUTCFullYear();
+        const month = String(nextDate.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(nextDate.getUTCDate()).padStart(2, '0');
+        period.effectiveTo = `${year}-${month}-${day}`;
+      } else {
+        // Last period: no end date (ongoing)
+        period.effectiveTo = null;
+      }
+      // Remove the stored effectiveTo since we computed it
+      return period;
+    });
+
+    // Sort back to newest first for display
+    periods = periods.sort((a, b) => {
+      const aDate = a.effectiveFrom || "0001-01-01";
+      const bDate = b.effectiveFrom || "0001-01-01";
+      return bDate.localeCompare(aDate);
+    });
+
+    res.json({
+      entityId: toId,
+      periods,
+    });
+  } catch (err) {
+    console.error("/api/ownership/history/:entityId error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.put("/api/ownership/update-period", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const { to, setId, newEffectiveFrom, owners } = req.body || {};
+    
+    if (!to || !setId || !newEffectiveFrom) {
+      return res.status(400).json({ error: "to, setId, and newEffectiveFrom are required" });
+    }
+    
+    const toId = normalizeClientId(client, to);
+    const newFromDate = normalizeDateInput(newEffectiveFrom);
+    
+    if (!newFromDate) {
+      return res.status(400).json({ error: "Invalid newEffectiveFrom date" });
+    }
+
+    // Fetch current records for this entity
+    const currentRows = await queryOwnershipCurrent(client);
+    const entityRecords = currentRows.filter((r) => r.type === "owns" && r.to === toId && r.setId === setId);
+    
+    if (entityRecords.length === 0) {
+      return res.status(404).json({ error: "Ownership group not found" });
+    }
+
+    // Delete old records with this setId in current table
+    for (const record of entityRecords) {
+      await deleteOwnershipCurrent(client, record.ownershipKey);
+    }
+
+    // Create updated records with new effectiveFrom only
+    // effectiveTo is computed on-the-fly from the next period's effectiveFrom
+    if (owners && Array.isArray(owners)) {
+      for (const owner of owners) {
+        const from = normalizeClientId(client, owner.from);
+        const newRecord = {
+          clientId: client,
+          ownershipKey: makeOwnershipCurrentKey(from, toId),
+          type: "owns",
+          to: toId,
+          from,
+          percent: owner.percent,
+          setId: setId,
+          effectiveFrom: newFromDate,
+          // Do NOT store effectiveTo - it will be computed from next period
+          changedAt: new Date().toISOString(),
+          changedBy: req.auth.loginId,
+        };
+        await putOwnershipCurrent(newRecord);
+      }
+    } else {
+      // Keep existing owners if not provided
+      for (const record of entityRecords) {
+        const updatedRecord = { 
+          ...record, 
+          effectiveFrom: newFromDate,
+          // Remove stored effectiveTo since we'll compute it
+        };
+        delete updatedRecord.effectiveTo;
+        await putOwnershipCurrent(updatedRecord);
+      }
+    }
+
+    // Update all records with this setId in history table to match the new date
+    const historyRows = await queryOwnershipHistory(client);
+    const historyRecords = historyRows.filter((r) => r.type === "owns" && r.to === toId && r.setId === setId);
+    for (const record of historyRecords) {
+      await deleteOwnershipHistory(client, record.ownershipHistoryKey);
+      const updatedRecord = { ...record, effectiveFrom: newFromDate };
+      // Remove stored effectiveTo since we'll compute it
+      delete updatedRecord.effectiveTo;
+      await putOwnershipHistory(updatedRecord);
+    }
+
+    res.json({ setId, newEffectiveFrom: newFromDate });
+  } catch (err) {
+    console.error("/api/ownership/update-period error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── Delete an ownership group by setId ────────────────────────────────────────
+
+app.delete("/api/ownership/group/:entityId/:setId", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const entityId = req.params.entityId;
+    const setId = req.params.setId;
+    
+    if (!entityId || !setId) {
+      return res.status(400).json({ error: "entityId and setId are required" });
+    }
+    
+    const toId = normalizeClientId(client, entityId);
+
+    // Fetch and delete from both tables — a period may exist only in history (non-current)
+    const [currentRows, historyRows] = await Promise.all([
+      queryOwnershipCurrent(client),
+      queryOwnershipHistory(client),
+    ]);
+
+    const currentRecords = currentRows.filter((r) => r.type === "owns" && r.to === toId && r.setId === setId);
+    const historyRecords = historyRows.filter((r) => r.type === "owns" && r.to === toId && r.setId === setId);
+
+    if (currentRecords.length === 0 && historyRecords.length === 0) {
+      return res.status(404).json({ error: "Ownership group not found" });
+    }
+
+    for (const record of currentRecords) {
+      await deleteOwnershipCurrent(client, record.ownershipKey);
+    }
+
+    for (const record of historyRecords) {
+      await deleteOwnershipHistory(client, record.ownershipHistoryKey);
+    }
+
+    res.json({ setId, deleted: true });
+  } catch (err) {
+    console.error("/api/ownership/group/:entityId/:setId error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.put("/api/ownership/sets", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const { to, owners, asOfDate } = req.body || {};
+    if (!to || !Array.isArray(owners) || owners.length === 0) {
+      return res.status(400).json({ error: "to and owners[] are required" });
+    }
+    const toId = normalizeClientId(client, to);
+    const rows = owners.map((owner) => ({
+      from: normalizeClientId(client, owner.from),
+      to: toId,
+      percent: owner.percent,
+    }));
+    const saved = await persistOwnershipSet({
+      clientId: client,
+      ownedId: toId,
+      rows,
+      asOfDate,
+      changedBy: req.auth.loginId,
+    });
+    res.json({ to: toId, rows: saved.map(toRelResponse) });
+  } catch (err) {
+    console.error("/api/ownership/sets error", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });

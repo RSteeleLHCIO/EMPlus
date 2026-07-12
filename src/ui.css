@@ -285,10 +285,10 @@ body {
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.3);
-    z-index: 110;
-    padding: 16px;
+    z-index: 2000;
+    padding: 130px 16px 16px 16px;
     box-sizing: border-box;
-    overflow: hidden;
+    overflow-y: auto;
 }
 
 .dialog-content {
@@ -347,7 +347,7 @@ body {
     display: flex;
     flex-direction: column;
     height: calc(100vh - 100px);
-    max-height: calc(100vh - 100px);
+    max-height: 75dvh;
     overflow: hidden;
 }
 
@@ -572,8 +572,8 @@ input[type="text"] {
 }
 
 .directory-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
+    display: flex;
+    flex-direction: column;
     gap: 16px;
     align-items: start;
 }
@@ -642,7 +642,7 @@ input[type="text"] {
 
 .tabular-table {
     table-layout: fixed;
-    min-width: 100%;
+    width: max-content;
     border-collapse: separate;
     border-spacing: 0;
     font-size: 13px;
@@ -666,7 +666,7 @@ input[type="text"] {
     overflow-wrap: anywhere;
     word-break: break-word;
     line-height: 1.35;
-    vertical-align: top;
+    vertical-align: middle;
 }
 
 .tabular-table th {
@@ -692,6 +692,7 @@ input[type="text"] {
     z-index: 2;
     background: #fff;
     box-shadow: 2px 0 0 #e2e8f0;
+    min-width: 0;
 }
 
 .tabular-table td.tabular-col-frozen.tabular-col-dirty {
@@ -892,6 +893,10 @@ input[type="text"] {
 
 .tabular-actions-anchor-box {
     position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
 }
 
 .tabular-table tbody tr:hover td.tabular-actions-anchor,
@@ -900,34 +905,31 @@ input[type="text"] {
 }
 
 .tabular-row-hover-actions {
-    position: absolute;
-    top: calc(100% - 1px);
-    left: 50%;
-    transform: translate(-50%, 0);
+    display: none;
+}
+
+.tabular-edit-btn {
     display: flex;
-    flex-direction: row;
-    gap: 6px;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.12s ease 0.1s, transform 0.12s ease 0.1s;
-    z-index: 6;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px 6px;
+    color: #64748b;
+    border-radius: 4px;
+    transition: background-color 0.12s ease, color 0.12s ease;
+    flex-shrink: 0;
 }
 
-.tabular-row-hover-actions::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: -14px;
-    height: 14px;
+.tabular-edit-btn:hover:not(:disabled) {
+    background-color: #f1f5f9;
+    color: #0f172a;
 }
 
-.tabular-table tbody tr:hover .tabular-row-hover-actions,
-.tabular-table tbody tr:focus-within .tabular-row-hover-actions,
-.tabular-row-hover-actions:hover {
-    opacity: 1;
-    pointer-events: auto;
-    transform: translate(-50%, 0);
+.tabular-edit-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .tabular-status {
@@ -1436,6 +1438,7 @@ input[type="text"] {
 
 .directory-scroll {
     max-height: 60vh;
+    width: 40vw;
     overflow-y: auto;
     overscroll-behavior: contain;
     padding-right: 4px;
@@ -1468,6 +1471,7 @@ input[type="text"] {
 .directory-meta {
     font-size: 12px;
     color: var(--muted);
+    display: none;
 }
 
 .empty-text {
@@ -1612,6 +1616,8 @@ input[type="text"] {
     padding-top: 120px;
     padding-left: 16px;
     padding-right: 16px;
+    position: relative;
+    z-index: 1;
 }
 
 /* ── Settings menu ── */
@@ -1809,7 +1815,7 @@ input[type="text"] {
     border: 1px solid #dbe2ea;
     border-radius: 12px;
     box-shadow: 0 14px 34px rgba(15, 23, 42, 0.14);
-    z-index: 90;
+    z-index: 1000;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -2119,7 +2125,7 @@ input[type="text"] {
 }
 
 .owner-search-result:hover {
-    background: var(--accent, #f1f5f9);
+    background: #f1f5f9;
 }
 
 .owner-search-result-kind {
@@ -2127,8 +2133,8 @@ input[type="text"] {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--muted-foreground, #64748b);
-    background: var(--accent, #f1f5f9);
+    color: #64748b;
+    background: #f1f5f9;
     border-radius: 3px;
     padding: 1px 5px;
     flex-shrink: 0;
@@ -2254,6 +2260,7 @@ input[type="time"].no-native-picker {
     scroll-behavior: smooth;
     cursor: grab;
     touch-action: none;
+    z-index: 1;
 }
 
 .hierarchy-vertical.hierarchy-vertical--no-parents {

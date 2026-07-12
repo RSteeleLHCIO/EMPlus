@@ -307,11 +307,11 @@ const NodeImageField = ({ kind, value, onChange, apiBase, token }) => {
   );
 };
 
-const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList, relList } = {}) => {
+const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList, relList, asOfDate, ownershipTimeline } = {}) => {
   const { fieldId, prompt, dataType, multiValue, validValues, phoneTypes } = field;
 
   if (field?._virtual) {
-    const computed = getEntityOwnershipSummary(node, nodeList, relList);
+    const computed = getEntityOwnershipSummary(node, nodeList, relList, asOfDate, ownershipTimeline);
     return (
       <div className="form-row" key={fieldId}>
         <label className="form-label">{prompt}</label>
@@ -566,6 +566,43 @@ const parseOwnershipPercent = (rawValue) => {
   return { ok: true, value: parsed };
 };
 
+// Format ownership effective date range for display
+// Handles 4 cases: 1) no dates, 2) from only, 3) to only, 4) both dates
+const formatOwnershipDateRange = (from, to) => {
+  const formatDate = (dateStr) => {
+    if (!dateStr) return null;
+    try {
+      // Parse as local date, not UTC (ISO date strings are dates, not datetimes)
+      const [year, month, day] = dateStr.split('-').map(Number);
+      const d = new Date(year, month - 1, day);
+      return d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    } catch {
+      return dateStr;
+    }
+  };
+
+  const fromFormatted = formatDate(from);
+  const toFormatted = formatDate(to);
+
+  // Case 1: No dates
+  if (!fromFormatted && !toFormatted) {
+    return "Current ownership";
+  }
+
+  // Case 2: From date only (no end date = current)
+  if (fromFormatted && !toFormatted) {
+    return `Current owners (since ${fromFormatted})`;
+  }
+
+  // Case 3: To date only (missing start date)
+  if (!fromFormatted && toFormatted) {
+    return `Ownership until ${toFormatted}`;
+  }
+
+  // Case 4: Both dates
+  return `Owners from ${fromFormatted} until ${toFormatted}`;
+};
+
 const TreeNode = ({
   tree,
   relLabel,
@@ -672,11 +709,7 @@ const HvNeighborBox = ({
   explodedNodes,
   onExplode,
   onExplodeAll,
-  onFocus,
-  onFocusPrimary,
-  onEdit,
-  onPrintBook,
-  onPrintPoster,
+  onQuickView,
   showExplodeControls = true,
   isCyclic = false,
 }) => {
@@ -695,9 +728,9 @@ const HvNeighborBox = ({
   return (
     <div
       className={classNames}
-      style={{ position: "relative" }}
+      style={{ position: "relative", cursor: "pointer" }}
       data-hv-node-id={item.nodeId}
-      onClick={() => onFocus(item.nodeId)}
+      onClick={() => onQuickView?.(item.nodeId)}
       title={isCyclic ? "Circular ownership — already shown above" : isZero ? "Non-economic / 0% interest" : undefined}
     >
       {node.kind === "person"
@@ -711,63 +744,21 @@ const HvNeighborBox = ({
       <div className="hv-neighbor-name">{node.name}</div>
       {showPct && <div className="hv-neighbor-pct">{Number(pct)}%</div>}
       {isCyclic && <div className="hv-neighbor-cycle-badge" title="Circular reference">∞</div>}
-      <div className="hv-neighbor-actions" onClick={(e) => e.stopPropagation()}>
-        <button
-          className="hv-neighbor-action-btn"
-          type="button"
-          title="Edit"
-          aria-label="Edit"
-          onClick={() => onEdit?.(item.nodeId)}
-        >
-          <Pencil size={11} />
-        </button>
-        <button
-          className="hv-neighbor-action-btn"
-          type="button"
-          title="Print Book Pages (PDF)"
-          aria-label="Print Book Pages"
-          onClick={() => onPrintBook?.(item.nodeId)}
-        >
-          <BookOpen size={11} />
-        </button>
-        <button
-          className="hv-neighbor-action-btn"
-          type="button"
-          title="Print Org Chart Poster"
-          aria-label="Print Org Chart Poster"
-          onClick={() => onPrintPoster?.(item.nodeId)}
-        >
-          <GitFork size={11} />
-        </button>
-        <button
-          className="hv-neighbor-action-btn"
-          type="button"
-          title="Focus on me"
-          aria-label="Focus on me"
-          onClick={() => {
-            if (onFocusPrimary) {
-              onFocusPrimary(item.nodeId);
-            } else {
-              onFocus(item.nodeId);
-            }
-          }}
-        >
-          <Crosshair size={11} />
-        </button>
-      </div>
       {showExplodeControls && !isCyclic && childCount > 0 && (
         <>
-          <button
-            className={`hv-explode-btn${isExploded ? " hv-explode-btn--active" : ""}`}
-            title={isExploded ? `Collapse ${childCount} direct child${childCount === 1 ? "" : "ren"}` : `Expand ${childCount} direct child${childCount === 1 ? "" : "ren"}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              const anchorEl = e.currentTarget.closest('[data-hv-node-id]');
-              onExplode(item.nodeId, anchorEl);
-            }}
-          >
-            <ChevronDown size={12} style={{ transition: "transform 0.2s", transform: isExploded ? "rotate(180deg)" : "none" }} />
-          </button>
+          {childCount > 1 && (
+            <button
+              className={`hv-explode-btn${isExploded ? " hv-explode-btn--active" : ""}`}
+              title={isExploded ? `Collapse ${childCount} direct child${childCount === 1 ? "" : "ren"}` : `Expand ${childCount} direct child${childCount === 1 ? "" : "ren"}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                const anchorEl = e.currentTarget.closest('[data-hv-node-id]');
+                onExplode(item.nodeId, anchorEl);
+              }}
+            >
+              <ChevronDown size={12} style={{ transition: "transform 0.2s", transform: isExploded ? "rotate(180deg)" : "none" }} />
+            </button>
+          )}
           {!isExploded && (() => {
             const totalDesc = getAllDescendants(relList, item.nodeId).size;
             return (
@@ -801,9 +792,9 @@ const DEFAULT_OWNERSHIP_TABULAR_VIEW_ID = "__default_ownership__";
 // Normalize appliesTo: old string "both" → ["entity","person"], single string → [string], array → as-is
 const normalizeAppliesTo = (v) =>
   Array.isArray(v) ? v :
-  v === "both" ? ["entity", "person"] :
-  v && v.includes(",") ? v.split(",") :
-  v ? [v] : ["entity", "person"];
+    v === "both" ? ["entity", "person"] :
+      v && v.includes(",") ? v.split(",") :
+        v ? [v] : ["entity", "person"];
 
 // Compute the full pixel width of a subtree column (for precise connector positioning)
 function computeColWidth(nodeId, relList, explodedNodes, visited = new Set()) {
@@ -822,7 +813,8 @@ function computeColWidth(nodeId, relList, explodedNodes, visited = new Set()) {
 // ── Recursive org-chart tree node ─────────────────────────────────────────────
 const OrgChartTreeNode = ({
   item, nodeList, relList, explodedNodes,
-  onExplode, onExplodeAll, onFocus, onFocusPrimary, onEdit, onPrintBook, onPrintPoster,
+  onExplode, onExplodeAll, onQuickView,
+  onFocus = () => {}, onFocusPrimary = () => {}, onEdit = () => {}, onPrintBook = () => {}, onPrintPoster = () => {},
   visitedIds = new Set(), showTopConnector = true,
 }) => {
   const { nodeId } = item;
@@ -848,9 +840,7 @@ const OrgChartTreeNode = ({
       <HvNeighborBox
         item={item} nodeList={nodeList} relList={relList}
         explodedNodes={explodedNodes} onExplode={onExplode}
-        onExplodeAll={onExplodeAll} onFocus={onFocus}
-        onFocusPrimary={onFocusPrimary}
-        onEdit={onEdit} onPrintBook={onPrintBook} onPrintPoster={onPrintPoster}
+        onExplodeAll={onExplodeAll} onQuickView={onQuickView}
         isCyclic={isCyclic}
       />
       {children.length > 0 && (
@@ -987,7 +977,7 @@ const OrgChartMinimap = ({ containerRef, watchKey }) => {
 // depth=0 primary children: horizontal wrap when nothing exploded, vertical once any exploded.
 // depth>0 always vertical (leaf rows included), indented one box+gap unit per level.
 // visitedIds tracks every ancestor shown so far — cyclic nodes are flagged but still rendered.
-const ExplodableChildRow = ({ items, nodeList, relList, explodedNodes, onExplode, onExplodeAll, onFocus, depth = 0, visitedIds = new Set() }) => {
+const ExplodableChildRow = ({ items, nodeList, relList, explodedNodes, onExplode, onExplodeAll, onQuickView, depth = 0, visitedIds = new Set() }) => {
   const anyExploded = items.some(item => !visitedIds.has(item.nodeId) && explodedNodes.has(item.nodeId));
 
   // Primary level with nothing exploded → original horizontal wrap row
@@ -1003,7 +993,7 @@ const ExplodableChildRow = ({ items, nodeList, relList, explodedNodes, onExplode
             explodedNodes={explodedNodes}
             onExplode={onExplode}
             onExplodeAll={onExplodeAll}
-            onFocus={onFocus}
+            onQuickView={onQuickView}
             isCyclic={visitedIds.has(item.nodeId)}
           />
         ))}
@@ -1030,7 +1020,7 @@ const ExplodableChildRow = ({ items, nodeList, relList, explodedNodes, onExplode
               explodedNodes={explodedNodes}
               onExplode={onExplode}
               onExplodeAll={onExplodeAll}
-              onFocus={onFocus}
+              onQuickView={onQuickView}
               isCyclic={isCyclic}
             />
             {isExploded && childItems.length > 0 && (
@@ -1042,7 +1032,7 @@ const ExplodableChildRow = ({ items, nodeList, relList, explodedNodes, onExplode
                   explodedNodes={explodedNodes}
                   onExplode={onExplode}
                   onExplodeAll={onExplodeAll}
-                  onFocus={onFocus}
+                  onQuickView={onQuickView}
                   depth={depth + 1}
                   visitedIds={nextVisited}
                 />
@@ -1239,14 +1229,14 @@ function getColumnFilterConfig(column) {
   const key = column.key;
   if (key === "status" || key === "actions") return { filterType: null };
   if (key === "type") return { filterType: "enum", enumOptions: [{ value: "entity", label: "Entity" }, { value: "person", label: "Person" }] };
-  if (key === "operationalRole") return { filterType: "enum", enumOptions: ["Active","Passive","Mixed"].map((v) => ({ value: v, label: v })) };
-  if (key === "legalStatus") return { filterType: "enum", enumOptions: ["Good Standing","Dormant","Dissolved","Suspended"].map((v) => ({ value: v, label: v })) };
-  if (key === "personStatus") return { filterType: "enum", enumOptions: ["Active","Inactive","Deceased","Former"].map((v) => ({ value: v, label: v })) };
+  if (key === "operationalRole") return { filterType: "enum", enumOptions: ["Active", "Passive", "Mixed"].map((v) => ({ value: v, label: v })) };
+  if (key === "legalStatus") return { filterType: "enum", enumOptions: ["Good Standing", "Dormant", "Dissolved", "Suspended"].map((v) => ({ value: v, label: v })) };
+  if (key === "personStatus") return { filterType: "enum", enumOptions: ["Active", "Inactive", "Deceased", "Former"].map((v) => ({ value: v, label: v })) };
   if (key === "percent") return { filterType: "range" };
   if (key === "startDate" || key === "endDate") return { filterType: "daterange" };
   if (column.field?.dataType === "boolean") return { filterType: "enum", enumOptions: [{ value: "true", label: "Yes" }, { value: "false", label: "No" }] };
   if (column.field?.dataType === "date") return { filterType: "daterange" };
-  if (["number","currency","percentage"].includes(column.field?.dataType)) return { filterType: "range" };
+  if (["number", "currency", "percentage"].includes(column.field?.dataType)) return { filterType: "range" };
   if ((column.field?.validValues || []).length > 0) return { filterType: "enum", enumOptions: column.field.validValues.map((v) => ({ value: v, label: v })) };
   return { filterType: "text" };
 }
@@ -1269,7 +1259,7 @@ function measureTextWidth(text, fontSize = 13) {
   return s.length * fontSize * 0.65;
 }
 
-function getNodeTabularValue(node, column, nodeList = [], relList = []) {
+function getNodeTabularValue(node, column, nodeList = [], relList = [], asOfDate = null) {
   if (!node) return "";
   switch (column.key) {
     case "type": return node.kind || "";
@@ -1285,7 +1275,7 @@ function getNodeTabularValue(node, column, nodeList = [], relList = []) {
     default:
       if (!column.field) return "";
       if (column.field._virtual) {
-        return getEntityOwnershipSummary(node, nodeList, relList);
+        return getEntityOwnershipSummary(node, nodeList, relList, asOfDate);
       }
       return node.customFields?.[column.field.fieldId] ?? "";
   }
@@ -1330,13 +1320,13 @@ function ColumnFilterPopover({ filterType, enumOptions, currentFilter, popoverPo
     return () => document.removeEventListener("mousedown", handler, true);
   }, [onClose]);
 
-  const textVal    = currentFilter?.type === "text"      ? (currentFilter.value || "")       : "";
-  const enumSel    = currentFilter?.type === "enum"      ? (currentFilter.selected || [])     : [];
-  const rangeMin   = currentFilter?.type === "range"     ? (currentFilter.min || "")          : "";
-  const rangeMax   = currentFilter?.type === "range"     ? (currentFilter.max || "")          : "";
-  const dateFrom   = currentFilter?.type === "daterange" ? (currentFilter.from || "")         : "";
-  const dateTo     = currentFilter?.type === "daterange" ? (currentFilter.to || "")           : "";
-  const hasValue   = !isFilterEmpty(currentFilter);
+  const textVal = currentFilter?.type === "text" ? (currentFilter.value || "") : "";
+  const enumSel = currentFilter?.type === "enum" ? (currentFilter.selected || []) : [];
+  const rangeMin = currentFilter?.type === "range" ? (currentFilter.min || "") : "";
+  const rangeMax = currentFilter?.type === "range" ? (currentFilter.max || "") : "";
+  const dateFrom = currentFilter?.type === "daterange" ? (currentFilter.from || "") : "";
+  const dateTo = currentFilter?.type === "daterange" ? (currentFilter.to || "") : "";
+  const hasValue = !isFilterEmpty(currentFilter);
 
   return (
     <div
@@ -1423,6 +1413,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     }
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [homeAnimating, setHomeAnimating] = useState(false);
   const [homeAnimOrigin, setHomeAnimOrigin] = useState("50% 50%");
@@ -1459,6 +1450,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [uploadStatus, setUploadStatus] = useState("idle");
   const [uploadError, setUploadError] = useState("");
   const [uploadSummary, setUploadSummary] = useState(null);
+  const [uploadOwnershipAsOfDate, setUploadOwnershipAsOfDate] = useState("");
   const [uploadDetected, setUploadDetected] = useState("");
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
   const [uploadPreview, setUploadPreview] = useState(null);
@@ -1591,6 +1583,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [ownershipTableDirtyKeys, setOwnershipTableDirtyKeys] = useState(() => new Set());
   const [ownershipTableSavingKeys, setOwnershipTableSavingKeys] = useState(() => new Set());
   const [ownershipTableRowErrors, setOwnershipTableRowErrors] = useState({});
+  const [asOfDate, setAsOfDate] = useState("");
+  const todayIso = useMemo(() => toIsoDate(new Date()), []);
 
   const getTabularPrefsPayload = useCallback((overrides = {}) => ({
     tabularViews: overrides.tabularViews ?? tabularViews,
@@ -1620,6 +1614,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   }
 
   const [editNodeId, setEditNodeId] = useState(() => (token ? "" : (initialNodes[0]?.id ?? "")));
+  const [editNodeEffectiveDate, setEditNodeEffectiveDate] = useState("");
+  const [editNodeOwnershipTimeline, setEditNodeOwnershipTimeline] = useState([]);
   const [nodeDraft, setNodeDraft] = useState({
     id: "",
     name: "",
@@ -1677,6 +1673,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [ownerEditorOriginal, setOwnerEditorOriginal] = useState([]);
   const [ownerSearch, setOwnerSearch] = useState("");
   const [ownerSearchOpen, setOwnerSearchOpen] = useState(false);
+  const [ownerEditorEffectiveDate, setOwnerEditorEffectiveDate] = useState("");
+  const [ownerEditorDateRange, setOwnerEditorDateRange] = useState({ from: null, to: null, isCurrent: true });
+  const [ownerEditorMode, setOwnerEditorMode] = useState("view"); // 'view' | 'edit-existing' | 'create-new'
+  const [ownershipTimeline, setOwnershipTimeline] = useState([]); // Array of all ownership periods
+  const [ownershipSelectedPeriodSetId, setOwnershipSelectedPeriodSetId] = useState(null); // Which period is displayed
+  const [ownershipDeleteConfirm, setOwnershipDeleteConfirm] = useState(false); // Confirmation for deleting group
   const [isSavingOwners, setIsSavingOwners] = useState(false);
   const [isCreatingOwnerNode, setIsCreatingOwnerNode] = useState(false);
   const [isPdfExporting, setIsPdfExporting] = useState(false);
@@ -1738,6 +1740,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [quickFindOpen, setQuickFindOpen] = useState(false);
   const [quickFindHighlight, setQuickFindHighlight] = useState(-1);
   const [quickViewNodeId, setQuickViewNodeId] = useState("");
+  const [quickViewOwnershipTimeline, setQuickViewOwnershipTimeline] = useState([]);
 
   const [dataDictionary, setDataDictionary] = useState([]);
   const emptyDdDraft = { prompt: "", dataType: "string", appliesTo: ["entity", "person"], multiValue: false, validValuesText: "", phoneTypesText: "", showInStats: false };
@@ -1789,12 +1792,24 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     () => (quickViewNodeId ? getAllDescendants(relList, quickViewNodeId).size : 0),
     [quickViewNodeId, relList]
   );
+  
+  // Fetch ownership timeline for quick view node
+  useEffect(() => {
+    if (quickViewNode?.kind === "entity") {
+      apiRequest(`/api/ownership/history/${encodeURIComponent(quickViewNode.id)}`)
+        .then((resp) => setQuickViewOwnershipTimeline(resp.periods || []))
+        .catch(() => setQuickViewOwnershipTimeline([]));
+    } else {
+      setQuickViewOwnershipTimeline([]);
+    }
+  }, [quickViewNode?.id]);
+  
   const quickViewOwnershipSummary = useMemo(() => {
     if (!quickViewNode || quickViewNode.kind !== "entity") return "";
-    const raw = String(getEntityOwnershipSummary(quickViewNode, nodeList, relList) || "").trim();
+    const raw = String(getEntityOwnershipSummary(quickViewNode, nodeList, relList, asOfDate, quickViewOwnershipTimeline) || "").trim();
     if (!raw) return "";
     return raw.split(";").map((part) => part.trim()).filter(Boolean).join("\n");
-  }, [nodeList, quickViewNode, relList]);
+  }, [nodeList, quickViewNode, relList, asOfDate, quickViewOwnershipTimeline]);
   const quickViewEmailText = useMemo(() => {
     if (!quickViewNode) return "";
     const emails = quickViewNode.emails;
@@ -1876,16 +1891,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     [dataDictionary]
   );
   const baseTabularColumns = useMemo(() => ([
-    { key: "name",            label: "Name",             hideable: true },
-    { key: "address",         label: "Address",          hideable: true },
-    { key: "workPhone",       label: "Primary Phone",    hideable: true,  width: 160 },
-    { key: "cellPhone",       label: "Cell Phone",       hideable: true,  width: 160 },
-    { key: "emails",          label: "e-Mail",           hideable: true },
-    { key: "taxId",           label: "Tax ID",           hideable: true,  width: 140 },
-    { key: "operationalRole", label: "Operational Role", hideable: true,  width: 160 },
-    { key: "legalStatus",     label: "Legal Status",     hideable: true,  width: 150 },
-    { key: "personStatus",    label: "Person Status",    hideable: true,  width: 150 },
-    { key: "actions",         label: "Actions",          hideable: false },
+    { key: "name", label: "Name", hideable: true },
+    { key: "address", label: "Address", hideable: true },
+    { key: "workPhone", label: "Primary Phone", hideable: true, width: 160 },
+    { key: "cellPhone", label: "Cell Phone", hideable: true, width: 160 },
+    { key: "emails", label: "e-Mail", hideable: true },
+    { key: "taxId", label: "Tax ID", hideable: true, width: 140 },
+    { key: "operationalRole", label: "Operational Role", hideable: true, width: 160 },
+    { key: "legalStatus", label: "Legal Status", hideable: true, width: 150 },
+    { key: "personStatus", label: "Person Status", hideable: true, width: 150 },
+    { key: "actions", label: "Actions", hideable: false },
   ]), []);
   const allTabularColumns = useMemo(() => {
     const ddCols = tableDdFields.map((field) => ({
@@ -1904,11 +1919,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   // ── Ownership tabular columns ──────────────────────────────────────────────
   const baseOwnershipTabularColumns = useMemo(() => ([
-    { key: "owner",     label: "Owner",        hideable: true },
-    { key: "owned",     label: "Owned Entity", hideable: true },
-    { key: "percent",   label: "% Owned",      hideable: true, width: 110 },
-    { key: "startDate", label: "Start Date",   hideable: true, width: 130 },
-    { key: "endDate",   label: "End Date",     hideable: true, width: 130 },
+    { key: "owner", label: "Owner", hideable: true },
+    { key: "owned", label: "Owned Entity", hideable: true },
+    { key: "percent", label: "% Owned", hideable: true, width: 110 },
+    { key: "startDate", label: "Start Date", hideable: true, width: 130 },
+    { key: "endDate", label: "End Date", hideable: true, width: 130 },
   ]), []);
   const allOwnershipTabularColumns = useMemo(() => {
     const ddCols = ownershipDdFields.map((field) => ({
@@ -2083,7 +2098,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           "Content-Type": "application/json",
           ...(token ? { "Authorization": `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ debug: false }),
+        body: JSON.stringify({ debug: false, asOf: asOfDate || null }),
       });
       if (!response.ok) {
         throw new Error(`API error ${response.status}`);
@@ -2106,7 +2121,73 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     } finally {
       if (canUpdate()) setDirectoryLoaded(true);
     }
-  }, [apiBase, token]);
+  }, [apiBase, token, asOfDate]);
+
+  // Reload directory whenever asOfDate changes (including to null for current data)
+  useEffect(() => {
+    if (token && apiBase) {
+      loadDirectory();
+    }
+  }, [asOfDate, loadDirectory, token, apiBase]);
+
+  // Background ownership import - starts import and returns immediately with feedback
+  const startBackgroundOwnershipImport = (rows, csvSkipped) => {
+    // Fire-and-forget: start import in background without waiting
+    (async () => {
+      try {
+        console.log(`[Background Import] Starting ownership import of ${rows.length} rows...`);
+        const chunkCsv = rowsToCsv(rows);
+        
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => abortController.abort(), 5 * 60 * 1000);
+        
+        const response = await fetch(`${apiBase}/api/import/ownerships-csv`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ csv: chunkCsv, asOfDate: uploadOwnershipAsOfDate, client: clientId }),
+          signal: abortController.signal,
+        });
+        clearTimeout(timeoutId);
+        
+        const responseText = await response.text();
+        let data = {};
+        if (responseText) {
+          try {
+            data = JSON.parse(responseText);
+          } catch {
+            data = { raw: responseText };
+          }
+        }
+        
+        if (!response.ok) {
+          const fallback = typeof data?.raw === "string" ? data.raw : responseText;
+          throw new Error(data?.error || fallback || `Upload failed (${response.status})`);
+        }
+
+        console.log(`[Background Import] Complete: ${data.imported} imported, ${data.skipped} skipped`);
+        
+        // Refresh directory to show new data
+        await loadDirectory();
+        
+        // Show completion result
+        const imported = Number(data.imported || 0);
+        const skipped = Number(data.skipped || 0);
+        const total = rows.length;
+        
+        setUploadSummary({
+          total,
+          imported,
+          skipped: csvSkipped + skipped,
+          errors: data.errors || [],
+        });
+        setUploadStatus("success");
+      } catch (err) {
+        console.error(`[Background Import] Error:`, err);
+        setUploadStatus("error");
+        setUploadError(`Background import failed: ${err.message || 'Unknown error'}`);
+      }
+    })();
+  };
 
   const handleUploadCsv = async () => {
     if (!uploadFile) {
@@ -2115,10 +2196,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       return;
     }
     try {
-      setUploadStatus("uploading");
-      setUploadError("");
-      setUploadSummary(null);
-      setUploadProgress({ current: 0, total: 0 });
+      if (!normalizeDateInput(uploadOwnershipAsOfDate)) {
+        setUploadStatus("error");
+        setUploadError("Effective as of date is required for imports.");
+        return;
+      }
 
       if (uploadType === "ownership" && uploadPreview?.ownershipValidation && !uploadPreview.ownershipValidation.valid) {
         setUploadStatus("error");
@@ -2126,6 +2208,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         return;
       }
 
+      // For ownership imports, use background loading with immediate feedback
       if (uploadType === "ownership") {
         const ext = (uploadFile.name || "").split(".").pop().toLowerCase();
         let csvText;
@@ -2144,59 +2227,35 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           return;
         }
 
-        const chunkSize = 10;
-        const totalChunks = Math.ceil(rows.length / chunkSize);
-        setUploadProgress({ current: 0, total: totalChunks });
-
-        let imported = 0;
-        let rejected = 0;
-        const allErrors = [];
-
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-        for (let i = 0; i < totalChunks; i += 1) {
-          const chunk = rows.slice(i * chunkSize, (i + 1) * chunkSize);
-          const chunkCsv = rowsToCsv(chunk);
-          const response = await fetch(`${apiBase}/api/import/ownerships-csv`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-            body: JSON.stringify({ csv: chunkCsv, client: clientId }),
-          });
-          const responseText = await response.text();
-          let data = {};
-          if (responseText) {
-            try {
-              data = JSON.parse(responseText);
-            } catch {
-              data = { raw: responseText };
-            }
-          }
-          if (!response.ok) {
-            const fallback = typeof data?.raw === "string" ? data.raw : responseText;
-            throw new Error(data?.error || fallback || `Upload failed (${response.status})`);
-          }
-
-          imported += Number(data.imported || 0);
-          rejected += Number(data.skipped || 0);
-          if (Array.isArray(data.errors)) allErrors.push(...data.errors);
-
-          setUploadProgress({ current: i + 1, total: totalChunks });
-          await sleep(250);
+        // Enforce 500-record limit for ownership imports
+        const MAX_OWNERSHIP_RECORDS = 500;
+        if (rows.length > MAX_OWNERSHIP_RECORDS) {
+          setUploadStatus("error");
+          setUploadError(`Ownership imports are limited to ${MAX_OWNERSHIP_RECORDS} records. Your file contains ${rows.length} records. Please split into multiple files.`);
+          return;
         }
 
-        setUploadSummary({
-          total: rows.length,
-          imported,
-          skipped: skipped + rejected,
-          errors: allErrors,
-        });
-        setUploadStatus("success");
-        await loadDirectory();
+        // Show immediate feedback and close dialog
+        setUploadStatus("loading-background");
+        setUploadError("");
+        setUploadSummary(null);
+        setUploadProgress({ current: 0, total: 0 });
+
+        // Start import in background
+        startBackgroundOwnershipImport(rows, skipped);
         return;
       }
+
+      // Non-ownership imports: proceed with original blocking behavior
+      setUploadStatus("uploading");
+      setUploadError("");
+      setUploadSummary(null);
+      setUploadProgress({ current: 0, total: 0 });
 
       const form = new FormData();
       form.append("file", uploadFile);
       form.append("client", clientId);
+      form.append("asOfDate", uploadOwnershipAsOfDate);
       if (uploadType !== "ownership") {
         form.append("defaultKind", uploadKind);
       }
@@ -2204,8 +2263,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       const endpoint = uploadType === "ownership"
         ? "/api/import/ownerships-csv/upload"
         : uploadType === "details"
-        ? "/api/import/details-csv/upload"
-        : "/api/import/nodes-csv/upload";
+          ? "/api/import/details-csv/upload"
+          : "/api/import/nodes-csv/upload";
       const response = await fetch(`${apiBase}${endpoint}`, {
         method: "POST",
         headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -2312,11 +2371,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       // Built-in fields included in the details template
       const builtInCols = [
         { header: "Entity or Person's Name", helper: "[← Delete rows you don't need. Fill in the columns and upload.]" },
-        { header: "Address",       helper: "" },
+        { header: "Address", helper: "" },
         { header: "Primary Phone", helper: "" },
-        { header: "Cell Phone",    helper: "(People only)" },
-        { header: "e-Mail",        helper: "(People only)" },
-        { header: "Tax ID",        helper: "" },
+        { header: "Cell Phone", helper: "(People only)" },
+        { header: "e-Mail", helper: "(People only)" },
+        { header: "Tax ID", helper: "" },
       ];
 
       // Mirrors the server's normalizeHeader — strips punctuation, lowercases, collapses spaces.
@@ -2677,6 +2736,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           id,
           name: draft.name.trim(),
           kind: draft.kind,
+          asOfDate: asOfDate || todayIso,
           client: clientId,
           photo: draft.kind === "person" ? (draft.photo || "") : "",
           logo: draft.kind === "entity" ? (draft.logo || "") : "",
@@ -2701,6 +2761,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         const payload = {
           name: draft.name.trim(),
           kind: draft.kind,
+          asOfDate: asOfDate || todayIso,
           client: clientId,
           newId: newId !== rowKey ? newId : null,
           photo: draft.kind === "person" ? (draft.photo || "") : "",
@@ -2789,6 +2850,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       });
     }
   }, [
+    asOfDate,
     apiRequest,
     clientId,
     editNodeId,
@@ -2799,6 +2861,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     removeTableNewRow,
     tableDrafts,
     tableNewRows,
+    todayIso,
   ]);
 
   const pendingTableKeys = useMemo(() => {
@@ -3266,7 +3329,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         const node = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
         return active.every(([key, filter]) => {
           const col = colMap.get(key);
-          return col ? matchesTabularFilter(getNodeTabularValue(node, col, nodeList, relList), filter) : true;
+          return col ? matchesTabularFilter(getNodeTabularValue(node, col, nodeList, relList, asOfDate), filter) : true;
         });
       });
     }
@@ -3277,8 +3340,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         rows = [...rows].sort((a, b) => {
           const an = a.isNew ? a.node : (tableDrafts[a.key] || a.node);
           const bn = b.isNew ? b.node : (tableDrafts[b.key] || b.node);
-          const av = getNodeTabularValue(an, col, nodeList, relList);
-          const bv = getNodeTabularValue(bn, col, nodeList, relList);
+          const av = getNodeTabularValue(an, col, nodeList, relList, asOfDate);
+          const bv = getNodeTabularValue(bn, col, nodeList, relList, asOfDate);
           const aBlank = av == null || String(av).trim() === "";
           const bBlank = bv == null || String(bv).trim() === "";
           if (aBlank && bBlank) return 0;
@@ -3333,10 +3396,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   const activeTabularFilterCount = useMemo(() =>
     Object.values(tabularFilters).filter((f) => !isFilterEmpty(f)).length,
-  [tabularFilters]);
+    [tabularFilters]);
   const activeOwnershipTabularFilterCount = useMemo(() =>
     Object.values(ownershipTabularFilters).filter((f) => !isFilterEmpty(f)).length,
-  [ownershipTabularFilters]);
+    [ownershipTabularFilters]);
 
   const exportActiveTabularViewToExcel = useCallback(() => {
     const isOwnershipView = tabularSubMode === "ownerships";
@@ -3350,7 +3413,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       const values = visibleColumns.map((column) => {
         const raw = isOwnershipView
           ? getOwnershipTabularValue({ ...row.rel, ...(ownershipTableDrafts[row.key] || {}) }, nodeList, column)
-          : getNodeTabularValue(row.isNew ? row.node : (tableDrafts[row.key] || row.node), column, nodeList, relList);
+          : getNodeTabularValue(row.isNew ? row.node : (tableDrafts[row.key] || row.node), column, nodeList, relList, asOfDate);
         if (raw == null) return "";
         if (Array.isArray(raw)) return raw.join(", ");
         if (typeof raw === "object") return JSON.stringify(raw);
@@ -3390,8 +3453,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
     return visibleTabularColumns.map((column) => {
       const viewW = activeTabularView.columnWidths?.[column.key];
-      if (viewW > 0)                return Math.min(viewW, maxPx);
-      if (column.width)             return Math.min(column.width, maxPx);
+      if (viewW > 0) return Math.min(viewW, maxPx);
+      if (column.width) return Math.min(column.width, maxPx);
 
       const { filterType } = getColumnFilterConfig(column);
       const extraPad = filterType === "enum" ? SELECT_ARROW : 0;
@@ -3399,17 +3462,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       // Auto: start with header label width
       let maxW = 60; // minimum; header is excluded (it wraps)
 
-      // Measure every row's display value
-      for (const row of tableRows) {
-        const node = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
-        const val = String(getNodeTabularValue(node, column, nodeList, relList) ?? "");
+      // Measure every row's display value — use nodeList directly (not tableRows/tableDrafts)
+      // so that column widths are stable and don't shift when cell content changes at runtime.
+      for (const node of nodeList) {
+        const val = String(getNodeTabularValue(node, column, nodeList, relList, asOfDate) ?? "");
         const w = measureTextWidth(val, CELL_FONT) + CELL_PAD + extraPad;
         if (w > maxW) maxW = w;
       }
 
       return Math.min(Math.max(Math.ceil(maxW), 80), maxPx);
-    });  
-  }, [visibleTabularColumns, tableRows, tableDrafts, activeTabularView, nodeList, relList]);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleTabularColumns, activeTabularView, nodeList.length]);
 
   const ownershipTabularColumnWidths = useMemo(() => {
     const maxPx = (typeof window !== "undefined" ? window.innerWidth : 1280) * 0.4;
@@ -3419,8 +3483,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
     return visibleOwnershipTabularColumns.map((column) => {
       const viewW = activeOwnershipTabularView.columnWidths?.[column.key];
-      if (viewW > 0)                return Math.min(viewW, maxPx);
-      if (column.width)             return Math.min(column.width, maxPx);
+      if (viewW > 0) return Math.min(viewW, maxPx);
+      if (column.width) return Math.min(column.width, maxPx);
 
       const { filterType } = getColumnFilterConfig(column);
       const extraPad = filterType === "enum" ? SELECT_ARROW : 0;
@@ -3468,6 +3532,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         percent: parsedPercent.value,
         startDate: draft.startDate !== undefined ? (draft.startDate || null) : (original.startDate || null),
         endDate: draft.endDate !== undefined ? (draft.endDate || null) : (original.endDate || null),
+        asOfDate: asOfDate || todayIso,
         customFields: { ...(original.customFields || {}), ...(draft.customFields || {}) },
         client: clientId,
       };
@@ -3486,7 +3551,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     } finally {
       setOwnershipTableSavingKeys((prev) => { const next = new Set(prev); next.delete(relId); return next; });
     }
-  }, [apiRequest, clientId, ownerships, ownershipTableDrafts]);
+  }, [apiRequest, asOfDate, clientId, ownerships, ownershipTableDrafts, todayIso]);
 
   const pendingOwnershipKeys = useMemo(() => ownershipTableDirtyKeys, [ownershipTableDirtyKeys]);
 
@@ -3500,9 +3565,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   // ── Ownership tabular cell renderer ───────────────────────────────────────
   const renderOwnershipTabularCell = useCallback((column, { row, rowRel, isSaving, isDirty, rowError }) => {
     const draft = ownershipTableDrafts[row.key] || {};
-    const percent    = draft.percent    !== undefined ? draft.percent    : (rowRel.percent    ?? "");
-    const startDate  = draft.startDate  !== undefined ? draft.startDate  : (rowRel.startDate  || "");
-    const endDate    = draft.endDate    !== undefined ? draft.endDate    : (rowRel.endDate    || "");
+    const percent = draft.percent !== undefined ? draft.percent : (rowRel.percent ?? "");
+    const startDate = draft.startDate !== undefined ? draft.startDate : (rowRel.startDate || "");
+    const endDate = draft.endDate !== undefined ? draft.endDate : (rowRel.endDate || "");
     const customFields = { ...(rowRel.customFields || {}), ...(draft.customFields || {}) };
     const ownerNode = nodeList.find((n) => n.id === rowRel.from);
     const ownedNode = nodeList.find((n) => n.id === rowRel.to);
@@ -3845,7 +3910,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             if (!applicable) {
               return <td key={`${row.key}-${field.fieldId}`} className="tabular-na">-</td>;
             }
-            const virtualValue = getEntityOwnershipSummary(rowNode, nodeList, relList);
+            const virtualValue = getEntityOwnershipSummary(rowNode, nodeList, relList, asOfDate);
             return (
               <td key={`${row.key}-${field.fieldId}`} className="tabular-cell-wrap" title={virtualValue || ""}>
                 {virtualValue || ""}
@@ -3948,7 +4013,17 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   const makeRelId = () => `rel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  const openOwnerEditor = (targetId) => {
+  const openOwnerEditor = async (targetId) => {
+    // Fetch ownership timeline from server
+    try {
+      const timelineResp = await apiRequest(`/api/ownership/history/${encodeURIComponent(targetId)}`);
+      setOwnershipTimeline(timelineResp.periods || []);
+    } catch (err) {
+      console.error("Failed to fetch ownership timeline:", err);
+      setOwnershipTimeline([]);
+    }
+
+    // Find the period that's current as of asOfDate
     const currentOwners = getOwnersOf(relList, targetId).map((item) => {
       const node = getNode(nodeList, item.nodeId);
       return {
@@ -3960,16 +4035,36 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         isNew: false,
       };
     });
+
+    // Capture the effective date range from the first ownership record
+    const firstOwnership = getOwnersOf(relList, targetId)[0];
+    const dateRange = {
+      from: firstOwnership?.rel?.effectiveFrom || null,
+      to: firstOwnership?.rel?.effectiveTo || null,
+      isCurrent: !firstOwnership?.rel?.effectiveTo, // No end date = current
+    };
+
     setOwnerEditorRows(currentOwners);
     setOwnerEditorOriginal(currentOwners);
+    setOwnerEditorDateRange(dateRange);
+    setOwnerEditorMode("view"); // Start in view mode
+    setOwnershipSelectedPeriodSetId(firstOwnership?.rel?.setId || null);
+    setOwnershipDeleteConfirm(false); // Reset delete confirmation
     setOwnerSearch("");
     setOwnerSearchOpen(false);
+    setOwnerEditorEffectiveDate("");
     setOpenDialog({ type: "edit-owners", targetId });
   };
 
   const saveOwnerEditor = async () => {
     const targetId = openDialog?.targetId;
     if (!targetId) return;
+    const effectiveAsOf = normalizeDateInput(ownerEditorEffectiveDate);
+    if (!effectiveAsOf) {
+      setRemoteStatus("error");
+      setRemoteError("Effective as of date is required.");
+      return;
+    }
 
     const hasOutOfRangePercent = ownerEditorRows.some((r) => {
       if (r.percent === "") return false;
@@ -3985,67 +4080,133 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
     setIsSavingOwners(true);
     try {
-      const removedRows = ownerEditorOriginal.filter(
-        (orig) => !ownerEditorRows.find((r) => r.nodeId === orig.nodeId)
-      );
-      for (const row of removedRows) {
-        await apiRequest("/api/relationships/owns", {
-          method: "DELETE",
-          body: JSON.stringify({ from: row.nodeId, to: targetId, client: clientId }),
-        });
-      }
-      const changedRows = ownerEditorRows.filter((row) => {
-        if (row.isNew) return false;
-        const orig = ownerEditorOriginal.find((o) => o.nodeId === row.nodeId);
-        return orig && String(row.percent) !== String(orig.percent);
-      });
-      for (const row of changedRows) {
-        await apiRequest("/api/relationships/owns", {
+      const ownerData = ownerEditorRows.map((row) => ({
+        from: row.nodeId,
+        percent: row.percent !== "" ? Number(row.percent) : null,
+      }));
+
+      // Use different endpoint based on mode
+      if (ownerEditorMode === "edit-existing") {
+        // Update existing period: change date and/or owners
+        await apiRequest("/api/ownership/update-period", {
           method: "PUT",
           body: JSON.stringify({
-            from: row.nodeId, to: targetId,
-            percent: row.percent !== "" ? Number(row.percent) : null,
-            startDate: row.startDate || null, endDate: row.endDate || null,
+            to: targetId,
+            setId: ownershipSelectedPeriodSetId,
+            newEffectiveFrom: effectiveAsOf,
+            owners: ownerData,
             client: clientId,
           }),
         });
-      }
-      for (const row of ownerEditorRows.filter((r) => r.isNew)) {
-        await apiRequest("/api/relationships/owns", {
-          method: "POST",
+      } else {
+        // Create new period
+        await apiRequest("/api/ownership/sets", {
+          method: "PUT",
           body: JSON.stringify({
-            from: row.nodeId, to: targetId,
-            percent: row.percent !== "" ? Number(row.percent) : null,
-            startDate: row.startDate || null, endDate: row.endDate || null,
+            to: targetId,
+            asOfDate: effectiveAsOf,
+            owners: ownerData,
             client: clientId,
           }),
         });
       }
-      setRelList((prev) => {
-        let next = [...prev];
-        for (const row of removedRows) {
-          next = next.filter((r) => !(r.type === "owns" && r.from === row.nodeId && r.to === targetId));
-        }
-        for (const row of changedRows) {
-          const idx = next.findIndex((r) => r.type === "owns" && r.from === row.nodeId && r.to === targetId);
-          if (idx !== -1) next[idx] = { ...next[idx], percent: row.percent !== "" ? Number(row.percent) : null };
-        }
-        for (const row of ownerEditorRows.filter((r) => r.isNew)) {
-          next.push({
-            id: makeRelId(), type: "owns", from: row.nodeId, to: targetId,
-            percent: row.percent !== "" ? Number(row.percent) : null,
-            startDate: row.startDate || null, endDate: row.endDate || null
+
+      // Reload directory data
+      await loadDirectory();
+
+      // Reload the ownership timeline for this entity
+      try {
+        const timelineResp = await apiRequest(`/api/ownership/history/${encodeURIComponent(targetId)}`);
+        setOwnershipTimeline(timelineResp.periods || []);
+
+        // Find and reload the period we just saved/updated
+        const updatedPeriod = timelineResp.periods?.find((p) => p.setId === ownershipSelectedPeriodSetId);
+        if (updatedPeriod) {
+          const refreshedRows = updatedPeriod.owners.map((o) => {
+            const node = getNode(nodeList, o.from);
+            return {
+              nodeId: o.from,
+              name: node?.name ?? o.from,
+              percent: String(o.percent),
+              startDate: "",
+              endDate: "",
+              isNew: false,
+            };
+          });
+          setOwnerEditorRows(refreshedRows);
+          setOwnerEditorOriginal(refreshedRows);
+          setOwnerEditorDateRange({
+            from: updatedPeriod.effectiveFrom,
+            to: updatedPeriod.effectiveTo,
+            isCurrent: !updatedPeriod.effectiveTo,
           });
         }
-        return next;
-      });
-      setRemoteStatus("connected");
-      if (prevDialog) {
-        setOpenDialog(prevDialog);
-        setPrevDialog(null);
-      } else {
-        setOpenDialog(null);
+      } catch (err) {
+        console.error("Failed to reload ownership timeline:", err);
       }
+
+      // Return to view mode instead of closing
+      setOwnerEditorMode("view");
+      setOwnerEditorEffectiveDate("");
+      setRemoteStatus("connected");
+    } catch (err) {
+      setRemoteStatus("error");
+      setRemoteError(err.message);
+    } finally {
+      setIsSavingOwners(false);
+    }
+  };
+
+  const deleteOwnershipGroup = async () => {
+    const targetId = openDialog?.targetId;
+    if (!targetId || !ownershipSelectedPeriodSetId) return;
+
+    setIsSavingOwners(true);
+    try {
+      await apiRequest(`/api/ownership/group/${encodeURIComponent(targetId)}/${encodeURIComponent(ownershipSelectedPeriodSetId)}`, {
+        method: "DELETE",
+      });
+
+      // Reload directory data
+      await loadDirectory();
+
+      // Reload the ownership timeline for this entity
+      try {
+        const timelineResp = await apiRequest(`/api/ownership/history/${encodeURIComponent(targetId)}`);
+        setOwnershipTimeline(timelineResp.periods || []);
+
+        // If there are other periods, display the first one; otherwise close dialog
+        if (timelineResp.periods && timelineResp.periods.length > 0) {
+          const newPeriod = timelineResp.periods[0];
+          const newRows = newPeriod.owners.map((o) => {
+            const node = getNode(nodeList, o.from);
+            return {
+              nodeId: o.from,
+              name: node?.name ?? o.from,
+              percent: String(o.percent),
+              startDate: "",
+              endDate: "",
+              isNew: false,
+            };
+          });
+          setOwnershipSelectedPeriodSetId(newPeriod.setId);
+          setOwnerEditorRows(newRows);
+          setOwnerEditorOriginal(newRows);
+          setOwnerEditorDateRange({
+            from: newPeriod.effectiveFrom,
+            to: newPeriod.effectiveTo,
+            isCurrent: !newPeriod.effectiveTo,
+          });
+        } else {
+          // No ownership groups left, close the dialog
+          setOpenDialog(null);
+        }
+      } catch (err) {
+        console.error("Failed to reload ownership timeline:", err);
+      }
+
+      setOwnershipDeleteConfirm(false);
+      setRemoteStatus("connected");
     } catch (err) {
       setRemoteStatus("error");
       setRemoteError(err.message);
@@ -4061,7 +4222,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     try {
       const created = await apiRequest("/api/nodes", {
         method: "POST",
-        body: JSON.stringify({ name, kind, client: clientId }),
+        body: JSON.stringify({ name, kind, asOfDate: asOfDate || todayIso, client: clientId }),
       });
       setNodeList((prev) => [...prev, created]);
       setOwnerEditorRows((prev) => [
@@ -4096,6 +4257,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         taxId: node.taxId || "",
         customFields: node.customFields || {},
       });
+      setEditNodeEffectiveDate("");
+      
+      // For entities, fetch ownership timeline to show in the ownership records field
+      if (node.kind === "entity") {
+        apiRequest(`/api/ownership/history/${encodeURIComponent(node.id)}`)
+          .then((resp) => setEditNodeOwnershipTimeline(resp.periods || []))
+          .catch(() => setEditNodeOwnershipTimeline([]));
+      } else {
+        setEditNodeOwnershipTimeline([]);
+      }
     }
   }, [editNodeId, nodeList]);
 
@@ -4434,7 +4605,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
     const target = e.target;
     if (target instanceof Element) {
-      const interactiveSelector = "button, input, textarea, select, a, label, [role=\"button\"], .oc-minimap, .oc-minimap *";
+      const interactiveSelector = "button, input, textarea, select, a, label, [role=\"button\"], .oc-minimap, .oc-minimap *, [data-hv-node-id]";
       if (target.closest(interactiveSelector)) return;
     }
 
@@ -4731,85 +4902,332 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         <div className="home-anim-overlay" style={{ transformOrigin: homeAnimOrigin }} />
       )}
       <div className="app-header">
-        <div style={{ maxWidth: "90%", margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <button
-              type="button"
-              aria-label="Go home"
-              title="Home"
-              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", lineHeight: 0 }}
-              onClick={() => {
-                if (homeScreen) {
-                  restoreHomeScreen(homeScreen);
-                } else {
-                  setViewMode("hierarchy");
-                }
-              }}
-            >
-              <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 50, width: "auto", margin: "-10px", borderRadius: "25px" }} />
-            </button>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 15, fontWeight: 600, color: "#1a1a2e" }}>{clientDisplayName || toSentenceCase(clientId)}</div>
-              <div style={{ fontSize: 13, color: "#64748b" }}>Entity Dashboard</div>
+        <div style={{ maxWidth: "90%", margin: "0 auto", display: "flex", flexDirection: "column", gap: 8 }}>
+          {/* TOP ROW: Logo + Client Name | View Selector + Date + Settings */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 20 }}>
+            {/* LEFT ZONE: Logo + Client Name */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+              <button
+                type="button"
+                aria-label="Go home"
+                title="Home"
+                style={{ background: "none", border: "none", padding: 0, cursor: "pointer", lineHeight: 0 }}
+                onClick={() => {
+                  if (homeScreen) {
+                    restoreHomeScreen(homeScreen);
+                  } else {
+                    setViewMode("hierarchy");
+                  }
+                }}
+              >
+                <img src="/emplus-logo.png" alt="EMPlus" style={{ height: 40, width: "auto", borderRadius: "20px" }} />
+              </button>
+              <div style={{ fontSize: 16, fontWeight: 600, color: "#1a1a2e" }}>
+                {clientDisplayName || toSentenceCase(clientId)}
+              </div>
             </div>
-            <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid #cbd5e1" }}>
-            <button
-              type="button"
-              aria-label="Hierarchy view"
-              title="Hierarchy"
-              onClick={() => setViewMode("hierarchy")}
-              style={{
-                display: "flex", alignItems: "center", gap: 5, padding: "5px 12px",
-                fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
-                borderRight: "1px solid #cbd5e1",
-                background: viewMode === "hierarchy" ? "#1e293b" : "#fff",
-                color: viewMode === "hierarchy" ? "#fff" : "#475569",
-              }}
-            >
-              <GitFork size={14} /> Hierarchy
-            </button>
-            <button
-              type="button"
-              aria-label="Directory view"
-              title="Directory"
-              onClick={() => setViewMode("directory")}
-              style={{
-                display: "flex", alignItems: "center", gap: 5, padding: "5px 12px",
-                fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
-                borderRight: "1px solid #cbd5e1",
-                background: viewMode === "directory" ? "#1e293b" : "#fff",
-                color: viewMode === "directory" ? "#fff" : "#475569",
-              }}
-            >
-              <LayoutList size={14} /> Directory
-            </button>
-            <button
-              type="button"
-              aria-label="Tabular view"
-              title="Tabular"
-              onClick={() => setViewMode("tabular")}
-              style={{
-                display: "flex", alignItems: "center", gap: 5, padding: "5px 12px",
-                fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
-                background: viewMode === "tabular" ? "#1e293b" : "#fff",
-                color: viewMode === "tabular" ? "#fff" : "#475569",
-              }}
-            >
-              <BookOpen size={14} /> Tabular
-            </button>
+
+            {/* RIGHT ZONE: View Selector + Date + Settings */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+              {/* View Dropdown */}
+              <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+                <select
+                  value={viewMode}
+                  onChange={(e) => setViewMode(e.target.value)}
+                  style={{
+                    padding: "6px 12px",
+                    fontSize: 13,
+                    fontWeight: 500,
+                    border: "1px solid #cbd5e1",
+                    borderRadius: 6,
+                    background: "#fff",
+                    color: "#475569",
+                    cursor: "pointer",
+                    appearance: "none",
+                    paddingRight: 28,
+                  }}
+                >
+                  <option value="hierarchy">Hierarchy</option>
+                  <option value="directory">Directory</option>
+                  <option value="tabular">Tabular</option>
+                </select>
+                <span style={{ position: "absolute", right: 8, pointerEvents: "none", color: "#6b7280" }}>
+                  ▼
+                </span>
+              </div>
+
+              {/* As of Date — always visible */}
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 12, color: "#6b7280", whiteSpace: "nowrap" }}>As of</span>
+                  <input
+                    type="date"
+                    value={asOfDate}
+                    max={todayIso}
+                    onChange={(e) => setAsOfDate(e.target.value)}
+                    style={{
+                      border: "1px solid #cbd5e1",
+                      borderRadius: 6,
+                      padding: "4px 8px",
+                      fontSize: 12,
+                      color: "#1f2937",
+                      background: "#fff",
+                    }}
+                  />
+                  {asOfDate && (
+                    <button
+                      type="button"
+                      onClick={() => setAsOfDate("")}
+                      style={{
+                        border: "1px solid #cbd5e1",
+                        borderRadius: 6,
+                        padding: "3px 8px",
+                        fontSize: 11,
+                        cursor: "pointer",
+                        background: "#fff",
+                        color: "#475569",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      Current
+                    </button>
+                  )}
+                </div>
+
+              {/* Settings Gear */}
+              <div className="settings-anchor" ref={settingsRef}>
+                <Button
+                  ref={homeButtonRef}
+                  type="button"
+                  variant="outline"
+                  className="btn-icon"
+                  aria-label="Settings"
+                  onClick={() => setSettingsOpen((prev) => !prev)}
+                >
+                  <Settings size={18} />
+                </Button>
+                {settingsOpen && (
+                  <div className="settings-menu">
+                    <button
+                      className="settings-menu-item"
+                      onClick={() => {
+                        const screen = captureHomeScreen();
+                        setHomeScreen(screen);
+                        try { localStorage.setItem("homeScreen", JSON.stringify(screen)); } catch { }
+                        // Persist to user record so it survives across sessions/devices
+                        apiRequest("/api/auth/me", {
+                          method: "PATCH",
+                          body: JSON.stringify({
+                            homeScreen: screen,
+                            ...getTabularPrefsPayload(),
+                          }),
+                        }).catch((err) => {
+                          setRemoteStatus("error");
+                          setRemoteError(err.message || "Unable to save home screen.");
+                        });
+                        const rect = homeButtonRef.current?.getBoundingClientRect();
+                        const ox = rect ? `${Math.round(rect.left + rect.width / 2)}px` : "90vw";
+                        const oy = rect ? `${Math.round(rect.top + rect.height / 2)}px` : "40px";
+                        setHomeAnimOrigin(`${ox} ${oy}`);
+                        setHomeAnimating(true);
+                        setTimeout(() => setHomeAnimating(false), 650);
+                        setSettingsOpen(false);
+                      }}
+                    >
+                      <Home size={15} />
+                      Set as Home
+                    </button>
+                    <button
+                      className="settings-menu-item"
+                      onClick={() => {
+                        setUploadOpen(true);
+                        setUploadStatus("idle");
+                        setUploadError("");
+                        setUploadSummary(null);
+                        setUploadFile(null);
+                        setUploadDetected("");
+                        setUploadPreview(null);
+                        setUploadPreviewLoading(false);
+                        setSettingsOpen(false);
+                      }}
+                    >
+                      <Upload size={15} />
+                      Import CSV
+                    </button>
+                    <button
+                      className="settings-menu-item"
+                      onClick={async () => {
+                        setSettingsOpen(false);
+                        if (!exportReportsLoaded) {
+                          try {
+                            const data = await apiRequest(`/api/export-reports?client=${encodeURIComponent(clientId)}`);
+                            setExportReports(Array.isArray(data) ? data : []);
+                          } catch {
+                            setExportReports([]);
+                          }
+                          setExportReportsLoaded(true);
+                        }
+                        setExportOpen(true);
+                      }}
+                    >
+                      <Download size={15} />
+                      Export Database
+                    </button>
+                    <button
+                      className="settings-menu-item"
+                      onClick={() => {
+                        setSettingsOpen(false);
+                        loadDataDictionary();
+                        setOpenDialog({ type: "data-dictionary" });
+                      }}
+                    >
+                      <BookOpen size={15} />
+                      Data Dictionary
+                    </button>
+                    <button
+                      className="settings-menu-item"
+                      onClick={async () => {
+                        setSettingsOpen(false);
+                        try {
+                          const data = await apiRequest("/api/auth/me");
+                          setAccountInfoDraft({
+                            name: data.name || "",
+                            email: data.email || "",
+                            cellPhone: data.cellPhone || "",
+                            workPhone: data.workPhone || "",
+                          });
+                        } catch {
+                          setAccountInfoDraft({ name: "", email: "", cellPhone: "", workPhone: "" });
+                        }
+                        setAccountInfoError("");
+                        setAccountInfoOpen(true);
+                      }}
+                    >
+                      <User size={15} />
+                      Account Info
+                    </button>
+                    {myRole === "admin" && (
+                      <button
+                        className="settings-menu-item"
+                        onClick={async () => {
+                          setSettingsOpen(false);
+                          try {
+                            const data = await apiRequest("/api/client");
+                            setClientInfoDraft({
+                              clientName: data.clientName || "",
+                              address: data.address || "",
+                              billingContact: data.billingContact || "",
+                              billingEmail: data.billingEmail || "",
+                              billingPhone: data.billingPhone || "",
+                              notes: data.notes || "",
+                            });
+                          } catch {
+                            setClientInfoDraft({ clientName: "", address: "", billingContact: "", billingEmail: "", billingPhone: "", notes: "" });
+                          }
+                          setClientInfoError("");
+                          setClientInfoOpen(true);
+                        }}
+                      >
+                        <Building2 size={15} />
+                        Client Info
+                      </button>
+                    )}
+                    {myRole === "admin" && (
+                      <button
+                        className="settings-menu-item"
+                        onClick={async () => {
+                          setSettingsOpen(false);
+                          setAddUserDraft({ loginId: "", password: "", confirm: "" });
+                          setAddUserError("");
+                          setAddUserSuccess("");
+                          setManageUsersError("");
+                          setManageUsersOpen(true);
+                          setManageUsersLoading(true);
+                          try {
+                            const data = await apiRequest("/api/auth/users");
+                            setManageUsersList(Array.isArray(data) ? data : []);
+                          } catch (err) {
+                            setManageUsersError(err.message);
+                          } finally {
+                            setManageUsersLoading(false);
+                          }
+                        }}
+                      >
+                        <UserPlus size={15} />
+                        Manage Users
+                      </button>
+                    )}
+                    {myRole === "admin" && (
+                      <button
+                        className="settings-menu-item"
+                        onClick={() => {
+                          setSettingsOpen(false);
+                          setCloneClientDraft("");
+                          setCloneClientError("");
+                          setCloneClientResult(null);
+                          setCloneClientOpen(true);
+                        }}
+                      >
+                        <GitFork size={15} />
+                        Clone this client
+                      </button>
+                    )}
+                    <div className="settings-menu-divider" />
+                    <button
+                      className="settings-menu-item"
+                      onClick={async () => {
+                        setSettingsOpen(false);
+                        setServerInfoData(null);
+                        setServerInfoOpen(true);
+                        setServerInfoBusy(true);
+                        try {
+                          const data = await apiRequest("/api/health");
+                          setServerInfoData(data);
+                        } catch (err) {
+                          setServerInfoData({ error: err.message });
+                        } finally {
+                          setServerInfoBusy(false);
+                        }
+                      }}
+                    >
+                      <Settings size={15} />
+                      Server Info
+                    </button>
+                    <button
+                      className="settings-menu-item"
+                      onClick={() => {
+                        setShowStats(!showStats);
+                        setSettingsOpen(false);
+                      }}
+                    >
+                      <LayoutList size={15} />
+                      {showStats ? "Hide" : "Show"} Statistics
+                    </button>
+                    <div className="settings-menu-divider" />
+                    <button
+                      className="settings-menu-item settings-menu-item--danger"
+                      onClick={() => { setSettingsOpen(false); if (onSignOut) onSignOut(); }}
+                    >
+                      <LogOut size={15} />
+                      Sign out
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+            {/* end RIGHT ZONE */}
           </div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div className="quick-find quick-find--header-right" ref={quickFindRef}>
-              <div className="quick-find-input-wrap">
-                <Search size={14} className="quick-find-icon" />
+          {/* end TOP ROW */}
+
+          {/* SEARCH ROW */}
+          <div style={{ display: "flex", alignItems: "center", width: "100%" }}>
+            <div className="quick-find" ref={quickFindRef} style={{ width: "100%", maxWidth: "none", border: "none", background: "transparent", minHeight: "auto", padding: 0 }}>
+              <div className="quick-find-input-wrap" style={{ border: "none", background: "transparent", padding: 0 }}>
+                <Search size={14} className="quick-find-icon" style={{ color: "#6b7280" }} />
                 <input
                   ref={quickFindInputRef}
                   type="text"
                   className="quick-find-input"
-                  style={{ border: "none", fontSize: 16 }}
+                  style={{ border: "none", fontSize: 14, background: "transparent", color: "#1f2937", padding: 0 }}
                   placeholder="Lightning search..."
                   value={quickFindQuery}
                   onChange={(e) => {
@@ -4848,7 +5266,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 />
               </div>
               {quickFindOpen && (
-                <div className="quick-find-menu">
+                <div className="quick-find-menu" style={{ left: 0, right: "auto" }}>
                   {quickFindMatches.length === 0 ? (
                     <div className="quick-find-empty">No matches. Keep typing...</div>
                   ) : (
@@ -4868,250 +5286,42 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 </div>
               )}
             </div>
-            <div className="settings-anchor" ref={settingsRef}>
-              <Button
-                ref={homeButtonRef}
-                type="button"
-                variant="outline"
-                className="btn-icon"
-                aria-label="Settings"
-                onClick={() => setSettingsOpen((prev) => !prev)}
-              >
-                <Settings size={18} />
-              </Button>
-              {settingsOpen && (
-                <div className="settings-menu">
-                  <button
-                    className="settings-menu-item"
-                    onClick={() => {
-                      const screen = captureHomeScreen();
-                      setHomeScreen(screen);
-                      try { localStorage.setItem("homeScreen", JSON.stringify(screen)); } catch { }
-                      // Persist to user record so it survives across sessions/devices
-                      apiRequest("/api/auth/me", {
-                        method: "PATCH",
-                        body: JSON.stringify({
-                          homeScreen: screen,
-                          ...getTabularPrefsPayload(),
-                        }),
-                      }).catch((err) => {
-                        setRemoteStatus("error");
-                        setRemoteError(err.message || "Unable to save home screen.");
-                      });
-                      const rect = homeButtonRef.current?.getBoundingClientRect();
-                      const ox = rect ? `${Math.round(rect.left + rect.width / 2)}px` : "90vw";
-                      const oy = rect ? `${Math.round(rect.top + rect.height / 2)}px` : "40px";
-                      setHomeAnimOrigin(`${ox} ${oy}`);
-                      setHomeAnimating(true);
-                      setTimeout(() => setHomeAnimating(false), 650);
-                      setSettingsOpen(false);
-                    }}
-                  >
-                    <Home size={15} />
-                    Set as Home
-                  </button>
-                  <button
-                    className="settings-menu-item"
-                    onClick={() => {
-                      setUploadOpen(true);
-                      setUploadStatus("idle");
-                      setUploadError("");
-                      setUploadSummary(null);
-                      setUploadFile(null);
-                      setUploadDetected("");
-                      setUploadPreview(null);
-                      setUploadPreviewLoading(false);
-                      setSettingsOpen(false);
-                    }}
-                  >
-                    <Upload size={15} />
-                    Import CSV
-                  </button>
-                  <button
-                    className="settings-menu-item"
-                    onClick={async () => {
-                      setSettingsOpen(false);
-                      if (!exportReportsLoaded) {
-                        try {
-                          const data = await apiRequest(`/api/export-reports?client=${encodeURIComponent(clientId)}`);
-                          setExportReports(Array.isArray(data) ? data : []);
-                        } catch {
-                          setExportReports([]);
-                        }
-                        setExportReportsLoaded(true);
-                      }
-                      setExportOpen(true);
-                    }}
-                  >
-                    <Download size={15} />
-                    Export Database
-                  </button>
-                  <button
-                    className="settings-menu-item"
-                    onClick={() => {
-                      setSettingsOpen(false);
-                      loadDataDictionary();
-                      setOpenDialog({ type: "data-dictionary" });
-                    }}
-                  >
-                    <BookOpen size={15} />
-                    Data Dictionary
-                  </button>
-                  <button
-                    className="settings-menu-item"
-                    onClick={async () => {
-                      setSettingsOpen(false);
-                      try {
-                        const data = await apiRequest("/api/auth/me");
-                        setAccountInfoDraft({
-                          name: data.name || "",
-                          email: data.email || "",
-                          cellPhone: data.cellPhone || "",
-                          workPhone: data.workPhone || "",
-                        });
-                      } catch {
-                        setAccountInfoDraft({ name: "", email: "", cellPhone: "", workPhone: "" });
-                      }
-                      setAccountInfoError("");
-                      setAccountInfoOpen(true);
-                    }}
-                  >
-                    <User size={15} />
-                    Account Info
-                  </button>
-                  {myRole === "admin" && (
-                    <button
-                      className="settings-menu-item"
-                      onClick={async () => {
-                        setSettingsOpen(false);
-                        try {
-                          const data = await apiRequest("/api/client");
-                          setClientInfoDraft({
-                            clientName: data.clientName || "",
-                            address: data.address || "",
-                            billingContact: data.billingContact || "",
-                            billingEmail: data.billingEmail || "",
-                            billingPhone: data.billingPhone || "",
-                            notes: data.notes || "",
-                          });
-                        } catch {
-                          setClientInfoDraft({ clientName: "", address: "", billingContact: "", billingEmail: "", billingPhone: "", notes: "" });
-                        }
-                        setClientInfoError("");
-                        setClientInfoOpen(true);
-                      }}
-                    >
-                      <Building2 size={15} />
-                      Client Info
-                    </button>
-                  )}
-                  {myRole === "admin" && (
-                    <button
-                      className="settings-menu-item"
-                      onClick={async () => {
-                        setSettingsOpen(false);
-                        setAddUserDraft({ loginId: "", password: "", confirm: "" });
-                        setAddUserError("");
-                        setAddUserSuccess("");
-                        setManageUsersError("");
-                        setManageUsersOpen(true);
-                        setManageUsersLoading(true);
-                        try {
-                          const data = await apiRequest("/api/auth/users");
-                          setManageUsersList(Array.isArray(data) ? data : []);
-                        } catch (err) {
-                          setManageUsersError(err.message);
-                        } finally {
-                          setManageUsersLoading(false);
-                        }
-                      }}
-                    >
-                      <UserPlus size={15} />
-                      Manage Users
-                    </button>
-                  )}
-                  {myRole === "admin" && (
-                    <button
-                      className="settings-menu-item"
-                      onClick={() => {
-                        setSettingsOpen(false);
-                        setCloneClientDraft("");
-                        setCloneClientError("");
-                        setCloneClientResult(null);
-                        setCloneClientOpen(true);
-                      }}
-                    >
-                      <GitFork size={15} />
-                      Clone this client
-                    </button>
-                  )}
-                  <div className="settings-menu-divider" />
-                  <button
-                    className="settings-menu-item"
-                    onClick={async () => {
-                      setSettingsOpen(false);
-                      setServerInfoData(null);
-                      setServerInfoOpen(true);
-                      setServerInfoBusy(true);
-                      try {
-                        const data = await apiRequest("/api/health");
-                        setServerInfoData(data);
-                      } catch (err) {
-                        setServerInfoData({ error: err.message });
-                      } finally {
-                        setServerInfoBusy(false);
-                      }
-                    }}
-                  >
-                    <Settings size={15} />
-                    Server Info
-                  </button>
-                  <div className="settings-menu-divider" />
-                  <button
-                    className="settings-menu-item settings-menu-item--danger"
-                    onClick={() => { setSettingsOpen(false); if (onSignOut) onSignOut(); }}
-                  >
-                    <LogOut size={15} />
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
           </div>
+
         </div>{/* end maxWidth wrapper */}
       </div>{/* end app-header */}
 
-        {exitPromptOpen && (
-          <div
-            style={{
-              position: "fixed",
-              top: 60,
-              left: 12,
-              zIndex: 1400,
-              background: "#fff",
-              border: "1px solid #fca5a5",
-              borderRadius: 10,
-              boxShadow: "0 8px 24px rgba(15, 23, 42, 0.18)",
-              padding: "10px 12px",
-              minWidth: 280,
-            }}
-          >
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b", marginBottom: 8 }}>
-              Leave EMPlus?
-            </div>
-            <div style={{ fontSize: 12, color: "#7f1d1d", marginBottom: 10 }}>
-              Are you trying to exit EMPlus?
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Button type="button" variant="outline" onClick={handleExitPromptExit}>
-                Exit
-              </Button>
-              <Button type="button" onClick={handleExitPromptReturn}>
-                Return to EMPlus
-              </Button>
-            </div>
+      {exitPromptOpen && (
+        <div
+          style={{
+            position: "fixed",
+            top: 60,
+            left: 12,
+            zIndex: 1400,
+            background: "#fff",
+            border: "1px solid #fca5a5",
+            borderRadius: 10,
+            boxShadow: "0 8px 24px rgba(15, 23, 42, 0.18)",
+            padding: "10px 12px",
+            minWidth: 280,
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#991b1b", marginBottom: 8 }}>
+            Leave EMPlus?
           </div>
-        )}
+          <div style={{ fontSize: 12, color: "#7f1d1d", marginBottom: 10 }}>
+            Are you trying to exit EMPlus?
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <Button type="button" variant="outline" onClick={handleExitPromptExit}>
+              Exit
+            </Button>
+            <Button type="button" onClick={handleExitPromptReturn}>
+              Return to EMPlus
+            </Button>
+          </div>
+        </div>
+      )}
 
       <div className="app-content">
 
@@ -5126,7 +5336,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               <div style={{ display: "grid", gap: 12 }}>
                 <div>
                   <Label>Import type</Label>
-                  <div style={{ display: "flex", gap: 20, marginTop: 8, flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 5, flexDirection: "column", marginTop: 8, flexWrap: "wrap" }}>
                     {[
                       { value: "entity", label: "Entities" },
                       { value: "person", label: "Persons" },
@@ -5158,6 +5368,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   <Label htmlFor="csv-upload">File</Label>
                   <Input
                     id="csv-upload"
+                    style={{ width: "90%" }}
                     type="file"
                     accept=".csv,.xlsx,.xls,text/csv"
                     onChange={(event) => {
@@ -5185,6 +5396,19 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         if (detected.type === "entity") setUploadKind("entity");
                       };
                       reader.readAsText(file);
+                    }}
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="ownership-import-as-of">Effective as of</Label>
+                  <Input
+                    id="ownership-import-as-of"
+                    style={{ width: "80%" }}
+                    type="date"
+                    value={uploadOwnershipAsOfDate}
+                    onChange={(event) => {
+                      setUploadOwnershipAsOfDate(event.target.value);
+                      setUploadError("");
                     }}
                   />
                 </div>
@@ -5243,6 +5467,30 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       : "Uploading..."}
                   </div>
                 )}
+                {uploadStatus === "loading-background" && (
+                  <div style={{ color: "#1f2937", fontSize: 14, padding: "12px 0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ 
+                        width: 20, 
+                        height: 20, 
+                        border: "3px solid #e5e7eb", 
+                        borderTop: "3px solid #3b82f6", 
+                        borderRadius: "50%", 
+                        animation: "spin 1s linear infinite"
+                      }} />
+                      <span>
+                        <strong>Loading {uploadFile?.name || "file"} in the background...</strong><br/>
+                        <span style={{ fontSize: 12, color: "#6b7280" }}>We'll notify you when complete. You can close this dialog.</span>
+                      </span>
+                    </div>
+                    <style>{`
+                      @keyframes spin {
+                        from { transform: rotate(0deg); }
+                        to { transform: rotate(360deg); }
+                      }
+                    `}</style>
+                  </div>
+                )}
                 {uploadStatus === "error" && uploadError && (
                   <div style={{ color: "#dc2626", fontSize: 14 }}>{uploadError}</div>
                 )}
@@ -5261,6 +5509,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         </div>
                       ))}
                     </div>
+                  </div>
+                )}
+                {!normalizeDateInput(uploadOwnershipAsOfDate) && (
+                  <div style={{ color: "#dc2626", fontSize: 13 }}>
+                    Effective as of date is required before importing rows.
                   </div>
                 )}
               </div>
@@ -5305,7 +5558,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               </div>
             )}
 
-            <DialogFooter>
+            <DialogFooter style={{ marginTop: "36px" }}>
               {uploadStatus === "success" ? (
                 <Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>
                   Close
@@ -5316,7 +5569,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     type="button"
                     variant="outline"
                     onClick={() => { setUploadPreview(null); setUploadStatus("idle"); setUploadError(""); }}
-                    disabled={uploadStatus === "uploading"}
+                    disabled={uploadStatus === "uploading" || uploadStatus === "loading-background"}
                   >
                     Back
                   </Button>
@@ -5325,13 +5578,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     onClick={handleUploadCsv}
                     disabled={
                       uploadStatus === "uploading" ||
+                      uploadStatus === "loading-background" ||
                       uploadPreview.total === 0 ||
-                      (uploadType === "ownership" && !ownershipPreviewValidation.valid)
+                      ((uploadType === "ownership" && !ownershipPreviewValidation.valid) || !normalizeDateInput(uploadOwnershipAsOfDate))
                     }
                   >
                     {uploadStatus === "uploading"
                       ? <><Loader2 size={14} className="animate-spin" style={{ marginRight: 6 }} />Importing…</>
-                      : `Import ${uploadPreview.total} row${uploadPreview.total !== 1 ? "s" : ""}`}
+                      : uploadStatus === "loading-background"
+                        ? <><Loader2 size={14} className="animate-spin" style={{ marginRight: 6 }} />Loading in background…</>
+                        : `Import ${uploadPreview.total} row${uploadPreview.total !== 1 ? "s" : ""}`}
                   </Button>
                 </>
               ) : (
@@ -5399,11 +5655,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                               explodedNodes={explodedNodes}
                               onExplode={() => { }}
                               onExplodeAll={() => { }}
-                              onFocus={setFocusId}
-                              onFocusPrimary={focusNodeAndPersistPrimary}
-                              onEdit={openNodeEditFromHierarchy}
-                              onPrintBook={openNodeBookPrintDialog}
-                              onPrintPoster={openNodePosterPrintDialog}
+                              onQuickView={setQuickViewNodeId}
                               showExplodeControls={false}
                             />
                           )),
@@ -5567,11 +5819,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                               <OrgChartTreeNode
                                 key={item.nodeId} item={item} nodeList={nodeList} relList={relList}
                                 explodedNodes={explodedNodes} onExplode={handleExplode}
-                                onExplodeAll={handleExplodeAll} onFocus={setFocusId}
-                                onFocusPrimary={focusNodeAndPersistPrimary}
-                                onEdit={openNodeEditFromHierarchy}
-                                onPrintBook={openNodeBookPrintDialog}
-                                onPrintPoster={openNodePosterPrintDialog}
+                                onExplodeAll={handleExplodeAll} onQuickView={setQuickViewNodeId}
                                 visitedIds={visitedIds} showTopConnector={items.length > 1}
                               />
                             ))}
@@ -5616,167 +5864,154 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
         {viewMode === "directory" && (
           <div className="directory-grid">
-            <StatsStrip
-              allEntityNodes={sortedEntityNodes}
-              allPersonNodes={sortedPersonNodes}
-              filteredEntityNodes={filteredEntityNodes}
-              filteredPersonNodes={filteredPersonNodes}
-              dataDictionary={dataDictionary}
-              isFiltered={!!dirSearchLower}
-            />
-            <div className="directory-search-bar">
-              <Search size={15} style={{ color: "#9ca3af", flexShrink: 0 }} />
-              <input
-                type="text"
-                placeholder="Search entities and people…"
-                value={dirSearch}
-                onChange={(e) => setDirSearch(e.target.value)}
-                className="directory-search-input"
+            {showStats && (
+              <StatsStrip
+                allEntityNodes={sortedEntityNodes}
+                allPersonNodes={sortedPersonNodes}
+                filteredEntityNodes={filteredEntityNodes}
+                filteredPersonNodes={filteredPersonNodes}
+                dataDictionary={dataDictionary}
+                isFiltered={!!dirSearchLower}
               />
-              {dirSearch && (
-                <button className="directory-search-clear" onClick={() => setDirSearch("")} title="Clear">
-                  <X size={13} />
-                </button>
-              )}
+            )}
+            {/* Main content: search and cards in column layout */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 16, width: "100%" }}>
+              {/* Search bar for directory */}
+              <div className="quick-find" style={{ maxWidth: 400, border: "none", background: "transparent", minHeight: "auto", padding: "8px 0" }}>
+                <div className="quick-find-input-wrap" style={{ border: "none", background: "transparent", padding: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Search size={14} style={{ color: "#6b7280", flexShrink: 0 }} />
+                  <input
+                    type="text"
+                    className="quick-find-input"
+                    style={{ border: "none", fontSize: 14, background: "transparent", color: "#1f2937", padding: 0 }}
+                    placeholder="Find in directory…"
+                    value={dirSearch}
+                    onChange={(e) => setDirSearch(e.target.value)}
+                  />
+                  {dirSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setDirSearch("")}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        padding: 0,
+                        display: "flex",
+                        alignItems: "center",
+                        color: "#6b7280",
+                      }}
+                      title="Clear"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+              </div>
+              {/* Cards container - side by side */}
+              <div style={{ display: "flex", gap: 24, width: "100%" }}>
+                <Card style={{ width: "45%" }}>
+                  <CardContent>
+                    <div className="section-title" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span>Entities {dirSearchLower ? `(${filteredEntityNodes.length})` : ""}</span>
+                      <button
+                        type="button"
+                        title="Add Entity"
+                        onClick={() => {
+                          setNewNode({ name: "", kind: "entity", photo: "", logo: "", customFields: {} });
+                          setOpenDialog({ type: "add-node" });
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          cursor: "pointer",
+                          padding: "4px 8px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          color: "#6b7280",
+                          fontSize: 16,
+                        }}
+                      >
+                        <Plus size={18} />
+                      </button>
+                    </div>
+                    <div className="directory-scroll">
+                      <ul className="directory-list">
+                        {filteredEntityNodes.map((n) => (
+                          <li key={n.id}>
+                            <div
+                              className="directory-item"
+                              style={{ cursor: "pointer" }}
+                              onClick={() => setQuickViewNodeId(n.id)}
+                            >
+                              {n.logo
+                                ? <img src={n.logo} alt="" className="directory-thumb" />
+                                : <Building2 className="directory-icon" />}
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div className="directory-name">{n.name}</div>
+                                <div className="directory-meta">{n.id}</div>
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card style={{ width: "45%" }}>
+                  <CardContent>
+                    <div className="section-title" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span>People {dirSearchLower ? `(${filteredPersonNodes.length})` : ""}</span>
+                      <button
+                        type="button"
+                        title="Add Person"
+                        onClick={() => {
+                          setNewNode({ name: "", kind: "person", photo: "", logo: "", customFields: {} });
+                          setOpenDialog({ type: "add-node" });
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          cursor: "pointer",
+                          padding: "4px 8px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          color: "#6b7280",
+                          fontSize: 16,
+                        }}
+                      >
+                        <Plus size={18} />
+                      </button>
+                    </div>
+                    <div className="directory-scroll">
+                      <ul className="directory-list">
+                        {filteredPersonNodes.map((n) => (
+                          <li key={n.id}>
+                            <div
+                              className="directory-item"
+                              style={{ cursor: "pointer" }}
+                              onClick={() => setQuickViewNodeId(n.id)}
+                            >
+                              {n.photo
+                                ? <img src={n.photo} alt="" className="directory-thumb directory-thumb--round" />
+                                : <Users className="directory-icon" />}
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div className="directory-name">{n.name}</div>
+                                <div className="directory-meta">{n.id}</div>
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+              {/* End cards container */}
             </div>
-            <Card>
-              <CardContent>
-                <div className="section-title">Entities {dirSearchLower ? `(${filteredEntityNodes.length})` : ""}</div>
-                <div className="directory-scroll">
-                  <ul className="directory-list">
-                    {filteredEntityNodes.map((n) => (
-                      <li key={n.id}>
-                        <div
-                          className="directory-item"
-                          style={{ cursor: "pointer" }}
-                          onClick={() => {
-                            setFocusId(n.id);
-                            setViewMode("hierarchy");
-                          }}
-                        >
-                          {n.logo
-                            ? <img src={n.logo} alt="" className="directory-thumb" />
-                            : <Building2 className="directory-icon" />}
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div className="directory-name">{n.name}</div>
-                            <div className="directory-meta">{n.id}</div>
-                          </div>
-                          <div className="directory-item-actions" onClick={(e) => e.stopPropagation()}>
-                            <button
-                              className="directory-edit-btn"
-                              title="Edit"
-                              aria-label="Edit"
-                              onClick={() => {
-                                setEditNodeId(n.id);
-                                setOpenDialog({ type: "edit-node" });
-                              }}
-                            >
-                              <Pencil size={13} />
-                            </button>
-                            <button
-                              className="directory-edit-btn"
-                              title="Print Book Pages (PDF)"
-                              aria-label="Print Book Pages"
-                              onClick={() => openNodeBookPrintDialog(n.id)}
-                            >
-                              <BookOpen size={13} />
-                            </button>
-                            <button
-                              className="directory-edit-btn"
-                              title="Print Org Chart Poster"
-                              aria-label="Print Org Chart Poster"
-                              onClick={() => openNodePosterPrintDialog(n.id)}
-                            >
-                              <GitFork size={13} />
-                            </button>
-                            <button
-                              className="directory-edit-btn"
-                              title="Focus in Hierarchy"
-                              aria-label="Focus in Hierarchy"
-                              onClick={() => {
-                                setFocusId(n.id);
-                                setViewMode("hierarchy");
-                              }}
-                            >
-                              <Crosshair size={13} />
-                            </button>
-                          </div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent>
-                <div className="section-title">People {dirSearchLower ? `(${filteredPersonNodes.length})` : ""}</div>
-                <div className="directory-scroll">
-                  <ul className="directory-list">
-                    {filteredPersonNodes.map((n) => (
-                      <li key={n.id}>
-                        <div
-                          className="directory-item"
-                          style={{ cursor: "pointer" }}
-                          onClick={() => {
-                            setFocusId(n.id);
-                            setViewMode("hierarchy");
-                          }}
-                        >
-                          {n.photo
-                            ? <img src={n.photo} alt="" className="directory-thumb directory-thumb--round" />
-                            : <Users className="directory-icon" />}
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <div className="directory-name">{n.name}</div>
-                            <div className="directory-meta">{n.id}</div>
-                          </div>
-                          <div className="directory-item-actions" onClick={(e) => e.stopPropagation()}>
-                            <button
-                              className="directory-edit-btn"
-                              title="Edit"
-                              aria-label="Edit"
-                              onClick={() => {
-                                setEditNodeId(n.id);
-                                setOpenDialog({ type: "edit-node" });
-                              }}
-                            >
-                              <Pencil size={13} />
-                            </button>
-                            <button
-                              className="directory-edit-btn"
-                              title="Print Book Pages (PDF)"
-                              aria-label="Print Book Pages"
-                              onClick={() => openNodeBookPrintDialog(n.id)}
-                            >
-                              <BookOpen size={13} />
-                            </button>
-                            <button
-                              className="directory-edit-btn"
-                              title="Print Org Chart Poster"
-                              aria-label="Print Org Chart Poster"
-                              onClick={() => openNodePosterPrintDialog(n.id)}
-                            >
-                              <GitFork size={13} />
-                            </button>
-                            <button
-                              className="directory-edit-btn"
-                              title="Focus in Hierarchy"
-                              aria-label="Focus in Hierarchy"
-                              onClick={() => {
-                                setFocusId(n.id);
-                                setViewMode("hierarchy");
-                              }}
-                            >
-                              <Crosshair size={13} />
-                            </button>
-                          </div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </CardContent>
-            </Card>
+            {/* End main content column */}
           </div>
         )}
 
@@ -5801,53 +6036,28 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 type="button"
                 onClick={() => setTabularSubMode("persons")}
                 style={{
-                  padding: "15px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
-                  borderRight: "1px solid #cbd5e1",
+                  padding: "5px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
                   background: tabularSubMode === "persons" ? "#1e293b" : "#fff",
                   color: tabularSubMode === "persons" ? "#fff" : "#475569",
                 }}
               >
                 Persons
               </button>
-              <button
-                type="button"
-                onClick={() => setTabularSubMode("ownerships")}
-                style={{
-                  padding: "5px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", border: "none",
-                  background: tabularSubMode === "ownerships" ? "#1e293b" : "#fff",
-                  color: tabularSubMode === "ownerships" ? "#fff" : "#475569",
-                }}
-              >
-                Ownerships
-              </button>
             </div>
 
             {/* ── Entities / Persons sub-mode (shared node tabular infrastructure) ── */}
             {(tabularSubMode === "entities" || tabularSubMode === "persons") && (
               <>
-                <StatsStrip
-                  allEntityNodes={sortedEntityNodes}
-                  allPersonNodes={sortedPersonNodes}
-                  filteredEntityNodes={filteredEntityNodes}
-                  filteredPersonNodes={filteredPersonNodes}
-                  dataDictionary={dataDictionary}
-                  isFiltered={!!dirSearchLower}
-                />
-                <div className="directory-search-bar">
-                  <Search size={15} style={{ color: "#9ca3af", flexShrink: 0 }} />
-                  <input
-                    type="text"
-                    placeholder="Search entities and people…"
-                    value={dirSearch}
-                    onChange={(e) => setDirSearch(e.target.value)}
-                    className="directory-search-input"
+                {showStats && (
+                  <StatsStrip
+                    allEntityNodes={sortedEntityNodes}
+                    allPersonNodes={sortedPersonNodes}
+                    filteredEntityNodes={filteredEntityNodes}
+                    filteredPersonNodes={filteredPersonNodes}
+                    dataDictionary={dataDictionary}
+                    isFiltered={!!dirSearchLower}
                   />
-                  {dirSearch && (
-                    <button className="directory-search-clear" onClick={() => setDirSearch("")} title="Clear">
-                      <X size={13} />
-                    </button>
-                  )}
-                </div>
+                )}
 
                 <div className="tabular-toolbar">
                   <div className="tabular-toolbar-left">
@@ -5864,6 +6074,38 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     <Button type="button" variant="outline" onClick={openTabularViewManager}>
                       Customize
                     </Button>
+                    {/* Search input after Customize */}
+                    <div className="quick-find" style={{ width: 200, maxWidth: "none", border: "none", background: "transparent", minHeight: "auto", padding: 0 }}>
+                      <div className="quick-find-input-wrap" style={{ border: "none", background: "transparent", padding: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                        <Search size={14} style={{ color: "#6b7280", flexShrink: 0 }} />
+                        <input
+                          type="text"
+                          className="quick-find-input"
+                          style={{ border: "none", fontSize: 13, background: "transparent", color: "#1f2937", padding: 0 }}
+                          placeholder="Find in this table…"
+                          value={dirSearch}
+                          onChange={(e) => setDirSearch(e.target.value)}
+                        />
+                        {dirSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setDirSearch("")}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              cursor: "pointer",
+                              padding: 0,
+                              display: "flex",
+                              alignItems: "center",
+                              color: "#6b7280",
+                            }}
+                            title="Clear"
+                          >
+                            <X size={14} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
                     {activeTabularFilterCount > 0 && (
                       <Button type="button" variant="outline" onClick={() => { setTabularFilters({}); setOpenTabularFilterKey(null); }}>
                         Clear Filters ({activeTabularFilterCount})
@@ -5974,55 +6216,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                       className: `${nextCell.props.className || ""} tabular-actions-anchor`.trim(),
                                       children: (
                                         <div className="tabular-actions-anchor-box">
+                                          <button
+                                            className="tabular-edit-btn"
+                                            type="button"
+                                            title="Edit"
+                                            aria-label="Edit"
+                                            onClick={() => {
+                                              setEditNodeId(row.key);
+                                              setOpenDialog({ type: "edit-node" });
+                                            }}
+                                            disabled={isSaving}
+                                          >
+                                            <Pencil size={14} />
+                                          </button>
                                           {nextCell.props.children}
-                                          <div className="tabular-row-hover-actions" onClick={(e) => e.stopPropagation()}>
-                                            <button
-                                              className="hv-neighbor-action-btn"
-                                              type="button"
-                                              title="Edit"
-                                              aria-label="Edit"
-                                              onClick={() => {
-                                                setEditNodeId(row.key);
-                                                setOpenDialog({ type: "edit-node" });
-                                              }}
-                                              disabled={isSaving}
-                                            >
-                                              <Pencil size={11} />
-                                            </button>
-                                            <button
-                                              className="hv-neighbor-action-btn"
-                                              type="button"
-                                              title="Print Book Pages (PDF)"
-                                              aria-label="Print Book Pages"
-                                              onClick={() => openNodeBookPrintDialog(row.key)}
-                                              disabled={isSaving}
-                                            >
-                                              <BookOpen size={11} />
-                                            </button>
-                                            <button
-                                              className="hv-neighbor-action-btn"
-                                              type="button"
-                                              title="Print Org Chart Poster"
-                                              aria-label="Print Org Chart Poster"
-                                              onClick={() => openNodePosterPrintDialog(row.key)}
-                                              disabled={isSaving}
-                                            >
-                                              <GitFork size={11} />
-                                            </button>
-                                            <button
-                                              className="hv-neighbor-action-btn"
-                                              type="button"
-                                              title="Focus in Hierarchy"
-                                              aria-label="Focus in Hierarchy"
-                                              onClick={() => {
-                                                setFocusId(row.key);
-                                                setViewMode("hierarchy");
-                                              }}
-                                              disabled={isSaving}
-                                            >
-                                              <Crosshair size={11} />
-                                            </button>
-                                          </div>
                                         </div>
                                       ),
                                     });
@@ -6241,310 +6448,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 )}
               </>
             )}
-            {tabularSubMode === "ownerships" && (
-              <>
-                <div className="tabular-toolbar">
-                  <div className="tabular-toolbar-left">
-                    <select
-                      className="tabular-view-select"
-                      value={selectedOwnershipTabularViewId}
-                      onChange={(e) => setSelectedOwnershipTabularViewId(e.target.value)}
-                    >
-                      {ownershipTabularViews.length === 0 && <option value={DEFAULT_OWNERSHIP_TABULAR_VIEW_ID}>Default</option>}
-                      {ownershipTabularViews.map((v) => (
-                        <option key={v.id} value={v.id}>{v.name}</option>
-                      ))}
-                    </select>
-                    <Button type="button" variant="outline" onClick={openOwnershipTabularViewManager}>
-                      Customize
-                    </Button>
-                    {activeOwnershipTabularFilterCount > 0 && (
-                      <Button type="button" variant="outline" onClick={() => { setOwnershipTabularFilters({}); setOpenOwnershipTabularFilterKey(null); }}>
-                        Clear Filters ({activeOwnershipTabularFilterCount})
-                      </Button>
-                    )}
-                  </div>
-                  <Button
-                    type="button"
-                    onClick={saveAllOwnershipRows}
-                    disabled={pendingOwnershipKeys.size === 0 || ownershipTableSavingKeys.size > 0}
-                  >
-                    Save Changes ({pendingOwnershipKeys.size})
-                  </Button>
-                </div>
-
-                <Card className="tabular-card">
-                  <CardContent style={{ padding: 0 }}>
-                    <div className="tabular-wrap">
-                      <table
-                        className="tabular-table"
-                        style={{ width: `${ownershipTabularColumnWidths.reduce((a, b) => a + b, 0)}px` }}
-                      >
-                        <colgroup>
-                          {ownershipTabularColumnWidths.map((w, i) => (
-                            <col key={i} style={{ width: `${w}px` }} />
-                          ))}
-                        </colgroup>
-                        <thead>
-                          <tr>
-                            {visibleOwnershipTabularColumns.map((column, colIdx) => {
-                              const { filterType, enumOptions } = getColumnFilterConfig(column);
-                              const isSorted = ownershipTabularSort?.key === column.key;
-                              const hasFilter = !isFilterEmpty(ownershipTabularFilters[column.key]);
-                              const headClass = `${isSorted ? "tabular-th--sorted" : ""}${hasFilter ? " tabular-th--filtered" : ""}${colIdx === 0 ? " tabular-col-frozen" : ""}`;
-                              return (
-                                <th key={column.key} title={column.label} className={headClass}>
-                                  <div className="tabular-th-inner">
-                                    {filterType ? (
-                                      <span className="tabular-th-label" onClick={() => handleOwnershipTabularSort(column.key)}>
-                                        {column.label}{isSorted && <span className="tabular-sort-icon">{ownershipTabularSort.dir === "asc" ? " ↑" : " ↓"}</span>}
-                                      </span>
-                                    ) : (
-                                      <span className="tabular-th-label-plain">{column.label}</span>
-                                    )}
-                                    {filterType && (
-                                      <button type="button" className={`tabular-filter-btn${hasFilter ? " tabular-filter-btn--active" : ""}`}
-                                        title={hasFilter ? "Filter active" : "Filter"}
-                                        onClick={(e) => { e.stopPropagation(); toggleOwnershipTabularFilter(column.key, e); }}>
-                                        <Filter size={11} />
-                                      </button>
-                                    )}
-                                  </div>
-                                </th>
-                              );
-                            })}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredSortedOwnershipTableRows.length === 0 && (
-                            <tr>
-                              <td colSpan={visibleOwnershipTabularColumns.length} className="tabular-empty">
-                                {ownershipTableRows.length === 0 ? "No ownership records." : "No rows match the active filters."}
-                              </td>
-                            </tr>
-                          )}
-                          {filteredSortedOwnershipTableRows.map((row) => {
-                            const isSaving = ownershipTableSavingKeys.has(row.key);
-                            const isDirty = ownershipTableDirtyKeys.has(row.key);
-                            const rowError = ownershipTableRowErrors[row.key];
-                            return (
-                              <tr key={row.key} className={rowError ? "tabular-row-error" : undefined}>
-                                {visibleOwnershipTabularColumns.map((column, colIdx) => {
-                                  const cell = renderOwnershipTabularCell(column, { row, rowRel: row.rel, isSaving, isDirty, rowError });
-                                  if (!React.isValidElement(cell)) return cell;
-                                  const extraClass = `${colIdx === 0 ? "tabular-col-frozen" : ""}${colIdx === 0 && isDirty ? " tabular-col-dirty" : ""}`.trim();
-                                  if (!extraClass) return cell;
-                                  return React.cloneElement(cell, {
-                                    className: `${cell.props.className || ""} ${extraClass}`.trim(),
-                                  });
-                                })}
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                {openOwnershipTabularFilterKey && (() => {
-                  const col = visibleOwnershipTabularColumns.find((c) => c.key === openOwnershipTabularFilterKey);
-                  if (!col) return null;
-                  const { filterType, enumOptions } = getColumnFilterConfig(col);
-                  return (
-                    <ColumnFilterPopover
-                      filterType={filterType}
-                      enumOptions={enumOptions || []}
-                      currentFilter={ownershipTabularFilters[openOwnershipTabularFilterKey] || null}
-                      popoverPos={ownershipTabularFilterPopoverPos}
-                      onChange={(f) => setOwnershipTabularFilters((p) => ({ ...p, [openOwnershipTabularFilterKey]: f }))}
-                      onClose={() => setOpenOwnershipTabularFilterKey(null)}
-                    />
-                  );
-                })()}
-
-                {ownershipTabularViewDialogOpen && (
-                  <Dialog open={ownershipTabularViewDialogOpen} onOpenChange={setOwnershipTabularViewDialogOpen}>
-                    <DialogContent style={{ width: "min(760px, 92vw)", maxWidth: "none" }}>
-                      <DialogHeader>
-                        <DialogTitle>
-                          Customize View — Ownerships
-                          <span style={{ fontWeight: 400, color: '#64748b', fontSize: '14px', marginLeft: 10 }}>{activeOwnershipTabularView.name}</span>
-                        </DialogTitle>
-                      </DialogHeader>
-                      <div className="tabular-view-editor">
-                        <div className="tabular-view-meta-section">
-                          <div className="tabular-view-meta-row">
-                            <span className="tabular-view-label">Sort:</span>
-                            <select
-                              className="tabular-meta-select"
-                              value={ownershipTabularViewDraft.sort?.key || ""}
-                              onChange={(e) => {
-                                const k = e.target.value;
-                                setOwnershipTabularViewDraft((prev) => k
-                                  ? { ...prev, sort: { key: k, dir: prev.sort?.dir || "asc" } }
-                                  : { ...prev, sort: null });
-                              }}
-                            >
-                              <option value="">— none —</option>
-                              {ownershipTabularViewDraft.columnOrder.map((k) => {
-                                const col = allOwnershipTabularColumns.find((c) => c.key === k);
-                                if (!col) return null;
-                                const { filterType } = getColumnFilterConfig(col);
-                                if (!filterType) return null;
-                                return <option key={k} value={k}>{col.label}</option>;
-                              })}
-                            </select>
-                            {ownershipTabularViewDraft.sort?.key && (
-                              <select
-                                className="tabular-meta-select"
-                                value={ownershipTabularViewDraft.sort.dir || "asc"}
-                                onChange={(e) => setOwnershipTabularViewDraft((prev) => ({ ...prev, sort: { ...prev.sort, dir: e.target.value } }))}
-                              >
-                                <option value="asc">Ascending</option>
-                                <option value="desc">Descending</option>
-                              </select>
-                            )}
-                            {ownershipTabularViewDraft.sort && (
-                              <button type="button" className="tabular-meta-clear" onClick={() => setOwnershipTabularViewDraft((prev) => ({ ...prev, sort: null }))}>Clear</button>
-                            )}
-                          </div>
-                          {Object.entries(ownershipTabularViewDraft.filters || {}).filter(([, f]) => !isFilterEmpty(f)).length > 0 && (
-                            <div className="tabular-view-meta-row">
-                              <span className="tabular-view-label">Filters:</span>
-                              <div className="tabular-view-filter-pills">
-                                {Object.entries(ownershipTabularViewDraft.filters || {}).filter(([, f]) => !isFilterEmpty(f)).map(([fKey, filter]) => {
-                                  const col = allOwnershipTabularColumns.find((c) => c.key === fKey);
-                                  if (!col) return null;
-                                  return (
-                                    <span key={fKey} className="tabular-filter-pill">
-                                      {col.label}: {formatFilterSummary(filter)}
-                                      <button type="button" className="tabular-filter-pill-x"
-                                        onClick={() => setOwnershipTabularViewDraft((prev) => { const f = { ...(prev.filters || {}) }; delete f[fKey]; return { ...prev, filters: f }; })}
-                                      >×</button>
-                                    </span>
-                                  );
-                                })}
-                                <button type="button" className="tabular-meta-clear" onClick={() => setOwnershipTabularViewDraft((prev) => ({ ...prev, filters: {} }))}>Clear all</button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        <div className="tabular-view-columns">
-                          <div className="tabular-view-section-title" style={{ marginTop: 10, marginLeft: 10 }}>In View</div>
-                          {ownershipTabularViewDraft.columnOrder.map((key, idx) => {
-                            const col = allOwnershipTabularColumns.find((c) => c.key === key);
-                            if (!col) return null;
-                            return (
-                              <div key={key} className="tabular-view-column-row">
-                                <input
-                                  type="text"
-                                  className="tabular-order-input"
-                                  value={ownershipOrderInputs[key] ?? (idx + 1)}
-                                  onChange={(e) => setOwnershipOrderInputs((prev) => ({ ...prev, [key]: e.target.value }))}
-                                  onBlur={() => applyOwnershipTabularOrder(ownershipTabularViewDraft.columnOrder, ownershipOrderInputs)}
-                                  onKeyDown={(e) => { if (e.key === 'Enter') applyOwnershipTabularOrder(ownershipTabularViewDraft.columnOrder, ownershipOrderInputs); }}
-                                  title="Display order (fractions allowed, e.g. 1.5)"
-                                />
-                                <label className="tabular-view-column-toggle">
-                                  <input type="checkbox" checked onChange={() => toggleOwnershipTabularDraftSelected(key)} />
-                                  <span>{col.label}</span>
-                                </label>
-                                <input
-                                  type="number"
-                                  className="tabular-width-input"
-                                  placeholder="auto"
-                                  min="60"
-                                  step="1"
-                                  value={ownershipTabularViewDraft.columnWidths?.[key] || ""}
-                                  onChange={(e) => {
-                                    const v = e.target.value;
-                                    setOwnershipTabularViewDraft((prev) => {
-                                      if (!v) { const cw = { ...(prev.columnWidths || {}) }; delete cw[key]; return { ...prev, columnWidths: cw }; }
-                                      return { ...prev, columnWidths: { ...(prev.columnWidths || {}), [key]: Number(v) } };
-                                    });
-                                  }}
-                                  title="Column width in pixels (blank = auto-size from data)"
-                                />
-                                <span className="tabular-width-px-label">px</span>
-                              </div>
-                            );
-                          })}
-                          <div className="tabular-view-section-title" style={{ marginBottom: 4, marginTop: 10, marginLeft: 10 }}>Available Fields</div>
-                          {availableOwnershipTabularColumns.map((col) => (
-                            <div key={col.key} className="tabular-view-column-row">
-                              <label className="tabular-view-column-toggle">
-                                <input type="checkbox" checked={false} onChange={() => toggleOwnershipTabularDraftSelected(col.key)} />
-                                <span>{col.label}</span>
-                              </label>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <DialogFooter style={{ justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <Button type="button" variant="outline" onClick={updateCurrentOwnershipTabularView} disabled={selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID}>Save</Button>
-                          {selectedOwnershipTabularViewId !== DEFAULT_OWNERSHIP_TABULAR_VIEW_ID && (
-                            <Button type="button" variant="outline" onClick={deleteCurrentOwnershipTabularView}>Delete This View</Button>
-                          )}
-                        </div>
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <Button type="button" variant="outline" onClick={saveOwnershipTabularViewAsNew}>Save As New…</Button>
-                          <Button type="button" variant="secondary" onClick={() => setOwnershipTabularViewDialogOpen(false)}>Close</Button>
-                        </div>
-                      </DialogFooter>
-                    </DialogContent>
-                  </Dialog>
-                )}
-
-                {ownershipSaveAsNewOpen && (
-                  <Dialog open={ownershipSaveAsNewOpen} onOpenChange={(open) => { if (!open) setOwnershipSaveAsNewOpen(false); }}>
-                    <DialogContent style={{ width: "min(400px, 92vw)", maxWidth: "none" }}>
-                      <DialogHeader>
-                        <DialogTitle>Save as New View — Ownerships</DialogTitle>
-                      </DialogHeader>
-                      <div style={{ padding: "8px 0" }}>
-                        <label className="form-label" style={{ marginBottom: 6, display: "block" }}>View name</label>
-                        <input
-                          className="form-input"
-                          value={ownershipSaveAsNewName}
-                          onChange={(e) => { setOwnershipSaveAsNewError(""); setOwnershipSaveAsNewName(e.target.value); }}
-                          onKeyDown={(e) => { if (e.key === "Enter") commitOwnershipSaveAsNew(); }}
-                          placeholder="e.g. My Ownership View"
-                          autoFocus
-                          autoComplete="off"
-                          data-lpignore="true"
-                        />
-                        {ownershipSaveAsNewError && (
-                          <div className="dup-warning" style={{ marginTop: 8 }}>{ownershipSaveAsNewError}</div>
-                        )}
-                      </div>
-                      <DialogFooter>
-                        <Button type="button" variant="secondary" onClick={() => setOwnershipSaveAsNewOpen(false)}>Cancel</Button>
-                        <Button type="button" onClick={commitOwnershipSaveAsNew}>Save</Button>
-                      </DialogFooter>
-                    </DialogContent>
-                  </Dialog>
-                )}
-
-                {ownershipDeleteConfirmOpen && (
-                  <Dialog open={ownershipDeleteConfirmOpen} onOpenChange={(open) => { if (!open) setOwnershipDeleteConfirmOpen(false); }}>
-                    <DialogContent style={{ width: "min(400px, 92vw)", maxWidth: "none" }}>
-                      <DialogHeader>
-                        <DialogTitle>Delete View</DialogTitle>
-                      </DialogHeader>
-                      <p style={{ padding: "4px 0 16px", color: "#374151", margin: 0 }}>
-                        Permanently delete <strong>&#8220;{activeOwnershipTabularView.name}&#8221;</strong>? This cannot be undone.
-                      </p>
-                      <DialogFooter>
-                        <Button type="button" variant="secondary" onClick={() => setOwnershipDeleteConfirmOpen(false)}>Cancel</Button>
-                        <Button type="button" onClick={confirmOwnershipTabularViewDelete} style={{ background: '#dc2626', borderColor: '#dc2626', color: '#fff' }}>Delete</Button>
-                      </DialogFooter>
-                    </DialogContent>
-                  </Dialog>
-                )}
-              </>
-            )}
           </div>
         )}
         {viewMode === "editor" && (
@@ -6599,30 +6502,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           </div>
         )}
 
-        {viewMode !== "hierarchy" && viewMode !== "tabular" && (
+        {viewMode === "directory" && (
           <div className="fab-container">
-            <Button
-              type="button"
-              className="fab-add"
-              onClick={() => {
-                setNewNode({ name: "", kind: "entity", photo: "", logo: "", customFields: {} });
-                setOpenDialog({ type: "add-node" });
-              }}
-            >
-              <Plus size={16} />
-              <span>Add Entity</span>
-            </Button>
-            <Button
-              type="button"
-              className="fab-add"
-              onClick={() => {
-                setNewNode({ name: "", kind: "person", photo: "", logo: "", customFields: {} });
-                setOpenDialog({ type: "add-node" });
-              }}
-            >
-              <Plus size={16} />
-              <span>Add Person</span>
-            </Button>
+            {/* FAB buttons now integrated into section headers */}
           </div>
         )}
 
@@ -6667,12 +6549,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         {/* Built-in fields + DD fields merged and sorted alphabetically */}
                         {(() => {
                           const builtIns = [
-                            { _builtin: true, prompt: "Address",       type: "Address",     appliesTo: "Entity, Person", multi: "No",  values: "" },
-                            { _builtin: true, prompt: "Cell Phone",    type: "Phone",       appliesTo: "Person",         multi: "No",  values: "" },
-                            { _builtin: true, prompt: "e-Mail",        type: "Email",       appliesTo: "Entity, Person", multi: "Yes", values: "" },
-                            { _builtin: true, prompt: "Ownership Records", type: "Computed", appliesTo: "Entity",       multi: "No",  values: "Read-only" },
-                            { _builtin: true, prompt: "Primary Phone", type: "Phone",       appliesTo: "Entity, Person", multi: "No",  values: "" },
-                            { _builtin: true, prompt: "Tax ID",        type: "Short text",  appliesTo: "Entity",         multi: "No",  values: "" },
+                            { _builtin: true, prompt: "Address", type: "Address", appliesTo: "Entity, Person", multi: "No", values: "" },
+                            { _builtin: true, prompt: "Cell Phone", type: "Phone", appliesTo: "Person", multi: "No", values: "" },
+                            { _builtin: true, prompt: "e-Mail", type: "Email", appliesTo: "Entity, Person", multi: "Yes", values: "" },
+                            { _builtin: true, prompt: "Ownership Records", type: "Computed", appliesTo: "Entity", multi: "No", values: "Read-only" },
+                            { _builtin: true, prompt: "Primary Phone", type: "Phone", appliesTo: "Entity, Person", multi: "No", values: "" },
+                            { _builtin: true, prompt: "Tax ID", type: "Short text", appliesTo: "Entity", multi: "No", values: "" },
                           ];
                           const ddRows = [...dataDictionary].map((e) => ({ _builtin: false, _entry: e, prompt: e.prompt || "" }));
                           const all = [...builtIns, ...ddRows].sort((a, b) =>
@@ -6872,117 +6754,323 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   n.id !== openDialog.targetId
               )
               : [];
+
+            // Helper to format date for display
+            const formatDateDisplay = (dateStr) => {
+              if (!dateStr) return null;
+              try {
+                // Parse as local date, not UTC (ISO date strings are dates, not datetimes)
+                const [year, month, day] = dateStr.split('-').map(Number);
+                const d = new Date(year, month - 1, day);
+                return d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+              } catch {
+                return dateStr;
+              }
+            };
+
+            const otherPeriods = ownershipTimeline.filter((p) => p.setId !== ownershipSelectedPeriodSetId);
+
             return (
-              <DialogContent style={{ minWidth: 520, maxWidth: 640 }}>
+              <DialogContent style={{ minWidth: 560, maxWidth: 700, maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
                 <DialogHeader>
-                  <DialogTitle>Owners of {targetNode?.name ?? openDialog.targetId}</DialogTitle>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                    <div>
+                      <DialogTitle>Owners of {targetNode?.name ?? openDialog.targetId}</DialogTitle>
+                      {ownerEditorRows.length > 0 && (
+                        <div style={{ fontSize: '12px', color: '#64748b', marginTop: 4 }}>
+                          {formatOwnershipDateRange(ownerEditorDateRange.from, ownerEditorDateRange.to)}
+                        </div>
+                      )}
+                    </div>
+                    {!ownerEditorDateRange.isCurrent && (
+                      <div style={{ backgroundColor: '#fee2e2', color: '#991b1b', padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', marginTop: 2 }}>
+                        HISTORICAL
+                      </div>
+                    )}
+                  </div>
                 </DialogHeader>
 
-                <div className="owner-editor">
-                  {ownerEditorRows.length === 0 && (
-                    <div className="owner-editor-empty">No owners yet — search below to add one.</div>
-                  )}
-                  {ownerEditorRows.map((row, idx) => (
-                    <div key={row.nodeId} className="owner-editor-row">
-                      <div className="owner-editor-name">{row.name}</div>
-                      <div className="owner-editor-pct-wrap">
-                        <input
-                          className="form-input owner-editor-pct-input"
-                          type="number"
-                          min="0"
-                          max="100"
-                          placeholder="%"
-                          value={row.percent}
-                          onChange={(e) =>
-                            setOwnerEditorRows((prev) =>
-                              prev.map((r, i) => i === idx ? { ...r, percent: e.target.value } : r)
-                            )
-                          }
-                        />
-                        <span className="owner-editor-pct-sign">%</span>
-                      </div>
-                      <button
-                        className="owner-editor-remove"
-                        title="Remove owner"
-                        onClick={() => setOwnerEditorRows((prev) => prev.filter((_, i) => i !== idx))}
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ))}
-
-                  <div className={`owner-editor-total ${overLimit ? "over" : ""}`}>
-                    Total:&nbsp;<strong>{ownerTotal}%</strong>
-                    {overLimit && <span className="owner-editor-over-msg"> — exceeds 100%</span>}
-                    {hasOutOfRangePercent && <span className="owner-editor-over-msg"> — each owner percent must be 0-100</span>}
-                    {!overLimit && ownerTotalInvalid && <span className="owner-editor-over-msg"> — must equal 100% to save</span>}
-                  </div>
-
-                  <div className="owner-search-section">
-                    <div className="owner-search-label">Add owner</div>
-                    <div className="owner-search-container">
-                      <Search size={14} className="owner-search-icon" />
-                      <input
-                        className="form-input owner-search-input"
-                        type="text"
-                        placeholder="Search entities and people…"
-                        value={ownerSearch}
-                        autoComplete="off"
-                        data-lpignore="true"
-                        onChange={(e) => { setOwnerSearch(e.target.value); setOwnerSearchOpen(true); }}
-                        onFocus={() => setOwnerSearchOpen(true)}
-                      />
-                    </div>
-                    {ownerSearchOpen && (searchResults.length > 0 || ownerSearch.trim()) && (
-                      <div className="owner-search-dropdown">
-                        {searchResults.map((n) => (
-                          <div
-                            key={n.id}
-                            className="owner-search-result"
-                            onMouseDown={() => {
-                              setOwnerEditorRows((prev) => [
-                                ...prev,
-                                { nodeId: n.id, name: n.name, percent: "", startDate: "", endDate: "", isNew: true },
-                              ]);
-                              setOwnerSearch("");
-                              setOwnerSearchOpen(false);
-                            }}
-                          >
-                            <span className="owner-search-result-kind">{n.kind === "person" ? "Person" : "Entity"}</span>
-                            {n.name}
+                {/* VIEW MODE */}
+                {ownerEditorMode === "view" && (
+                  <div style={{ overflowY: 'auto', flex: 1, paddingRight: 16 }}>
+                    {/* Current ownership display */}
+                    <div style={{ marginBottom: 20 }}>
+                      {ownerEditorRows.length === 0 ? (
+                        <div style={{ padding: 12, backgroundColor: '#f0fdf4', color: '#166534', borderRadius: 4, fontSize: 13 }}>
+                          {(() => {
+                            // Find the earliest effective date in timeline if there are future periods
+                            const earliestFutureDate = ownershipTimeline
+                              .map((p) => p.effectiveFrom)
+                              .filter(Boolean)
+                              .sort((a, b) => a.localeCompare(b))[0];
+                            
+                            return earliestFutureDate
+                              ? `No ownership records before ${formatDateDisplay(earliestFutureDate)}`
+                              : "No ownership records";
+                          })()}
+                        </div>
+                      ) : (
+                        <div className="owner-editor">
+                          {[...ownerEditorRows].sort((a, b) => (Number(b.percent) || 0) - (Number(a.percent) || 0)).map((row) => (
+                            <div key={row.nodeId} className="owner-editor-row" style={{ opacity: 0.8 }}>
+                              <div className="owner-editor-name">{row.name}</div>
+                              <div className="owner-editor-pct-wrap">
+                                <span style={{ fontWeight: 600 }}>{row.percent}%</span>
+                              </div>
+                            </div>
+                          ))}
+                          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #e2e8f0', fontWeight: 600, fontSize: 13 }}>
+                            Total: {ownerTotal}%
                           </div>
-                        ))}
-                        {ownerSearch.trim() && (
-                          <div className="owner-search-actions">
-                            <button
-                              className="owner-search-create"
-                              disabled={isCreatingOwnerNode}
-                              onMouseDown={() => createOwnerNode("entity")}
-                            >
-                              <Plus size={12} /> Create entity "{ownerSearch.trim()}"
-                            </button>
-                            <button
-                              className="owner-search-create"
-                              disabled={isCreatingOwnerNode}
-                              onMouseDown={() => createOwnerNode("person")}
-                            >
-                              <Plus size={12} /> Create person "{ownerSearch.trim()}"
-                            </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Timeline of other ownership periods */}
+                    {ownershipTimeline.length > 1 && (
+                      <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 8 }}>
+                          Other ownership groups {otherPeriods.length > 0 ? `(${otherPeriods.length})` : "(none)"}
+                        </div>
+                        {otherPeriods.length === 0 ? (
+                          <div style={{ fontSize: 12, color: '#94a3b8 ' }}>No other ownership groups</div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {otherPeriods.map((period) => {
+                              const fromDisplay = formatDateDisplay(period.effectiveFrom);
+                              const toDisplay = formatDateDisplay(period.effectiveTo);
+                              const label = !fromDisplay && !toDisplay ? "Unspecified"
+                                : fromDisplay && !toDisplay ? `Since ${fromDisplay}`
+                                  : !fromDisplay && toDisplay ? `Until ${toDisplay}`
+                                    : `${fromDisplay} to ${toDisplay}`;
+                              return (
+                                <button
+                                  key={period.setId}
+                                  type="button"
+                                  onClick={() => {
+                                    // Reload this period's data and stay in view mode
+                                    const periodRows = period.owners.map((o) => {
+                                      const node = getNode(nodeList, o.from);
+                                      return {
+                                        nodeId: o.from,
+                                        name: node?.name ?? o.from,
+                                        percent: String(o.percent),
+                                        startDate: "",
+                                        endDate: "",
+                                        isNew: false,
+                                      };
+                                    });
+                                    setOwnershipSelectedPeriodSetId(period.setId);
+                                    setOwnerEditorRows(periodRows);
+                                    setOwnerEditorOriginal(periodRows); // Sync backup for cancel logic
+                                    setOwnerEditorDateRange({
+                                      from: period.effectiveFrom,
+                                      to: period.effectiveTo,
+                                      isCurrent: !period.effectiveTo,
+                                    });
+                                  }}
+                                  style={{
+                                    padding: '8px 10px',
+                                    textAlign: 'left',
+                                    fontSize: 12,
+                                    border: '1px solid #cbd5e1',
+                                    borderRadius: 4,
+                                    backgroundColor: '#f8fafc',
+                                    cursor: 'pointer',
+                                    transition: 'all 0.2s',
+                                  }}
+                                  onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#f1f5f9'}
+                                  onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#f8fafc'}
+                                >
+                                  <div style={{ fontWeight: 500 }}>{label}</div>
+                                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
+                                    {period.owners.length} owner{period.owners.length !== 1 ? 's' : ''} • {period.owners.reduce((s, o) => s + (o.percent || 0), 0)}%
+                                  </div>
+                                </button>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
                     )}
                   </div>
-                </div>
+                )}
+
+                {/* EDIT/CREATE MODE */}
+                {(ownerEditorMode === "edit-existing" || ownerEditorMode === "create-new") && (
+                  <div style={{ overflowY: 'auto', flex: 1, paddingRight: 16 }}>
+                    <div className="owner-editor">
+                      <div className="form-row" style={{ marginBottom: 12 }}>
+                        <label className="form-label">
+                          {ownerEditorMode === "edit-existing" ? "Effective from (change start date)" : "Effective from"}
+                        </label>
+                        <input
+                          className="form-input"
+                          type="date"
+                          value={ownerEditorEffectiveDate}
+                          onChange={(e) => setOwnerEditorEffectiveDate(e.target.value)}
+                          required
+                        />
+                      </div>
+
+                      {ownerEditorRows.length === 0 && (
+                        <div className="owner-editor-empty">No owners yet — search below to add one.</div>
+                      )}
+                      {ownerEditorRows.map((row, idx) => (
+                        <div key={row.nodeId} className="owner-editor-row">
+                          <div className="owner-editor-name">{row.name}</div>
+                          <div className="owner-editor-pct-wrap">
+                            <input
+                              className="form-input owner-editor-pct-input"
+                              type="number"
+                              min="0"
+                              max="100"
+                              placeholder="%"
+                              value={row.percent}
+                              onChange={(e) =>
+                                setOwnerEditorRows((prev) =>
+                                  prev.map((r, i) => i === idx ? { ...r, percent: e.target.value } : r)
+                                )
+                              }
+                            />
+                            <span className="owner-editor-pct-sign">%</span>
+                          </div>
+                          <button
+                            className="owner-editor-remove"
+                            title="Remove owner"
+                            onClick={() => setOwnerEditorRows((prev) => prev.filter((_, i) => i !== idx))}
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ))}
+
+                      <div className={`owner-editor-total ${overLimit ? "over" : ""}`}>
+                        Total:&nbsp;<strong>{ownerTotal}%</strong>
+                        {overLimit && <span className="owner-editor-over-msg"> — exceeds 100%</span>}
+                        {hasOutOfRangePercent && <span className="owner-editor-over-msg"> — each owner percent must be 0-100</span>}
+                        {!overLimit && ownerTotalInvalid && <span className="owner-editor-over-msg"> — must equal 100% to save</span>}
+                      </div>
+
+                      <div className="owner-search-section">
+                        <div className="owner-search-label">Add owner</div>
+                        <div className="owner-search-container">
+                          <Search size={14} className="owner-search-icon" />
+                          <input
+                            className="form-input owner-search-input"
+                            type="text"
+                            placeholder="Search entities and people…"
+                            value={ownerSearch}
+                            autoComplete="off"
+                            data-lpignore="true"
+                            onChange={(e) => { setOwnerSearch(e.target.value); setOwnerSearchOpen(true); }}
+                            onFocus={() => setOwnerSearchOpen(true)}
+                          />
+                        </div>
+                        {ownerSearchOpen && (searchResults.length > 0 || ownerSearch.trim()) && (
+                          <div className="owner-search-dropdown">
+                            {searchResults.map((n) => (
+                              <div
+                                key={n.id}
+                                className="owner-search-result"
+                                onMouseDown={() => {
+                                  setOwnerEditorRows((prev) => [
+                                    ...prev,
+                                    { nodeId: n.id, name: n.name, percent: "", startDate: "", endDate: "", isNew: true },
+                                  ]);
+                                  setOwnerSearch("");
+                                  setOwnerSearchOpen(false);
+                                }}
+                              >
+                                {n.kind === "person" ? <Users size={14} style={{ color: "#6b7280", flexShrink: 0 }} /> : <Building2 size={14} style={{ color: "#6b7280", flexShrink: 0 }} />}
+                                {n.name}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <DialogFooter>
-                  <Button variant="secondary" onClick={() => {
-                    if (prevDialog) { setOpenDialog(prevDialog); setPrevDialog(null); }
-                    else setOpenDialog(null);
-                  }}>Cancel</Button>
-                  <Button type="button" disabled={isSavingOwners || ownerTotalInvalid || hasOutOfRangePercent} onClick={saveOwnerEditor}>
-                    {isSavingOwners ? "Saving…" : "Save"}
-                  </Button>
+                  {ownerEditorMode === "view" && (
+                    <>
+                      <Button variant="secondary" onClick={() => {
+                        if (prevDialog) { setOpenDialog(prevDialog); setPrevDialog(null); }
+                        else setOpenDialog(null);
+                      }}>Cancel</Button>
+                      {!ownershipDeleteConfirm && (
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <Button type="button" variant="outline" onClick={() => setOwnershipDeleteConfirm(true)} title="Permanently delete this ownership group" style={{ color: '#dc2626', borderColor: '#dc2626' }}>
+                            Delete this group
+                          </Button>
+                          <Button type="button" variant="outline" onClick={() => {
+                            setOwnerEditorMode("edit-existing");
+                            setOwnerEditorEffectiveDate(ownerEditorDateRange.from || "");
+                          }}>
+                            Update this period
+                          </Button>
+                          <Button type="button" variant="default" onClick={() => {
+                            // Save the original state for restoration on cancel
+                            setOwnerEditorOriginal(ownerEditorRows);
+                            setOwnerEditorMode("create-new");
+                            setOwnerEditorRows([]);
+                            setOwnerEditorEffectiveDate(todayIso);
+                          }}>
+                            Create new ownership group
+                          </Button>
+                        </div>
+                      )}
+                      {ownershipDeleteConfirm && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, width: '100%' }}>
+                          {(() => {
+                            // Check if this is the earliest (chronologically first) ownership period
+                            const allPeriods = ownershipTimeline || [];
+                            const sortedByDate = [...allPeriods].sort((a, b) =>
+                              (a.effectiveFrom || "0001-01-01").localeCompare(b.effectiveFrom || "0001-01-01")
+                            );
+                            const isEarliest = sortedByDate.length > 0 && sortedByDate[0].setId === ownershipSelectedPeriodSetId;
+
+                            if (isEarliest && sortedByDate.length > 1) {
+                              const nextPeriodDate = sortedByDate[1].effectiveFrom;
+                              const formatted = nextPeriodDate
+                                ? new Date(nextPeriodDate + 'T00:00:00Z').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
+                                : 'unknown date';
+                              return (
+                                <div style={{ fontSize: 13, color: '#92400e', backgroundColor: '#fef3c7', padding: 10, borderRadius: 4, lineHeight: 1.5 }}>
+                                  <strong>⚠️ Caution:</strong> This is the earliest ownership period. Deleting it will create a gap with no ownership information before {formatted}. You can add groups later to fill this gap if needed.
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <span style={{ fontSize: 13, color: '#991b1b', fontWeight: 500 }}>Delete this group? This cannot be undone.</span>
+                            <Button type="button" variant="outline" onClick={() => setOwnershipDeleteConfirm(false)} disabled={isSavingOwners}>
+                              Cancel
+                            </Button>
+                            <Button type="button" variant="outline" onClick={deleteOwnershipGroup} disabled={isSavingOwners} style={{ color: '#dc2626', borderColor: '#dc2626' }}>
+                              {isSavingOwners ? "Deleting…" : "Confirm Delete"}
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {(ownerEditorMode === "edit-existing" || ownerEditorMode === "create-new") && (
+                    <>
+                      <Button variant="secondary" onClick={() => {
+                        // Restore original state when canceling
+                        setOwnerEditorMode("view");
+                        setOwnerEditorRows(ownerEditorOriginal);
+                        setOwnerEditorEffectiveDate("");
+                      }}>Cancel</Button>
+                      <Button type="button" disabled={isSavingOwners || ownerTotalInvalid || hasOutOfRangePercent || !normalizeDateInput(ownerEditorEffectiveDate)} onClick={saveOwnerEditor}>
+                        {isSavingOwners ? "Saving…" : "Save"}
+                      </Button>
+                    </>
+                  )}
                 </DialogFooter>
               </DialogContent>
             );
@@ -7110,7 +7198,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           field,
                           newNode.customFields?.[field.fieldId],
                           (val) => setNewNode((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
-                          { apiBase, token, node: newNode, nodeList, relList }
+                          { apiBase, token, node: newNode, nodeList, relList, asOfDate, ownershipTimeline: newNode.kind === "entity" ? editNodeOwnershipTimeline : [] }
                         )}
                       </React.Fragment>
                     ))
@@ -7143,6 +7231,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         id,
                         name: newNode.name.trim(),
                         kind: newNode.kind,
+                        asOfDate: asOfDate || todayIso,
                         client: clientId,
                         photo: newNode.kind === "person" ? (newNode.photo || "") : "",
                         logo: newNode.kind === "entity" ? (newNode.logo || "") : "",
@@ -7294,6 +7383,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       percent: parsedPercent.value,
                       startDate: newOwnership.startDate || null,
                       endDate: newOwnership.endDate || null,
+                      asOfDate: asOfDate || todayIso,
                       client: clientId,
                     };
                     try {
@@ -7482,6 +7572,26 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               </DialogHeader>
               <div className="dialog-body">
                 <div className="form-grid">
+                  {/* Effective date of this change */}
+                  <div className="form-row">
+                    <label className="form-label" title="Leave blank to use the global As-of date, or today if none is set">
+                      Change effective
+                    </label>
+                    <input
+                      className="form-input"
+                      type="date"
+                      value={editNodeEffectiveDate}
+                      placeholder={asOfDate || todayIso}
+                      onChange={(e) => setEditNodeEffectiveDate(e.target.value)}
+                    />
+                    <span style={{ fontSize: 11, color: "#6b7280", marginLeft: 4 }}>
+                      {editNodeEffectiveDate
+                        ? `Recording change as of ${editNodeEffectiveDate}`
+                        : asOfDate
+                          ? `Using global As-of date (${asOfDate})`
+                          : `Defaulting to today (${todayIso})`}
+                    </span>
+                  </div>
                   {/* Name — always first, system field */}
                   <div className="form-row">
                     <label className="form-label">Name</label>
@@ -7567,7 +7677,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           field,
                           nodeDraft.customFields?.[field.fieldId],
                           (val) => setNodeDraft((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
-                          { apiBase, token, node: nodeDraft, nodeList, relList }
+                          { apiBase, token, node: nodeDraft, nodeList, relList, asOfDate, ownershipTimeline: nodeDraft.kind === "entity" ? editNodeOwnershipTimeline : [] }
                         )}
                       </React.Fragment>
                     ))
@@ -7613,33 +7723,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   <Button
                     type="button"
                     variant="outline"
-                    disabled={isPdfExporting}
-                    onClick={async () => {
-                      if (!editNodeId || isPdfExporting) return;
-                      const editNode = nodeList.find((n) => n.id === editNodeId);
-                      const pendingFileName = `${editNode?.name || editNodeId}.pdf`
-                        .replace(/[^\w\s.-]/g, "").replace(/\s+/g, "_");
-                      setExportResultAndRevoke({ status: "exporting", fileName: pendingFileName });
-                      setIsPdfExporting(true);
-                      pdfCancelRef.current = false;
-                      setPdfProgress(null);
-                      try {
-                        const result = await generateEntityPdf({
-                          nodeId: editNodeId,
-                          nodeList,
-                          relList,
-                          dataDictionary,
-                          clientName: clientDisplayName || toSentenceCase(clientId),
-                          isCancelled: () => pdfCancelRef.current,
-                          onProgress: (current, total) => setPdfProgress({ current, total }),
-                          apiBase,
-                          token,
-                        });
-                        if (result?.url) setExportResultAndRevoke({ status: "ready", url: result.url, fileName: result.fileName });
-                      } finally {
-                        setIsPdfExporting(false);
-                        setPdfProgress(null);
-                      }
+                    onClick={() => {
+                      if (!editNodeId) return;
+                      openNodeBookPrintDialog(editNodeId);
+                      setOpenDialog(null);
                     }}
                   >
                     Print
@@ -7659,7 +7746,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         onConfirm: () => {
                           apiRequest(`/api/nodes/${targetId}`, {
                             method: "DELETE",
-                            body: JSON.stringify({ client: clientId }),
+                            body: JSON.stringify({ asOfDate: asOfDate || todayIso, client: clientId }),
                           })
                             .then(() => {
                               setNodeList((prev) => prev.filter((n) => n.id !== targetId));
@@ -7694,6 +7781,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       const payload = {
                         name: nodeDraft.name.trim(),
                         kind: nodeDraft.kind,
+                        asOfDate: editNodeEffectiveDate || asOfDate || todayIso,
                         client: clientId,
                         newId: newId !== editNodeId ? newId : null,
                         photo: nodeDraft.kind === "person" ? (nodeDraft.photo || "") : "",
@@ -7910,6 +7998,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           body: JSON.stringify({
                             from: ownershipDraft.from,
                             to: ownershipDraft.to,
+                            asOfDate: asOfDate || todayIso,
                             client: clientId,
                           }),
                         })
@@ -7946,6 +8035,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       percent: parsedPercent.value,
                       startDate: ownershipDraft.startDate || null,
                       endDate: ownershipDraft.endDate || null,
+                      asOfDate: asOfDate || todayIso,
                       client: clientId,
                     };
                     apiRequest("/api/relationships/owns", {
@@ -8197,8 +8287,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     {printTargetNodeId
                       ? "Select page types to include for the selected entity."
                       : viewMode === "hierarchy"
-                      ? "Select page types to include."
-                      : "Select page types to include for each entity in the current view. Pages are interleaved: hierarchy then detail for each entity."}
+                        ? "Select page types to include."
+                        : "Select page types to include for each entity in the current view. Pages are interleaved: hierarchy then detail for each entity."}
                   </p>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
                     <input
@@ -8967,11 +9057,17 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             </button>
           </div>
           <div className="quick-view-section">
-            <div className="quick-view-row"><span>Type</span><strong>{toSentenceCase(quickViewNode.kind || "")}</strong></div>
+            <div className="quick-view-row">
+              <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                {quickViewNode.kind === "entity" ? <Building2 size={16} /> : <Users size={16} />}
+                Type
+              </span>
+              <strong>{toSentenceCase(quickViewNode.kind || "")}</strong>
+            </div>
             {quickViewNode.address && <div className="quick-view-row"><span>Address</span><strong>{quickViewNode.address}</strong></div>}
             {quickViewEmailText && <div className="quick-view-row"><span>Email</span><strong>{quickViewEmailText}</strong></div>}
             {quickViewPhoneText && <div className="quick-view-row"><span>Phone</span><strong>{quickViewPhoneText}</strong></div>}
-            <div className="quick-view-row"><span>Owners</span><strong>{quickViewOwners.length}</strong></div>
+            {quickViewOwners.length > 0 && <div className="quick-view-row"><span>Owners</span><strong>{quickViewOwners.length}</strong></div>}
             <div className="quick-view-row"><span>Entities owned</span><strong>{quickViewOwned.length} ({quickViewDescCount})</strong></div>
             {quickViewNode.kind === "entity" && (
               <div className="quick-view-block">
@@ -8987,18 +9083,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               onClick={() => {
                 setEditNodeId(quickViewNode.id);
                 setOpenDialog({ type: "edit-node" });
+                setQuickViewNodeId("");
               }}
             >
-              <Pencil size={14} /> Edit
-            </Button>
-            <Button
-              type="button"
-              onClick={() => {
-                setFocusId(quickViewNode.id);
-                setViewMode("hierarchy");
-              }}
-            >
-              <Crosshair size={14} /> Focus
+              <Pencil size={14} /> View/Edit
             </Button>
           </div>
         </aside>

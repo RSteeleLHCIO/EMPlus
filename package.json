@@ -8,7 +8,7 @@
         "build": "vite build",
         "preview": "vite preview",
         "server": "node server/index.js",
-        "build:lambda": "npm install --omit=dev --omit=optional && node -e \"const {execSync}=require('child_process');const fs=require('fs');if(fs.existsSync('lambda-deploy.zip'))fs.unlinkSync('lambda-deploy.zip');execSync('powershell Compress-Archive -Path package.json,server,node_modules -DestinationPath lambda-deploy.zip');console.log('lambda-deploy.zip ready. Size: '+(fs.statSync('lambda-deploy.zip').size/1048576).toFixed(1)+' MB');\" && npm install"
+        "build:lambda": "npm install --omit=dev --omit=optional && node build-lambda-zip.cjs && npm install"
     },
     "dependencies": {
         "@aws-sdk/client-dynamodb": "^3.1028.0",

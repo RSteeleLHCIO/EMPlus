@@ -16,7 +16,10 @@ const ddb = DynamoDBDocumentClient.from(rawClient, {
 });
 
 const NODES_TABLE = process.env.DYNAMODB_TABLE_NODES || "EMPlusNodes";
+const NODE_HISTORY_TABLE = process.env.DYNAMODB_TABLE_NODE_HISTORY || "EMPlusNodeHistory";
 const RELS_TABLE = process.env.DYNAMODB_TABLE_RELS || "EMPlusRels";
+const OWNERSHIP_CURRENT_TABLE = process.env.DYNAMODB_TABLE_OWNERSHIP_CURRENT || "EMPlusOwnershipCurrent";
+const OWNERSHIP_HISTORY_TABLE = process.env.DYNAMODB_TABLE_OWNERSHIP_HISTORY || "EMPlusOwnershipHistory";
 const DD_TABLE = process.env.DYNAMODB_TABLE_DD_FIELDS || "EMPlusDDFields";
 
 // Produces the sort key used for a relationship item.
@@ -69,15 +72,114 @@ export async function queryNodes(clientId) {
 
 // Batch-upsert nodes (25 per BatchWrite call — DynamoDB limit).
 export async function batchPutNodes(items) {
-  for (let i = 0; i < items.length; i += 25) {
-    const chunk = items.slice(i, i + 25);
-    await ddb.send(
-      new BatchWriteCommand({
-        RequestItems: {
-          [NODES_TABLE]: chunk.map((item) => ({ PutRequest: { Item: item } })),
-        },
-      })
-    );
+  const MAX_RETRIES = 3;
+  
+  let remaining = items;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (remaining.length === 0) return;
+    
+    const promises = [];
+    for (let i = 0; i < remaining.length; i += 25) {
+      const chunk = remaining.slice(i, i + 25);
+      promises.push(
+        ddb.send(
+          new BatchWriteCommand({
+            RequestItems: {
+              [NODES_TABLE]: chunk.map((item) => ({ PutRequest: { Item: item } })),
+            },
+          })
+        )
+      );
+    }
+    
+    const responses = await Promise.all(promises);
+    
+    // Collect any unprocessed items
+    remaining = [];
+    for (const resp of responses) {
+      if (resp.UnprocessedItems?.[NODES_TABLE]?.length > 0) {
+        remaining.push(
+          ...resp.UnprocessedItems[NODES_TABLE]
+            .filter((req) => req.PutRequest)
+            .map((req) => req.PutRequest.Item)
+        );
+      }
+    }
+    
+    // If there are unprocessed items, wait before retry
+    if (remaining.length > 0 && attempt < MAX_RETRIES - 1) {
+      const backoff = 100 * Math.pow(2, attempt);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+    }
+  }
+  
+  if (remaining.length > 0) {
+    throw new Error(`Failed to write ${remaining.length} node items after ${MAX_RETRIES} retries`);
+  }
+}
+
+export async function putNodeHistory(item) {
+  await ddb.send(new PutCommand({ TableName: NODE_HISTORY_TABLE, Item: item }));
+}
+
+export async function deleteNodeHistory(clientId, nodeHistoryKey) {
+  await ddb.send(
+    new DeleteCommand({ TableName: NODE_HISTORY_TABLE, Key: { clientId, nodeHistoryKey } })
+  );
+}
+
+export async function queryNodeHistory(clientId) {
+  return paginatedQuery({
+    TableName: NODE_HISTORY_TABLE,
+    KeyConditionExpression: "clientId = :c",
+    ExpressionAttributeValues: { ":c": clientId },
+  });
+}
+
+export async function batchPutNodeHistory(items) {
+  const MAX_RETRIES = 3;
+  
+  let remaining = items;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (remaining.length === 0) return;
+    
+    const promises = [];
+    for (let i = 0; i < remaining.length; i += 25) {
+      const chunk = remaining.slice(i, i + 25);
+      promises.push(
+        ddb.send(
+          new BatchWriteCommand({
+            RequestItems: {
+              [NODE_HISTORY_TABLE]: chunk.map((item) => ({ PutRequest: { Item: item } })),
+            },
+          })
+        )
+      );
+    }
+    
+    const responses = await Promise.all(promises);
+    
+    // Collect any unprocessed items
+    remaining = [];
+    for (const resp of responses) {
+      if (resp.UnprocessedItems?.[NODE_HISTORY_TABLE]?.length > 0) {
+        remaining.push(
+          ...resp.UnprocessedItems[NODE_HISTORY_TABLE]
+            .filter((req) => req.PutRequest)
+            .map((req) => req.PutRequest.Item)
+        );
+      }
+    }
+    
+    // If there are unprocessed items, wait before retry
+    if (remaining.length > 0 && attempt < MAX_RETRIES - 1) {
+      const backoff = 100 * Math.pow(2, attempt);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+    }
+  }
+  
+  if (remaining.length > 0) {
+    throw new Error(`Failed to write ${remaining.length} node history items after ${MAX_RETRIES} retries`);
   }
 }
 
@@ -135,15 +237,201 @@ export async function queryRelsByTo(toId) {
 
 // Batch-upsert rels (25 per BatchWrite call — DynamoDB limit).
 export async function batchPutRels(items) {
-  for (let i = 0; i < items.length; i += 25) {
-    const chunk = items.slice(i, i + 25);
-    await ddb.send(
-      new BatchWriteCommand({
-        RequestItems: {
-          [RELS_TABLE]: chunk.map((item) => ({ PutRequest: { Item: item } })),
-        },
-      })
-    );
+  const MAX_RETRIES = 3;
+  
+  let remaining = items;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (remaining.length === 0) return;
+    
+    const promises = [];
+    for (let i = 0; i < remaining.length; i += 25) {
+      const chunk = remaining.slice(i, i + 25);
+      promises.push(
+        ddb.send(
+          new BatchWriteCommand({
+            RequestItems: {
+              [RELS_TABLE]: chunk.map((item) => ({ PutRequest: { Item: item } })),
+            },
+          })
+        )
+      );
+    }
+    
+    const responses = await Promise.all(promises);
+    
+    // Collect any unprocessed items
+    remaining = [];
+    for (const resp of responses) {
+      if (resp.UnprocessedItems?.[RELS_TABLE]?.length > 0) {
+        remaining.push(
+          ...resp.UnprocessedItems[RELS_TABLE]
+            .filter((req) => req.PutRequest)
+            .map((req) => req.PutRequest.Item)
+        );
+      }
+    }
+    
+    // If there are unprocessed items, wait before retry
+    if (remaining.length > 0 && attempt < MAX_RETRIES - 1) {
+      const backoff = 100 * Math.pow(2, attempt);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+    }
+  }
+  
+  if (remaining.length > 0) {
+    throw new Error(`Failed to write ${remaining.length} rel items after ${MAX_RETRIES} retries`);
+  }
+}
+
+// ─── Ownership Current / History ─────────────────────────────────────────────
+
+export async function putOwnershipCurrent(item) {
+  await ddb.send(new PutCommand({ TableName: OWNERSHIP_CURRENT_TABLE, Item: item }));
+}
+
+export async function deleteOwnershipCurrent(clientId, ownershipKey) {
+  await ddb.send(
+    new DeleteCommand({ TableName: OWNERSHIP_CURRENT_TABLE, Key: { clientId, ownershipKey } })
+  );
+}
+
+export async function queryOwnershipCurrent(clientId) {
+  return paginatedQuery({
+    TableName: OWNERSHIP_CURRENT_TABLE,
+    KeyConditionExpression: "clientId = :c",
+    ExpressionAttributeValues: { ":c": clientId },
+  });
+}
+
+export async function putOwnershipHistory(item) {
+  await ddb.send(new PutCommand({ TableName: OWNERSHIP_HISTORY_TABLE, Item: item }));
+}
+
+export async function queryOwnershipHistory(clientId) {
+  return paginatedQuery({
+    TableName: OWNERSHIP_HISTORY_TABLE,
+    KeyConditionExpression: "clientId = :c",
+    ExpressionAttributeValues: { ":c": clientId },
+  });
+}
+
+export async function deleteOwnershipHistory(clientId, ownershipHistoryKey) {
+  await ddb.send(
+    new DeleteCommand({ TableName: OWNERSHIP_HISTORY_TABLE, Key: { clientId, ownershipHistoryKey } })
+  );
+}
+
+export async function batchPutOwnershipCurrent(items) {
+  const MAX_RETRIES = 3;
+  
+  let remaining = items;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (remaining.length === 0) return;
+    
+    console.log(`[batchPutOwnershipCurrent] Attempt ${attempt + 1}/${MAX_RETRIES}: writing ${remaining.length} items`);
+    
+    const promises = [];
+    for (let i = 0; i < remaining.length; i += 25) {
+      const chunk = remaining.slice(i, i + 25);
+      promises.push(
+        ddb.send(
+          new BatchWriteCommand({
+            RequestItems: {
+              [OWNERSHIP_CURRENT_TABLE]: chunk.map((item) => ({ PutRequest: { Item: item } })),
+            },
+          })
+        )
+      );
+    }
+    
+    const responses = await Promise.all(promises);
+    
+    // Collect any unprocessed items
+    const previousCount = remaining.length;
+    remaining = [];
+    for (const resp of responses) {
+      if (resp.UnprocessedItems?.[OWNERSHIP_CURRENT_TABLE]?.length > 0) {
+        remaining.push(
+          ...resp.UnprocessedItems[OWNERSHIP_CURRENT_TABLE]
+            .filter((req) => req.PutRequest)
+            .map((req) => req.PutRequest.Item)
+        );
+      }
+    }
+    
+    const processed = previousCount - remaining.length;
+    console.log(`[batchPutOwnershipCurrent] Attempt ${attempt + 1} result: ${processed} processed, ${remaining.length} unprocessed`);
+    
+    // If there are unprocessed items, wait before retry
+    if (remaining.length > 0 && attempt < MAX_RETRIES - 1) {
+      const backoff = 100 * Math.pow(2, attempt);
+      console.log(`[batchPutOwnershipCurrent] Waiting ${backoff}ms before retry...`);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+    }
+  }
+  
+  if (remaining.length > 0) {
+    const err = new Error(`Failed to write ${remaining.length} ownership current items after ${MAX_RETRIES} retries`);
+    console.error(`[batchPutOwnershipCurrent] ${err.message}`);
+    err.failedItems = remaining;
+    throw err;
+  }
+}
+
+export async function batchPutOwnershipHistory(items) {
+  const MAX_RETRIES = 3;
+  
+  let remaining = items;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    if (remaining.length === 0) return;
+    
+    console.log(`[batchPutOwnershipHistory] Attempt ${attempt + 1}/${MAX_RETRIES}: writing ${remaining.length} items`);
+    
+    const promises = [];
+    for (let i = 0; i < remaining.length; i += 25) {
+      const chunk = remaining.slice(i, i + 25);
+      promises.push(
+        ddb.send(
+          new BatchWriteCommand({
+            RequestItems: {
+              [OWNERSHIP_HISTORY_TABLE]: chunk.map((item) => ({ PutRequest: { Item: item } })),
+            },
+          })
+        )
+      );
+    }
+    
+    const responses = await Promise.all(promises);
+    
+    // Collect any unprocessed items
+    const previousCount = remaining.length;
+    remaining = [];
+    for (const resp of responses) {
+      if (resp.UnprocessedItems?.[OWNERSHIP_HISTORY_TABLE]?.length > 0) {
+        remaining.push(
+          ...resp.UnprocessedItems[OWNERSHIP_HISTORY_TABLE]
+            .filter((req) => req.PutRequest)
+            .map((req) => req.PutRequest.Item)
+        );
+      }
+    }
+    
+    const processed = previousCount - remaining.length;
+    console.log(`[batchPutOwnershipHistory] Attempt ${attempt + 1} result: ${processed} processed, ${remaining.length} unprocessed`);
+    
+    // If there are unprocessed items, wait before retry
+    if (remaining.length > 0 && attempt < MAX_RETRIES - 1) {
+      const backoff = 100 * Math.pow(2, attempt);
+      console.log(`[batchPutOwnershipHistory] Waiting ${backoff}ms before retry...`);
+      await new Promise((resolve) => setTimeout(resolve, backoff));
+    }
+  }
+  
+  if (remaining.length > 0) {
+    const err = new Error(`Failed to write ${remaining.length} ownership history items after ${MAX_RETRIES} retries`);
+    console.error(`[batchPutOwnershipHistory] ${err.message}`);
+    err.failedItems = remaining;
+    throw err;
   }
 }
 
