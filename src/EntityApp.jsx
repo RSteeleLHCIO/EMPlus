@@ -1455,6 +1455,37 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 });
   const [uploadPreview, setUploadPreview] = useState(null);
   const [uploadPreviewLoading, setUploadPreviewLoading] = useState(false);
+  const [notification, setNotification] = useState(null);
+
+  // Show notification - persists until user closes it
+  const showNotification = useCallback((type, title, message, details = null) => {
+    setNotification({ type, title, message, details, id: Date.now() });
+    // Play sound notification
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const oscillator = audioContext.createOscillator();
+      const gainNode = audioContext.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(audioContext.destination);
+      
+      if (type === "success") {
+        oscillator.frequency.value = 800;
+        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.2);
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.2);
+      } else if (type === "error") {
+        oscillator.frequency.value = 300;
+        gainNode.gain.setValueAtTime(0.2, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.3);
+      }
+    } catch (e) {
+      // Audio context not supported, silently continue
+    }
+  }, []);
+
   const parseCsvLine = (line) => {
     const result = [];
     let current = "";
@@ -2181,13 +2212,30 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           errors: data.errors || [],
         });
         setUploadStatus("success");
+        
+        // Show success notification
+        const skipMsg = csvSkipped + skipped > 0 ? `, ${csvSkipped + skipped} skipped` : "";
+        showNotification(
+          "success",
+          "✓ Import Complete",
+          `Imported ${imported} ownership records${skipMsg}`,
+          { imported, skipped: csvSkipped + skipped, total }
+        );
       } catch (err) {
         console.error(`[Background Import] Error:`, err);
         setUploadStatus("error");
         setUploadError(`Background import failed: ${err.message || 'Unknown error'}`);
+        
+        // Show error notification
+        showNotification(
+          "error",
+          "✗ Import Failed",
+          err.message || "An error occurred during import"
+        );
       }
     })();
   };
+
 
   const handleUploadCsv = async () => {
     if (!uploadFile) {
@@ -5325,6 +5373,94 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
       <div className="app-content">
 
+        {/* Notification Toast */}
+        {notification && (
+          <div style={{
+            position: "fixed",
+            top: 16,
+            right: 16,
+            zIndex: 9999,
+            maxWidth: 420,
+            padding: "16px",
+            borderRadius: "8px",
+            boxShadow: "0 10px 25px rgba(0,0,0,0.2)",
+            backgroundColor: notification.type === "success" ? "#ecfdf5" : "#fef2f2",
+            border: `2px solid ${notification.type === "success" ? "#10b981" : "#ef4444"}`,
+            animation: "slideIn 0.3s ease-out",
+          }}>
+            <style>{`
+              @keyframes slideIn {
+                from {
+                  transform: translateX(420px);
+                  opacity: 0;
+                }
+                to {
+                  transform: translateX(0);
+                  opacity: 1;
+                }
+              }
+            `}</style>
+            
+            {/* Close button */}
+            <button
+              onClick={() => setNotification(null)}
+              style={{
+                position: "absolute",
+                top: 8,
+                right: 8,
+                background: "none",
+                border: "none",
+                fontSize: "20px",
+                color: notification.type === "success" ? "#047857" : "#991b1b",
+                cursor: "pointer",
+                padding: "4px 8px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+              title="Dismiss"
+            >
+              ✕
+            </button>
+
+            <div style={{
+              fontSize: "15px",
+              fontWeight: 700,
+              color: notification.type === "success" ? "#065f46" : "#7f1d1d",
+              marginBottom: "4px",
+              paddingRight: "24px",
+            }}>
+              {notification.title}
+            </div>
+            <div style={{
+              fontSize: "13px",
+              color: notification.type === "success" ? "#047857" : "#991b1b",
+              marginBottom: notification.details ? "8px" : "0",
+            }}>
+              {notification.message}
+            </div>
+            {notification.details && (
+              <div style={{
+                fontSize: "13px",
+                color: notification.type === "success" ? "#059669" : "#b91c1c",
+                paddingTop: "8px",
+                borderTop: `1px solid ${notification.type === "success" ? "#a7f3d0" : "#fecaca"}`,
+              }}>
+                {notification.details.imported !== undefined && (
+                  <div style={{ marginTop: "6px" }}>
+                    <strong>Imported:</strong> {notification.details.imported} / {notification.details.total}
+                  </div>
+                )}
+                {notification.details.skipped > 0 && (
+                  <div style={{ marginTop: "4px" }}>
+                    <strong>Skipped:</strong> {notification.details.skipped}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <Dialog open={uploadOpen} onOpenChange={() => setUploadOpen(false)}>
           <DialogContent style={{ maxWidth: uploadPreview && uploadStatus !== "success" ? 700 : 520 }}>
             <DialogHeader>
@@ -5560,6 +5696,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
             <DialogFooter style={{ marginTop: "36px" }}>
               {uploadStatus === "success" ? (
+                <Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>
+                  Close
+                </Button>
+              ) : uploadStatus === "loading-background" ? (
                 <Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>
                   Close
                 </Button>
