@@ -4910,11 +4910,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     setPrintDialogOpen(true);
   }, []);
   const handleQuickFindSelect = useCallback((nodeId) => {
-    const node = getNode(nodeList, nodeId);
     setQuickViewNodeId(nodeId);
-    if (node?.name) setQuickFindQuery(node.name);
+    setQuickFindQuery("");
+    setQuickFindHighlight(-1);
     setQuickFindOpen(false);
-  }, [nodeList]);
+  }, []);
   const focusNodeAndPersistPrimary = useCallback((nodeId) => {
     const nextFocusId = String(nodeId || "");
     if (!nextFocusId) return;
