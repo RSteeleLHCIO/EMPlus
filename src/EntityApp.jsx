@@ -788,6 +788,24 @@ const ORG_V_SEG = 20;        // px — height of each vertical connector segment
 const ORG_LINE_COLOR = '#d1d5db';
 const DEFAULT_TABULAR_VIEW_ID = "__default__";
 const DEFAULT_OWNERSHIP_TABULAR_VIEW_ID = "__default_ownership__";
+const TABULAR_PREFS_STORAGE_KEY = "tabularPrefs";
+
+function readStoredTabularPrefs() {
+  if (typeof window === "undefined") {
+    return { tabularViews: [], tabularViewsSelectedId: DEFAULT_TABULAR_VIEW_ID };
+  }
+  try {
+    const raw = localStorage.getItem(TABULAR_PREFS_STORAGE_KEY);
+    if (!raw) return { tabularViews: [], tabularViewsSelectedId: DEFAULT_TABULAR_VIEW_ID };
+    const parsed = JSON.parse(raw);
+    return {
+      tabularViews: Array.isArray(parsed?.tabularViews) ? parsed.tabularViews : [],
+      tabularViewsSelectedId: parsed?.tabularViewsSelectedId || DEFAULT_TABULAR_VIEW_ID,
+    };
+  } catch {
+    return { tabularViews: [], tabularViewsSelectedId: DEFAULT_TABULAR_VIEW_ID };
+  }
+}
 
 // Normalize appliesTo: old string "both" → ["entity","person"], single string → [string], array → as-is
 const normalizeAppliesTo = (v) =>
@@ -1564,12 +1582,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [tableSavingKeys, setTableSavingKeys] = useState(() => new Set());
   const [tableRowErrors, setTableRowErrors] = useState({});
   const [tableNewRows, setTableNewRows] = useState([]);
-  const [tabularViews, setTabularViews] = useState([]);
+  const [tabularViews, setTabularViews] = useState(() => readStoredTabularPrefs().tabularViews);
   const [selectedTabularViewId, setSelectedTabularViewId] = useState(() => {
     if (homeScreen?.viewMode === "tabular" && homeScreen?.selectedTabularViewId) {
       return homeScreen.selectedTabularViewId;
     }
-    return DEFAULT_TABULAR_VIEW_ID;
+    return readStoredTabularPrefs().tabularViewsSelectedId || DEFAULT_TABULAR_VIEW_ID;
   });
   const [tabularViewDialogOpen, setTabularViewDialogOpen] = useState(false);
   const [tabularViewDraft, setTabularViewDraft] = useState({
@@ -2058,17 +2076,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   };
 
   useEffect(() => {
-    if (!myLoginId) return;
-    apiRequest("/api/auth/me", {
-      method: "PATCH",
-      body: JSON.stringify({
+    try {
+      localStorage.setItem(TABULAR_PREFS_STORAGE_KEY, JSON.stringify({
         tabularViews,
         tabularViewsSelectedId: selectedTabularViewId,
-      }),
-    }).catch(() => { });
-    // apiRequest is intentionally omitted to avoid firing on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [myLoginId, selectedTabularViewId, tabularViews]);
+      }));
+    } catch { }
+  }, [selectedTabularViewId, tabularViews]);
 
   const readFileText = (file) =>
     new Promise((resolve, reject) => {
