@@ -1604,6 +1604,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [tabularDragOverKey, setTabularDragOverKey] = useState(null);
   const [tabularDraftFilterKey, setTabularDraftFilterKey] = useState(null);
   const [tabularDraftFilterPopoverPos, setTabularDraftFilterPopoverPos] = useState({ top: 0, left: 0 });
+  const [tabularWidthDragState, setTabularWidthDragState] = useState(null);
   const [tabularSaveAsNewOpen, setTabularSaveAsNewOpen] = useState(false);
   const [tabularSaveAsNewName, setTabularSaveAsNewName] = useState("");
   const [tabularSaveAsNewError, setTabularSaveAsNewError] = useState("");
@@ -3409,6 +3410,25 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     if (view.sort !== undefined) setOwnershipTabularSort(view.sort || null);
     if (view.filters !== undefined) setOwnershipTabularFilters(view.filters || {});
   }, [selectedOwnershipTabularViewId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!tabularWidthDragState) return;
+    const onMove = (e) => {
+      const dx = e.clientX - tabularWidthDragState.startX;
+      const newWidth = Math.max(60, Math.min(600, tabularWidthDragState.startWidth + dx));
+      setTabularViewDraft((prev) => ({
+        ...prev,
+        columnWidths: { ...(prev.columnWidths || {}), [tabularWidthDragState.key]: Math.round(newWidth) },
+      }));
+    };
+    const onUp = () => setTabularWidthDragState(null);
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, [tabularWidthDragState]);
 
   const toggleTabularFilter = useCallback((key, e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -6482,7 +6502,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     <DialogContent style={{ width: "min(760px, 92vw)", maxWidth: "none" }}>
                       <DialogHeader>
                         <DialogTitle>
-                          Customize View — Nodes
+                          Customize View
                           <span style={{ fontWeight: 400, color: '#64748b', fontSize: '14px', marginLeft: 10 }}>{activeTabularView.name}</span>
                         </DialogTitle>
                       </DialogHeader>
@@ -6546,6 +6566,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         </div>
                         <div className="tabular-view-columns">
                           <div className="tabular-view-section-title" style={{ marginTop: 10, marginLeft: 10 }}>In View</div>
+                          <div style={{ fontSize: 11, color: '#94a3b8', marginLeft: 10, marginBottom: 4 }}>Drag rows to reorder · Drag right edge of field bar to set column width · Double-click bar to reset to auto</div>
                           {tabularViewDraft.columnOrder.map((key, idx) => {
                             const col = allTabularColumns.find((c) => c.key === key);
                             if (!col) return null;
@@ -6561,10 +6582,44 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                 onDragEnd={() => { setTabularDragKey(null); setTabularDragOverKey(null); }}
                               >
                                 <span className="tabular-drag-handle" title="Drag to reorder">⠿</span>
-                                <label className="tabular-view-column-toggle">
-                                  <input type="checkbox" checked onChange={() => toggleTabularDraftSelected(key)} />
-                                  <span>{col.label}</span>
-                                </label>
+                                <input
+                                  type="checkbox"
+                                  className="tabular-col-checkbox"
+                                  checked
+                                  onChange={() => toggleTabularDraftSelected(key)}
+                                  title="Remove from view"
+                                />
+                                {(() => {
+                                  const colWidth = tabularViewDraft.columnWidths?.[key];
+                                  const isAuto = !colWidth;
+                                  const visualWidth = colWidth || 160;
+                                  return (
+                                    <div
+                                      className={`tabular-col-width-bar${isAuto ? ' tabular-col-width-bar--auto' : ''}`}
+                                      style={{ width: visualWidth }}
+                                      draggable={false}
+                                      onDragStart={(e) => e.stopPropagation()}
+                                      onDoubleClick={() => {
+                                        setTabularViewDraft((prev) => {
+                                          const cw = { ...(prev.columnWidths || {}) };
+                                          delete cw[key];
+                                          return { ...prev, columnWidths: cw };
+                                        });
+                                      }}
+                                      title={isAuto ? 'Auto width — drag right edge to set; double-click to reset' : `${colWidth}px — double-click to reset to auto`}
+                                    >
+                                      <span className="tabular-col-width-bar-label">{col.label}</span>
+                                      <div
+                                        className="tabular-col-width-bar-handle"
+                                        onMouseDown={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          setTabularWidthDragState({ key, startX: e.clientX, startWidth: visualWidth });
+                                        }}
+                                      />
+                                    </div>
+                                  );
+                                })()}
                                 {(() => {
                                   const { filterType } = getColumnFilterConfig(col);
                                   if (!filterType) return null;
@@ -6585,23 +6640,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                     </button>
                                   );
                                 })()}
-                                <input
-                                  type="number"
-                                  className="tabular-width-input"
-                                  placeholder="auto"
-                                  min="60"
-                                  step="1"
-                                  value={tabularViewDraft.columnWidths?.[key] || ""}
-                                  onChange={(e) => {
-                                    const v = e.target.value;
-                                    setTabularViewDraft((prev) => {
-                                      if (!v) { const cw = { ...(prev.columnWidths || {}) }; delete cw[key]; return { ...prev, columnWidths: cw }; }
-                                      return { ...prev, columnWidths: { ...(prev.columnWidths || {}), [key]: Number(v) } };
-                                    });
-                                  }}
-                                  title="Column width in pixels (blank = auto-size from data)"
-                                />
-                                <span className="tabular-width-px-label">px</span>
                               </div>
                             );
                           })}
@@ -6651,7 +6689,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   <Dialog open={tabularSaveAsNewOpen} onOpenChange={(open) => { if (!open) setTabularSaveAsNewOpen(false); }}>
                     <DialogContent style={{ width: "min(400px, 92vw)", maxWidth: "none" }}>
                       <DialogHeader>
-                        <DialogTitle>Save as New View — Nodes</DialogTitle>
+                        <DialogTitle>Save as New View</DialogTitle>
                       </DialogHeader>
                       <div style={{ padding: "8px 0" }}>
                         <label className="form-label" style={{ marginBottom: 6, display: "block" }}>View name</label>
