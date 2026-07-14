@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import * as XLSX from "xlsx";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet, Save } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet, Save, FilePlus } from "lucide-react";
 import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved, estimatePosterPageCount, generateOrgChartPoster } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone, normalizeDateInput } from "./utils/helpers";
@@ -3106,6 +3106,35 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     setTabularSaveAsNewError("");
     setTabularSaveAsNewOpen(true);
   }, []);
+
+  const saveCurrentTabularViewLive = useCallback(() => {
+    if (selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID) return;
+    const selectedExists = tabularViews.some((v) => v.id === selectedTabularViewId);
+    if (!selectedExists) return;
+    const nextView = sanitizeTabularView({
+      ...activeTabularView,
+      id: selectedTabularViewId,
+      sort: tabularSort,
+      filters: { ...tabularFilters },
+    });
+    if (!nextView) return;
+    const nextViews = tabularViews.map((v) => (v.id === selectedTabularViewId ? nextView : v));
+    setTabularViews(nextViews);
+    persistTabularViewPrefs(nextViews, selectedTabularViewId);
+  }, [activeTabularView, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularFilters, tabularSort, tabularViews]);
+
+  const openTabularSaveAsNewFromLive = useCallback(() => {
+    setTabularViewDraft({
+      ...activeTabularView,
+      sort: tabularSort,
+      filters: { ...tabularFilters },
+      columnOrder: [...(activeTabularView.columnOrder || defaultTabularOrder)],
+      columnWidths: { ...(activeTabularView.columnWidths || {}) },
+    });
+    setTabularSaveAsNewName("");
+    setTabularSaveAsNewError("");
+    setTabularSaveAsNewOpen(true);
+  }, [activeTabularView, defaultTabularOrder, tabularFilters, tabularSort]);
 
   const commitTabularSaveAsNew = useCallback(() => {
     const name = tabularSaveAsNewName.trim();
@@ -6236,9 +6265,26 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         <option key={v.id} value={v.id}>{v.name}</option>
                       ))}
                     </select>
-                    <Button type="button" variant="outline" onClick={openTabularViewManager}>
-                      Customize
-                    </Button>
+                    <button type="button" className="tabular-toolbar-icon-btn" title="Customize view" onClick={openTabularViewManager}>
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="tabular-toolbar-icon-btn"
+                      title="Save current view"
+                      disabled={effectiveSelectedTabularViewId === DEFAULT_TABULAR_VIEW_ID}
+                      onClick={saveCurrentTabularViewLive}
+                    >
+                      <Save size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="tabular-toolbar-icon-btn"
+                      title="Save as new view"
+                      onClick={openTabularSaveAsNewFromLive}
+                    >
+                      <FilePlus size={14} />
+                    </button>
                     {/* Search input after Customize */}
                     <div className="quick-find" style={{ width: 200, maxWidth: "none", border: "none", background: "transparent", minHeight: "auto", padding: 0 }}>
                       <div className="quick-find-input-wrap" style={{ border: "none", background: "transparent", padding: 0, display: "flex", alignItems: "center", gap: 8 }}>

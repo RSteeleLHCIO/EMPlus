@@ -600,6 +600,30 @@ input[type="text"] {
     gap: 8px;
 }
 
+.tabular-toolbar-icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    background: #fff;
+    color: #374151;
+    border: 1.5px solid #d1d5db;
+    border-radius: 7px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.tabular-toolbar-icon-btn:hover:not(:disabled) {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+    color: #111827;
+}
+.tabular-toolbar-icon-btn:disabled {
+    opacity: 0.38;
+    cursor: default;
+}
+
 .tabular-view-select {
     min-width: 200px;
     padding: 7px 10px;
