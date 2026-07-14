@@ -4137,9 +4137,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   const openOwnerEditor = async (targetId) => {
     // Fetch ownership timeline from server
+    let timelinePeriods = [];
     try {
       const timelineResp = await apiRequest(`/api/ownership/history/${encodeURIComponent(targetId)}`);
-      setOwnershipTimeline(timelineResp.periods || []);
+      timelinePeriods = timelineResp.periods || [];
+      setOwnershipTimeline(timelinePeriods);
     } catch (err) {
       console.error("Failed to fetch ownership timeline:", err);
       setOwnershipTimeline([]);
@@ -4170,7 +4172,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     setOwnerEditorOriginal(currentOwners);
     setOwnerEditorDateRange(dateRange);
     setOwnerEditorMode("view"); // Start in view mode
-    setOwnershipSelectedPeriodSetId(firstOwnership?.rel?.setId || null);
+    // Select the current period from timeline (the one with no end date)
+    const currentPeriod = timelinePeriods?.find((p) => !p.effectiveTo);
+    setOwnershipSelectedPeriodSetId(currentPeriod?.setId || firstOwnership?.rel?.setId || null);
     setOwnershipDeleteConfirm(false); // Reset delete confirmation
     setOwnerSearch("");
     setOwnerSearchOpen(false);
@@ -4417,6 +4421,47 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       });
     }
   }, [editEmploymentId, employments]);
+
+  useEffect(() => {
+    if (!openDialog || openDialog.type !== "edit-owners" || !openDialog.targetId || !ownershipTimeline.length || !asOfDate) {
+      return;
+    }
+
+    // Find the period that matches asOfDate
+    const matchingPeriod = ownershipTimeline.find((period) => {
+      const fromDate = period.effectiveFrom ? new Date(period.effectiveFrom) : null;
+      const toDate = period.effectiveTo ? new Date(period.effectiveTo) : null;
+      const dateToCheck = new Date(asOfDate);
+      
+      if (!fromDate && !toDate) return true; // Unspecified period covers all dates
+      if (!fromDate) return dateToCheck <= toDate;
+      if (!toDate) return dateToCheck >= fromDate;
+      return dateToCheck >= fromDate && dateToCheck <= toDate;
+    });
+
+    if (matchingPeriod) {
+      // Load this period's data
+      const periodRows = matchingPeriod.owners.map((o) => {
+        const node = getNode(nodeList, o.from);
+        return {
+          nodeId: o.from,
+          name: node?.name ?? o.from,
+          percent: String(o.percent),
+          startDate: "",
+          endDate: "",
+          isNew: false,
+        };
+      });
+      setOwnershipSelectedPeriodSetId(matchingPeriod.setId);
+      setOwnerEditorRows(periodRows);
+      setOwnerEditorOriginal(periodRows);
+      setOwnerEditorDateRange({
+        from: matchingPeriod.effectiveFrom,
+        to: matchingPeriod.effectiveTo,
+        isCurrent: !matchingPeriod.effectiveTo,
+      });
+    }
+  }, [asOfDate, ownershipTimeline, openDialog, nodeList]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -7104,78 +7149,109 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                               </div>
                             </div>
                           ))}
-                          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #e2e8f0', fontWeight: 600, fontSize: 13 }}>
-                            Total: {ownerTotal}%
-                          </div>
                         </div>
                       )}
                     </div>
 
-                    {/* Timeline of other ownership periods */}
-                    {ownershipTimeline.length > 1 && (
+                    {/* Timeline of ownership periods */}
+                    {(ownershipTimeline.length > 1 || (ownershipTimeline.length === 1 && ownerEditorRows.length === 0)) && (
                       <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
                         <div style={{ fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 8 }}>
-                          Other ownership groups {otherPeriods.length > 0 ? `(${otherPeriods.length})` : "(none)"}
+                          Ownership Timeline {ownershipTimeline.length > 0 ? `(${ownershipTimeline.length} periods)` : ""}
                         </div>
-                        {otherPeriods.length === 0 ? (
-                          <div style={{ fontSize: 12, color: '#94a3b8 ' }}>No other ownership groups</div>
-                        ) : (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            {otherPeriods.map((period) => {
-                              const fromDisplay = formatDateDisplay(period.effectiveFrom);
-                              const toDisplay = formatDateDisplay(period.effectiveTo);
-                              const label = !fromDisplay && !toDisplay ? "Unspecified"
-                                : fromDisplay && !toDisplay ? `Since ${fromDisplay}`
-                                  : !fromDisplay && toDisplay ? `Until ${toDisplay}`
-                                    : `${fromDisplay} to ${toDisplay}`;
-                              return (
-                                <button
-                                  key={period.setId}
-                                  type="button"
-                                  onClick={() => {
-                                    // Reload this period's data and stay in view mode
-                                    const periodRows = period.owners.map((o) => {
-                                      const node = getNode(nodeList, o.from);
-                                      return {
-                                        nodeId: o.from,
-                                        name: node?.name ?? o.from,
-                                        percent: String(o.percent),
-                                        startDate: "",
-                                        endDate: "",
-                                        isNew: false,
-                                      };
+                        {/* Timeline Table */}
+                        <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 6, marginBottom: 16 }}>
+                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                              <thead>
+                                <tr>
+                                  <th style={{ textAlign: 'left', padding: 8, borderRight: '1px solid #e2e8f0', fontWeight: 600, background: '#f8fafc', minWidth: 120 }}></th>
+                                  {ownershipTimeline.map((period) => {
+                                    const fromDisplay = formatDateDisplay(period.effectiveFrom);
+                                    const toDisplay = formatDateDisplay(period.effectiveTo);
+                                    const fromLabel = !fromDisplay ? "—" : fromDisplay;
+                                    const toLabel = !toDisplay ? "present" : toDisplay;
+                                    return (
+                                      <th
+                                        key={period.setId}
+                                        style={{
+                                          textAlign: 'center',
+                                          padding: 8,
+                                          borderRight: '1px solid #e2e8f0',
+                                          fontWeight: 600,
+                                          background: '#f8fafc',
+                                          width: 90,
+                                          minWidth: 90,
+                                          cursor: 'pointer',
+                                          transition: 'background 0.2s',
+                                          whiteSpace: 'normal',
+                                          wordBreak: 'break-word',
+                                        }}
+                                        onMouseOver={(e) => e.currentTarget.style.background = '#e2e8f0'}
+                                        onMouseOut={(e) => e.currentTarget.style.background = '#f8fafc'}
+                                        onClick={() => {
+                                          // Load and display this period's ownership data
+                                          const periodRows = period.owners.map((o) => {
+                                            const node = getNode(nodeList, o.from);
+                                            return {
+                                              nodeId: o.from,
+                                              name: node?.name ?? o.from,
+                                              percent: String(o.percent),
+                                              startDate: "",
+                                              endDate: "",
+                                              isNew: false,
+                                            };
+                                          });
+                                          setOwnershipSelectedPeriodSetId(period.setId);
+                                          setOwnerEditorRows(periodRows);
+                                          setOwnerEditorOriginal(periodRows);
+                                          setOwnerEditorDateRange({
+                                            from: period.effectiveFrom,
+                                            to: period.effectiveTo,
+                                            isCurrent: !period.effectiveTo,
+                                          });
+                                          setAsOfDate(period.effectiveFrom || "");
+                                        }}
+                                        title="Click to view this period"
+                                      >
+                                        <div style={{ fontSize: 11, lineHeight: '1.2' }}>{fromLabel}</div>
+                                        <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>to</div>
+                                        <div style={{ fontSize: 11, lineHeight: '1.2' }}>{toLabel}</div>
+                                      </th>
+                                    );
+                                  })}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(() => {
+                                  const allOwners = new Map();
+                                  ownershipTimeline.forEach((period) => {
+                                    period.owners.forEach((owner) => {
+                                      if (!allOwners.has(owner.from)) {
+                                        const node = getNode(nodeList, owner.from);
+                                        allOwners.set(owner.from, { nodeId: owner.from, name: node?.name ?? owner.from, periods: {} });
+                                      }
+                                      allOwners.get(owner.from).periods[period.setId] = owner.percent;
                                     });
-                                    setOwnershipSelectedPeriodSetId(period.setId);
-                                    setOwnerEditorRows(periodRows);
-                                    setOwnerEditorOriginal(periodRows); // Sync backup for cancel logic
-                                    setOwnerEditorDateRange({
-                                      from: period.effectiveFrom,
-                                      to: period.effectiveTo,
-                                      isCurrent: !period.effectiveTo,
-                                    });
-                                  }}
-                                  style={{
-                                    padding: '8px 10px',
-                                    textAlign: 'left',
-                                    fontSize: 12,
-                                    border: '1px solid #cbd5e1',
-                                    borderRadius: 4,
-                                    backgroundColor: '#f8fafc',
-                                    cursor: 'pointer',
-                                    transition: 'all 0.2s',
-                                  }}
-                                  onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#f1f5f9'}
-                                  onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#f8fafc'}
-                                >
-                                  <div style={{ fontWeight: 500 }}>{label}</div>
-                                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 2 }}>
-                                    {period.owners.length} owner{period.owners.length !== 1 ? 's' : ''} • {period.owners.reduce((s, o) => s + (o.percent || 0), 0)}%
-                                  </div>
-                                </button>
-                              );
-                            })}
+                                  });
+                                  return Array.from(allOwners.values())
+                                    .sort((a, b) => a.name.localeCompare(b.name))
+                                    .map((owner) => (
+                                      <tr key={owner.nodeId}>
+                                        <td style={{ padding: 8, borderRight: '1px solid #e2e8f0', fontWeight: 500, background: '#fafbfc' }}>{owner.name}</td>
+                                        {ownershipTimeline.map((period) => {
+                                          const pct = owner.periods[period.setId];
+                                          return (
+                                            <td key={period.setId} style={{ textAlign: 'center', padding: 8, borderRight: '1px solid #e2e8f0', color: pct ? '#0f172a' : '#cbd5e1' }}>
+                                              {pct ? `${pct}%` : '—'}
+                                            </td>
+                                          );
+                                        })}
+                                      </tr>
+                                    ));
+                                })()}
+                              </tbody>
+                            </table>
                           </div>
-                        )}
                       </div>
                     )}
                   </div>
