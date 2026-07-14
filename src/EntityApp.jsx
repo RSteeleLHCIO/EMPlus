@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import * as XLSX from "xlsx";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet, Save } from "lucide-react";
 import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved, estimatePosterPageCount, generateOrgChartPoster } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone, normalizeDateInput } from "./utils/helpers";
@@ -1353,6 +1353,9 @@ function ColumnFilterPopover({ filterType, enumOptions, currentFilter, popoverPo
       style={{ position: "fixed", top: popoverPos.top, left: popoverPos.left, zIndex: 9999 }}
       onClick={(e) => e.stopPropagation()}
     >
+      <button className="tabular-filter-confirm-btn" title="Done" onClick={onClose}>
+        <Save size={13} />
+      </button>
       {filterType === "text" && (
         <input
           className="tabular-filter-input"
@@ -1399,9 +1402,11 @@ function ColumnFilterPopover({ filterType, enumOptions, currentFilter, popoverPo
             onChange={(e) => onChange({ type: "daterange", from: dateFrom, to: e.target.value })} />
         </div>
       )}
-      {hasValue && (
-        <button className="tabular-filter-clear-btn" onClick={() => onChange(null)}>Clear filter</button>
-      )}
+      <div className="tabular-filter-popover-footer">
+        {hasValue && (
+          <button className="tabular-filter-clear-btn" onClick={() => onChange(null)}>Clear filter</button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1595,7 +1600,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     columnOrder: [],
   });
   const [tabularViewNameError, setTabularViewNameError] = useState("");
-  const [tabularOrderInputs, setTabularOrderInputs] = useState({});
+  const [tabularDragKey, setTabularDragKey] = useState(null);
+  const [tabularDragOverKey, setTabularDragOverKey] = useState(null);
+  const [tabularDraftFilterKey, setTabularDraftFilterKey] = useState(null);
+  const [tabularDraftFilterPopoverPos, setTabularDraftFilterPopoverPos] = useState({ top: 0, left: 0 });
   const [tabularSaveAsNewOpen, setTabularSaveAsNewOpen] = useState(false);
   const [tabularSaveAsNewName, setTabularSaveAsNewName] = useState("");
   const [tabularSaveAsNewError, setTabularSaveAsNewError] = useState("");
@@ -3027,20 +3035,21 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       filters: { ...tabularFilters },
       columnWidths: { ...(activeTabularView.columnWidths || {}) },
     });
-    setTabularOrderInputs({});
+    setTabularDraftFilterKey(null);
     setTabularViewDialogOpen(true);
   }, [activeTabularView, defaultTabularOrder, tabularSort, tabularFilters, tabularSubMode]);
 
-  const applyTabularOrder = useCallback((currentOrder, inputs) => {
-    const orderValues = {};
-    currentOrder.forEach((key, idx) => {
-      const raw = inputs[key];
-      const parsed = raw !== undefined && raw !== "" ? parseFloat(raw) : NaN;
-      orderValues[key] = isNaN(parsed) ? (idx + 1) : parsed;
+  const handleTabularDragDrop = useCallback((dragKey, dropKey) => {
+    if (!dragKey || !dropKey || dragKey === dropKey) return;
+    setTabularViewDraft((prev) => {
+      const order = [...prev.columnOrder];
+      const fromIdx = order.indexOf(dragKey);
+      const toIdx = order.indexOf(dropKey);
+      if (fromIdx < 0 || toIdx < 0) return prev;
+      order.splice(fromIdx, 1);
+      order.splice(toIdx, 0, dragKey);
+      return { ...prev, columnOrder: order };
     });
-    const sorted = [...currentOrder].sort((a, b) => orderValues[a] - orderValues[b]);
-    setTabularViewDraft((prev) => ({ ...prev, columnOrder: sorted }));
-    setTabularOrderInputs({});
   }, []);
 
   const moveTabularDraftColumn = useCallback((key, direction) => {
@@ -3128,6 +3137,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     const nextViews = tabularViews.map((v) => (v.id === selectedTabularViewId ? nextView : v));
     setTabularViews(nextViews);
     persistTabularViewPrefs(nextViews, selectedTabularViewId);
+    setTabularFilters(nextView.filters || {});
+    setTabularSort(nextView.sort || null);
     setTabularViewDialogOpen(false);
   }, [activeTabularView.name, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularViewDraft, tabularViews]);
 
@@ -6493,20 +6504,41 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                             const col = allTabularColumns.find((c) => c.key === key);
                             if (!col) return null;
                             return (
-                              <div key={key} className="tabular-view-column-row">
-                                <input
-                                  type="text"
-                                  className="tabular-order-input"
-                                  value={tabularOrderInputs[key] ?? (idx + 1)}
-                                  onChange={(e) => setTabularOrderInputs((prev) => ({ ...prev, [key]: e.target.value }))}
-                                  onBlur={() => applyTabularOrder(tabularViewDraft.columnOrder, tabularOrderInputs)}
-                                  onKeyDown={(e) => { if (e.key === 'Enter') applyTabularOrder(tabularViewDraft.columnOrder, tabularOrderInputs); }}
-                                  title="Display order (fractions allowed, e.g. 1.5)"
-                                />
+                              <div
+                                key={key}
+                                className={`tabular-view-column-row${tabularDragOverKey === key && tabularDragKey !== key ? ' tabular-drag-over' : ''}`}
+                                draggable
+                                onDragStart={() => setTabularDragKey(key)}
+                                onDragOver={(e) => { e.preventDefault(); setTabularDragOverKey(key); }}
+                                onDragLeave={() => setTabularDragOverKey(null)}
+                                onDrop={() => { handleTabularDragDrop(tabularDragKey, key); setTabularDragKey(null); setTabularDragOverKey(null); }}
+                                onDragEnd={() => { setTabularDragKey(null); setTabularDragOverKey(null); }}
+                              >
+                                <span className="tabular-drag-handle" title="Drag to reorder">⠿</span>
                                 <label className="tabular-view-column-toggle">
                                   <input type="checkbox" checked onChange={() => toggleTabularDraftSelected(key)} />
                                   <span>{col.label}</span>
                                 </label>
+                                {(() => {
+                                  const { filterType } = getColumnFilterConfig(col);
+                                  if (!filterType) return null;
+                                  const hasFilter = !isFilterEmpty(tabularViewDraft.filters?.[key]);
+                                  return (
+                                    <button
+                                      type="button"
+                                      className={`tabular-filter-btn${hasFilter ? " tabular-filter-btn--active" : ""}`}
+                                      title={hasFilter ? "Filter active" : "Filter"}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        const rect = e.currentTarget.getBoundingClientRect();
+                                        setTabularDraftFilterPopoverPos({ top: rect.bottom + 4, left: rect.left });
+                                        setTabularDraftFilterKey((prev) => (prev === key ? null : key));
+                                      }}
+                                    >
+                                      <Filter size={11} />
+                                    </button>
+                                  );
+                                })()}
                                 <input
                                   type="number"
                                   className="tabular-width-input"
@@ -6538,6 +6570,21 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           ))}
                         </div>
                       </div>
+                      {tabularDraftFilterKey && (() => {
+                        const draftFilterCol = allTabularColumns.find((c) => c.key === tabularDraftFilterKey);
+                        if (!draftFilterCol) return null;
+                        const { filterType, enumOptions } = getColumnFilterConfig(draftFilterCol);
+                        return (
+                          <ColumnFilterPopover
+                            filterType={filterType}
+                            enumOptions={enumOptions || []}
+                            currentFilter={tabularViewDraft.filters?.[tabularDraftFilterKey] || null}
+                            popoverPos={tabularDraftFilterPopoverPos}
+                            onChange={(f) => setTabularViewDraft((prev) => ({ ...prev, filters: { ...(prev.filters || {}), [tabularDraftFilterKey]: f } }))}
+                            onClose={() => setTabularDraftFilterKey(null)}
+                          />
+                        );
+                      })()}
                       <DialogFooter style={{ justifyContent: "space-between" }}>
                         <div style={{ display: "flex", gap: 8 }}>
                           <Button type="button" variant="outline" onClick={updateCurrentTabularView} disabled={selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID}>Save</Button>
