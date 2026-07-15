@@ -670,6 +670,7 @@ input[type="text"] {
     border-collapse: separate;
     border-spacing: 0;
     font-size: 13px;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 .tabular-table th,
@@ -683,6 +684,17 @@ input[type="text"] {
 
 .tabular-table td {
     white-space: nowrap;
+}
+
+.tabular-table td,
+.tabular-table td input,
+.tabular-table td select,
+.tabular-table td textarea,
+.tabular-table td button {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 400;
+    letter-spacing: normal;
 }
 
 .tabular-table td.tabular-cell-wrap {
@@ -736,7 +748,8 @@ input[type="text"] {
     border: 1px solid #d1d5db;
     border-radius: 6px;
     background: #fff;
-    font-size: 13px;
+    font: inherit;
+    line-height: 1.3;
 }
 
 .tabular-cell-input:disabled {
@@ -748,6 +761,8 @@ input[type="text"] {
 .tabular-cell-ro {
     display: block;
     font-size: 13px;
+    font-family: inherit;
+    font-weight: 400;
     color: #374151;
     padding: 5px 2px;
     white-space: nowrap;
