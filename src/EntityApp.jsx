@@ -7101,7 +7101,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             const otherPeriods = ownershipTimeline.filter((p) => p.setId !== ownershipSelectedPeriodSetId);
 
             return (
-              <DialogContent style={{ minWidth: 560, maxWidth: 700, maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
+              <DialogContent
+                className="dialog-content--tall"
+                style={{
+                  minWidth: 560,
+                  maxWidth: 700,
+                  width: "min(700px, 92vw)",
+                  height: "min(680px, calc(100dvh - 170px))",
+                  maxHeight: "min(680px, calc(100dvh - 170px))",
+                  display: 'flex',
+                  flexDirection: 'column',
+                }}
+              >
                 <DialogHeader>
                   <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
                     <div>
@@ -7120,51 +7131,52 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   </div>
                 </DialogHeader>
 
-                {/* VIEW MODE */}
-                {ownerEditorMode === "view" && (
-                  <div style={{ overflowY: 'auto', flex: 1, paddingRight: 16 }}>
-                    {/* Current ownership display */}
-                    <div style={{ marginBottom: 20 }}>
-                      {ownerEditorRows.length === 0 ? (
-                        <div style={{ padding: 12, backgroundColor: '#f0fdf4', color: '#166534', borderRadius: 4, fontSize: 13 }}>
-                          {(() => {
-                            // Find the earliest effective date in timeline if there are future periods
-                            const earliestFutureDate = ownershipTimeline
-                              .map((p) => p.effectiveFrom)
-                              .filter(Boolean)
-                              .sort((a, b) => a.localeCompare(b))[0];
-                            
-                            return earliestFutureDate
-                              ? `No ownership records before ${formatDateDisplay(earliestFutureDate)}`
-                              : "No ownership records";
-                          })()}
-                        </div>
-                      ) : (
-                        <div className="owner-editor">
-                          {[...ownerEditorRows].sort((a, b) => (Number(b.percent) || 0) - (Number(a.percent) || 0)).map((row) => (
-                            <div key={row.nodeId} className="owner-editor-row" style={{ opacity: 0.8 }}>
-                              <div className="owner-editor-name">{row.name}</div>
-                              <div className="owner-editor-pct-wrap">
-                                <span style={{ fontWeight: 600 }}>{row.percent}%</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                <div className="dialog-body" style={{ paddingBottom: 6, paddingRight: 16 }}>
+                  {/* VIEW MODE */}
+                  {ownerEditorMode === "view" && (
+                    <div>
+                      {/* Current ownership display */}
+                      <div style={{ marginBottom: 20 }}>
+                        {ownerEditorRows.length === 0 ? (
+                          <div style={{ padding: 12, backgroundColor: '#f0fdf4', color: '#166534', borderRadius: 4, fontSize: 13 }}>
+                            {(() => {
+                              // Find the earliest effective date in timeline if there are future periods
+                              const earliestFutureDate = ownershipTimeline
+                                .map((p) => p.effectiveFrom)
+                                .filter(Boolean)
+                                .sort((a, b) => a.localeCompare(b))[0];
 
-                    {/* Timeline of ownership periods */}
-                    {(ownershipTimeline.length > 1 || (ownershipTimeline.length === 1 && ownerEditorRows.length === 0)) && (
-                      <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
-                        <div style={{ fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 8 }}>
-                          Ownership Timeline {ownershipTimeline.length > 0 ? `(${ownershipTimeline.length} periods)` : ""}
-                        </div>
-                        {/* Timeline Table */}
-                        <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 6, marginBottom: 16 }}>
+                              return earliestFutureDate
+                                ? `No ownership records before ${formatDateDisplay(earliestFutureDate)}`
+                                : "No ownership records";
+                            })()}
+                          </div>
+                        ) : (
+                          <div className="owner-editor">
+                            {[...ownerEditorRows].sort((a, b) => (Number(b.percent) || 0) - (Number(a.percent) || 0)).map((row) => (
+                              <div key={row.nodeId} className="owner-editor-row" style={{ opacity: 0.8 }}>
+                                <div className="owner-editor-name">{row.name}</div>
+                                <div className="owner-editor-pct-wrap">
+                                  <span style={{ fontWeight: 600 }}>{row.percent}%</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Timeline of ownership periods */}
+                      {(ownershipTimeline.length > 1 || (ownershipTimeline.length === 1 && ownerEditorRows.length === 0)) && (
+                        <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: 12 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: '#475569', marginBottom: 8 }}>
+                            Ownership Timeline {ownershipTimeline.length > 0 ? `(${ownershipTimeline.length} periods)` : ""}
+                          </div>
+                          {/* Timeline Table */}
+                          <div style={{ overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 6, marginBottom: 0, paddingBottom: 6 }}>
                             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                               <thead>
                                 <tr>
-                                  <th style={{ textAlign: 'left', padding: 8, borderRight: '1px solid #e2e8f0', fontWeight: 600, background: '#f8fafc', minWidth: 120 }}></th>
+                                  <th style={{ textAlign: 'left', padding: 8, borderRight: '1px solid #e2e8f0', borderBottom: '1px solid #e2e8f0', fontWeight: 600, background: '#f8fafc', minWidth: 120 }}></th>
                                   {ownershipTimeline.map((period) => {
                                     const fromDisplay = formatDateDisplay(period.effectiveFrom);
                                     const toDisplay = formatDateDisplay(period.effectiveTo);
@@ -7177,6 +7189,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                           textAlign: 'center',
                                           padding: 8,
                                           borderRight: '1px solid #e2e8f0',
+                                          borderBottom: '1px solid #e2e8f0',
                                           fontWeight: 600,
                                           background: '#f8fafc',
                                           width: 90,
@@ -7237,11 +7250,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                                     .sort((a, b) => a.name.localeCompare(b.name))
                                     .map((owner) => (
                                       <tr key={owner.nodeId}>
-                                        <td style={{ padding: 8, borderRight: '1px solid #e2e8f0', fontWeight: 500, background: '#fafbfc' }}>{owner.name}</td>
+                                        <td style={{ padding: 8, borderRight: '1px solid #e2e8f0', fontWeight: 500, background: '#fafbfc', width: 120, minWidth: 120 }}>{owner.name}</td>
                                         {ownershipTimeline.map((period) => {
                                           const pct = owner.periods[period.setId];
                                           return (
-                                            <td key={period.setId} style={{ textAlign: 'center', padding: 8, borderRight: '1px solid #e2e8f0', color: pct ? '#0f172a' : '#cbd5e1' }}>
+                                            <td key={period.setId} style={{ textAlign: 'center', padding: 8, borderRight: '1px solid #e2e8f0', color: pct ? '#0f172a' : '#cbd5e1', width: 90, minWidth: 90 }}>
                                               {pct ? `${pct}%` : '—'}
                                             </td>
                                           );
@@ -7252,107 +7265,108 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                               </tbody>
                             </table>
                           </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* EDIT/CREATE MODE */}
-                {(ownerEditorMode === "edit-existing" || ownerEditorMode === "create-new") && (
-                  <div style={{ overflowY: 'auto', flex: 1, paddingRight: 16 }}>
-                    <div className="owner-editor">
-                      <div className="form-row" style={{ marginBottom: 12 }}>
-                        <label className="form-label">
-                          {ownerEditorMode === "edit-existing" ? "Effective from (change start date)" : "Effective from"}
-                        </label>
-                        <input
-                          className="form-input"
-                          type="date"
-                          value={ownerEditorEffectiveDate}
-                          onChange={(e) => setOwnerEditorEffectiveDate(e.target.value)}
-                          required
-                        />
-                      </div>
-
-                      {ownerEditorRows.length === 0 && (
-                        <div className="owner-editor-empty">No owners yet — search below to add one.</div>
-                      )}
-                      {ownerEditorRows.map((row, idx) => (
-                        <div key={row.nodeId} className="owner-editor-row">
-                          <div className="owner-editor-name">{row.name}</div>
-                          <div className="owner-editor-pct-wrap">
-                            <input
-                              className="form-input owner-editor-pct-input"
-                              type="number"
-                              min="0"
-                              max="100"
-                              placeholder="%"
-                              value={row.percent}
-                              onChange={(e) =>
-                                setOwnerEditorRows((prev) =>
-                                  prev.map((r, i) => i === idx ? { ...r, percent: e.target.value } : r)
-                                )
-                              }
-                            />
-                            <span className="owner-editor-pct-sign">%</span>
-                          </div>
-                          <button
-                            className="owner-editor-remove"
-                            title="Remove owner"
-                            onClick={() => setOwnerEditorRows((prev) => prev.filter((_, i) => i !== idx))}
-                          >
-                            <X size={14} />
-                          </button>
                         </div>
-                      ))}
+                      )}
+                    </div>
+                  )}
 
-                      <div className={`owner-editor-total ${overLimit ? "over" : ""}`}>
-                        Total:&nbsp;<strong>{ownerTotal}%</strong>
-                        {overLimit && <span className="owner-editor-over-msg"> — exceeds 100%</span>}
-                        {hasOutOfRangePercent && <span className="owner-editor-over-msg"> — each owner percent must be 0-100</span>}
-                        {!overLimit && ownerTotalInvalid && <span className="owner-editor-over-msg"> — must equal 100% to save</span>}
-                      </div>
-
-                      <div className="owner-search-section">
-                        <div className="owner-search-label">Add owner</div>
-                        <div className="owner-search-container">
-                          <Search size={14} className="owner-search-icon" />
+                  {/* EDIT/CREATE MODE */}
+                  {(ownerEditorMode === "edit-existing" || ownerEditorMode === "create-new") && (
+                    <div>
+                      <div className="owner-editor">
+                        <div className="form-row" style={{ marginBottom: 12 }}>
+                          <label className="form-label">
+                            {ownerEditorMode === "edit-existing" ? "Effective from (change start date)" : "Effective from"}
+                          </label>
                           <input
-                            className="form-input owner-search-input"
-                            type="text"
-                            placeholder="Search entities and people…"
-                            value={ownerSearch}
-                            autoComplete="off"
-                            data-lpignore="true"
-                            onChange={(e) => { setOwnerSearch(e.target.value); setOwnerSearchOpen(true); }}
-                            onFocus={() => setOwnerSearchOpen(true)}
+                            className="form-input"
+                            type="date"
+                            value={ownerEditorEffectiveDate}
+                            onChange={(e) => setOwnerEditorEffectiveDate(e.target.value)}
+                            required
                           />
                         </div>
-                        {ownerSearchOpen && (searchResults.length > 0 || ownerSearch.trim()) && (
-                          <div className="owner-search-dropdown">
-                            {searchResults.map((n) => (
-                              <div
-                                key={n.id}
-                                className="owner-search-result"
-                                onMouseDown={() => {
-                                  setOwnerEditorRows((prev) => [
-                                    ...prev,
-                                    { nodeId: n.id, name: n.name, percent: "", startDate: "", endDate: "", isNew: true },
-                                  ]);
-                                  setOwnerSearch("");
-                                  setOwnerSearchOpen(false);
-                                }}
-                              >
-                                {n.kind === "person" ? <Users size={14} style={{ color: "#6b7280", flexShrink: 0 }} /> : <Building2 size={14} style={{ color: "#6b7280", flexShrink: 0 }} />}
-                                {n.name}
-                              </div>
-                            ))}
-                          </div>
+
+                        {ownerEditorRows.length === 0 && (
+                          <div className="owner-editor-empty">No owners yet — search below to add one.</div>
                         )}
+                        {ownerEditorRows.map((row, idx) => (
+                          <div key={row.nodeId} className="owner-editor-row">
+                            <div className="owner-editor-name">{row.name}</div>
+                            <div className="owner-editor-pct-wrap">
+                              <input
+                                className="form-input owner-editor-pct-input"
+                                type="number"
+                                min="0"
+                                max="100"
+                                placeholder="%"
+                                value={row.percent}
+                                onChange={(e) =>
+                                  setOwnerEditorRows((prev) =>
+                                    prev.map((r, i) => i === idx ? { ...r, percent: e.target.value } : r)
+                                  )
+                                }
+                              />
+                              <span className="owner-editor-pct-sign">%</span>
+                            </div>
+                            <button
+                              className="owner-editor-remove"
+                              title="Remove owner"
+                              onClick={() => setOwnerEditorRows((prev) => prev.filter((_, i) => i !== idx))}
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ))}
+
+                        <div className={`owner-editor-total ${overLimit ? "over" : ""}`}>
+                          Total:&nbsp;<strong>{ownerTotal}%</strong>
+                          {overLimit && <span className="owner-editor-over-msg"> — exceeds 100%</span>}
+                          {hasOutOfRangePercent && <span className="owner-editor-over-msg"> — each owner percent must be 0-100</span>}
+                          {!overLimit && ownerTotalInvalid && <span className="owner-editor-over-msg"> — must equal 100% to save</span>}
+                        </div>
+
+                        <div className="owner-search-section">
+                          <div className="owner-search-label">Add owner</div>
+                          <div className="owner-search-container">
+                            <Search size={14} className="owner-search-icon" />
+                            <input
+                              className="form-input owner-search-input"
+                              type="text"
+                              placeholder="Search entities and people…"
+                              value={ownerSearch}
+                              autoComplete="off"
+                              data-lpignore="true"
+                              onChange={(e) => { setOwnerSearch(e.target.value); setOwnerSearchOpen(true); }}
+                              onFocus={() => setOwnerSearchOpen(true)}
+                            />
+                          </div>
+                          {ownerSearchOpen && (searchResults.length > 0 || ownerSearch.trim()) && (
+                            <div className="owner-search-dropdown">
+                              {searchResults.map((n) => (
+                                <div
+                                  key={n.id}
+                                  className="owner-search-result"
+                                  onMouseDown={() => {
+                                    setOwnerEditorRows((prev) => [
+                                      ...prev,
+                                      { nodeId: n.id, name: n.name, percent: "", startDate: "", endDate: "", isNew: true },
+                                    ]);
+                                    setOwnerSearch("");
+                                    setOwnerSearchOpen(false);
+                                  }}
+                                >
+                                  {n.kind === "person" ? <Users size={14} style={{ color: "#6b7280", flexShrink: 0 }} /> : <Building2 size={14} style={{ color: "#6b7280", flexShrink: 0 }} />}
+                                  {n.name}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
 
                 <DialogFooter>
                   {ownerEditorMode === "view" && (
@@ -7363,6 +7377,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       }}>Cancel</Button>
                       {!ownershipDeleteConfirm && (
                         <div style={{ display: 'flex', gap: 8 }}>
+                          <Button type="button" variant="outline" onClick={() => {
+                            setFocusId(openDialog.targetId);
+                            setViewMode("hierarchy");
+                            setOpenDialog(null);
+                          }}>
+                            <GitFork size={14} /> Hierarchy
+                          </Button>
                           <Button type="button" variant="outline" onClick={() => setOwnershipDeleteConfirm(true)} title="Permanently delete this ownership group" style={{ color: '#dc2626', borderColor: '#dc2626' }}>
                             Delete this group
                           </Button>
@@ -9438,6 +9459,33 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             )}
           </div>
           <div className="quick-view-actions">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setFocusId(quickViewNode.id);
+                setViewMode("hierarchy");
+                setQuickViewNodeId("");
+              }}
+            >
+              <GitFork size={14} /> Hierarchy
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={async () => {
+                setFocusId(quickViewNode.id);
+                setViewMode("hierarchy");
+                setQuickViewNodeId("");
+                if (quickViewNode.kind === "entity") {
+                  await openOwnerEditor(quickViewNode.id);
+                }
+              }}
+              disabled={quickViewNode.kind !== "entity"}
+              title={quickViewNode.kind === "entity" ? "Edit owners" : "Owners are only available for entities"}
+            >
+              <Users size={14} /> Owners
+            </Button>
             <Button
               type="button"
               variant="outline"
