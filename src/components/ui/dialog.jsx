@@ -13,6 +13,15 @@ export function Dialog({ open, onOpenChange, children }) {
         }
     }, [open]);
 
+    useEffect(() => {
+        if (!open) return;
+        const onKeyDown = (e) => {
+            if (e.key === "Escape" && onOpenChange) onOpenChange(null);
+        };
+        document.addEventListener("keydown", onKeyDown);
+        return () => document.removeEventListener("keydown", onKeyDown);
+    }, [open, onOpenChange]);
+
     if (!open) return null;
     // Only close when both mousedown AND mouseup happened on the overlay backdrop
     // (not when the user drags text from inside the dialog out to the overlay).

@@ -307,15 +307,25 @@ const NodeImageField = ({ kind, value, onChange, apiBase, token }) => {
   );
 };
 
-const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList, relList, asOfDate, ownershipTimeline } = {}) => {
+const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList, relList, asOfDate, ownershipTimeline, onOwnershipClick } = {}) => {
   const { fieldId, prompt, dataType, multiValue, validValues, phoneTypes } = field;
 
   if (field?._virtual) {
     const computed = getEntityOwnershipSummary(node, nodeList, relList, asOfDate, ownershipTimeline);
+    const clickable = Boolean(onOwnershipClick && node?.id);
     return (
       <div className="form-row" key={fieldId}>
         <label className="form-label">{prompt}</label>
-        <div className="form-input" style={{ minHeight: 38, display: "flex", alignItems: "center", color: computed ? "#111827" : "#9ca3af", background: "#f8fafc" }}>
+        <div
+          className={`form-input${clickable ? " dd-ownership-clickable" : ""}`}
+          style={{
+            minHeight: 38, display: "flex", alignItems: "center",
+            color: computed ? "#111827" : "#9ca3af", background: "#f8fafc",
+            cursor: clickable ? "pointer" : "default",
+          }}
+          onClick={clickable ? () => onOwnershipClick(node.id) : undefined}
+          title={clickable ? "Click to edit owners" : undefined}
+        >
           {computed || "No ownership records"}
         </div>
       </div>
@@ -1113,8 +1123,6 @@ function StatsStrip({ allEntityNodes, allPersonNodes, filteredEntityNodes, filte
     };
 
     // Built-in entity fields
-    const entitySlide1 = makeSlide("Operational Role", filteredEntityNodes, (n) => n.operationalRole);
-    if (entitySlide1) result.push(entitySlide1);
     const entitySlide2 = makeSlide("Legal Status", filteredEntityNodes, (n) => n.legalStatus);
     if (entitySlide2) result.push(entitySlide2);
 
@@ -1247,7 +1255,6 @@ function getColumnFilterConfig(column) {
   const key = column.key;
   if (key === "status" || key === "actions") return { filterType: null };
   if (key === "type") return { filterType: "enum", enumOptions: [{ value: "entity", label: "Entity" }, { value: "person", label: "Person" }] };
-  if (key === "operationalRole") return { filterType: "enum", enumOptions: ["Active", "Passive", "Mixed"].map((v) => ({ value: v, label: v })) };
   if (key === "legalStatus") return { filterType: "enum", enumOptions: ["Good Standing", "Dormant", "Dissolved", "Suspended"].map((v) => ({ value: v, label: v })) };
   if (key === "personStatus") return { filterType: "enum", enumOptions: ["Active", "Inactive", "Deceased", "Former"].map((v) => ({ value: v, label: v })) };
   if (key === "percent") return { filterType: "range" };
@@ -1287,7 +1294,6 @@ function getNodeTabularValue(node, column, nodeList = [], relList = [], asOfDate
     case "cellPhone": return node.cellPhone || "";
     case "emails": return Array.isArray(node.emails) ? node.emails.join(", ") : (node.emails || "");
     case "taxId": return node.taxId || "";
-    case "operationalRole": return node.operationalRole || "";
     case "legalStatus": return node.legalStatus || "";
     case "personStatus": return node.personStatus || "";
     default:
@@ -1445,6 +1451,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const homeButtonRef = useRef(null);
   const quickFindRef = useRef(null);
   const quickFindInputRef = useRef(null);
+  const appHeaderRef = useRef(null);
   const focusBoxRef = useRef(null);
   const hierarchyStageRef = useRef(null);
   const hierarchyContainerRef = useRef(null);
@@ -1955,7 +1962,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     { key: "cellPhone", label: "Cell Phone", hideable: true, width: 160 },
     { key: "emails", label: "e-Mail", hideable: true },
     { key: "taxId", label: "Tax ID", hideable: true, width: 140 },
-    { key: "operationalRole", label: "Operational Role", hideable: true, width: 160 },
     { key: "legalStatus", label: "Legal Status", hideable: true, width: 150 },
     { key: "personStatus", label: "Person Status", hideable: true, width: 150 },
     { key: "actions", label: "Actions", hideable: false },
@@ -2140,6 +2146,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       )
       .join("\n");
 
+  // Translate low-level fetch/network errors into an actionable message.
+  const friendlyUploadErrorMessage = (err) => {
+    const msg = String(err?.message || "");
+    if (err?.name === "AbortError") {
+      return "The import timed out. This can happen with large files — try again or split the file into smaller batches.";
+    }
+    if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+      return "Lost connection to the server while importing. This usually means the request took too long (large files can exceed the server's time limit) or the network dropped. Try again, or split the file into smaller batches.";
+    }
+    return msg || "Upload failed";
+  };
+
   const loadDirectory = useCallback(async ({ isActive } = {}) => {
     const canUpdate = () => (typeof isActive === "function" ? isActive() : true);
     try {
@@ -2246,14 +2264,86 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         );
       } catch (err) {
         console.error(`[Background Import] Error:`, err);
+        const friendly = friendlyUploadErrorMessage(err);
         setUploadStatus("error");
-        setUploadError(`Background import failed: ${err.message || 'Unknown error'}`);
-        
+        setUploadError(`Background import failed: ${friendly}`);
+
         // Show error notification
         showNotification(
           "error",
           "✗ Import Failed",
-          err.message || "An error occurred during import"
+          friendly
+        );
+      }
+    })();
+  };
+
+  // Background nodes/details import - starts import and returns immediately with feedback
+  const startBackgroundFileImport = (file, endpoint, extraFields = {}) => {
+    (async () => {
+      try {
+        console.log(`[Background Import] Starting ${uploadType} import of ${file?.name || "file"}...`);
+        const form = new FormData();
+        form.append("file", file);
+        form.append("client", clientId);
+        form.append("asOfDate", uploadOwnershipAsOfDate);
+        Object.entries(extraFields).forEach(([key, value]) => form.append(key, value));
+
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => abortController.abort(), 5 * 60 * 1000);
+
+        const response = await fetch(`${apiBase}${endpoint}`, {
+          method: "POST",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: form,
+          signal: abortController.signal,
+        });
+        clearTimeout(timeoutId);
+
+        const responseText = await response.text();
+        let data = {};
+        if (responseText) {
+          try {
+            data = JSON.parse(responseText);
+          } catch {
+            data = { raw: responseText };
+          }
+        }
+
+        if (!response.ok) {
+          if (Array.isArray(data?.errors) && data.errors.length > 0) {
+            setUploadSummary({ imported: 0, skipped: data.skipped || 0, errors: data.errors, total: data.errors.length });
+            setUploadStatus("success");
+            await loadDirectory();
+            return;
+          }
+          const fallback = typeof data?.raw === "string" ? data.raw : responseText;
+          throw new Error(data?.error || fallback || `Upload failed (${response.status})`);
+        }
+
+        console.log(`[Background Import] Complete:`, data);
+        await loadDirectory();
+        setUploadSummary(data);
+        setUploadStatus("success");
+
+        showNotification(
+          "success",
+          "✓ Import Complete",
+          uploadType === "details"
+            ? `Updated ${data.updated || 0} records.`
+            : `Imported ${data.total || 0} rows.`,
+          data
+        );
+      } catch (err) {
+        console.error(`[Background Import] Error:`, err);
+        const friendly = friendlyUploadErrorMessage(err);
+        setUploadStatus("error");
+        setUploadError(`Background import failed: ${friendly}`);
+
+        showNotification(
+          "error",
+          "✗ Import Failed",
+          friendly
         );
       }
     })();
@@ -2317,56 +2407,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         return;
       }
 
-      // Non-ownership imports: proceed with original blocking behavior
-      setUploadStatus("uploading");
+      // Non-ownership imports (entity/person/details): run in the background too, so
+      // large files don't block the dialog or surface an opaque "Failed to fetch".
+      setUploadStatus("loading-background");
       setUploadError("");
       setUploadSummary(null);
       setUploadProgress({ current: 0, total: 0 });
 
-      const form = new FormData();
-      form.append("file", uploadFile);
-      form.append("client", clientId);
-      form.append("asOfDate", uploadOwnershipAsOfDate);
-      if (uploadType !== "ownership") {
-        form.append("defaultKind", uploadKind);
-      }
-
-      const endpoint = uploadType === "ownership"
-        ? "/api/import/ownerships-csv/upload"
-        : uploadType === "details"
-          ? "/api/import/details-csv/upload"
-          : "/api/import/nodes-csv/upload";
-      const response = await fetch(`${apiBase}${endpoint}`, {
-        method: "POST",
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-        body: form,
-      });
-      const responseText = await response.text();
-      let data = {};
-      if (responseText) {
-        try {
-          data = JSON.parse(responseText);
-        } catch {
-          data = { raw: responseText };
-        }
-      }
-      if (!response.ok) {
-        // For ownership resolution failures the server sends per-row errors — surface them.
-        if (Array.isArray(data?.errors) && data.errors.length > 0) {
-          setUploadSummary({ imported: 0, skipped: data.skipped || 0, errors: data.errors, total: data.errors.length });
-          setUploadStatus("success");
-          await loadDirectory();
-          return;
-        }
-        const fallback = typeof data?.raw === "string" ? data.raw : responseText;
-        throw new Error(data?.error || fallback || `Upload failed (${response.status})`);
-      }
-      setUploadSummary(data);
-      setUploadStatus("success");
-      await loadDirectory();
+      const endpoint = uploadType === "details"
+        ? "/api/import/details-csv/upload"
+        : "/api/import/nodes-csv/upload";
+      startBackgroundFileImport(uploadFile, endpoint, { defaultKind: uploadKind });
     } catch (err) {
       setUploadStatus("error");
-      setUploadError(err.message || "Upload failed");
+      setUploadError(friendlyUploadErrorMessage(err));
     }
   };
 
@@ -2394,7 +2448,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       if (!response.ok) throw new Error(data.error || "Preview failed");
       setUploadPreview(data);
     } catch (err) {
-      setUploadError(err.message || "Preview failed");
+      setUploadError(friendlyUploadErrorMessage(err) || "Preview failed");
     } finally {
       setUploadPreviewLoading(false);
     }
@@ -3867,23 +3921,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             />
           </td>
         );
-      case "operationalRole":
-        return (
-          <td key={`${row.key}-operationalRole`}>
-            <select
-              className="tabular-cell-input"
-              value={rowNode.kind === "entity" ? (rowNode.operationalRole || "") : ""}
-              onChange={(e) => updateTableRowDraft(row, { operationalRole: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
-              disabled={isSaving || rowNode.kind !== "entity"}
-            >
-              <option value="">-</option>
-              <option value="Active">Active</option>
-              <option value="Passive">Passive</option>
-              <option value="Mixed">Mixed</option>
-            </select>
-          </td>
-        );
       case "legalStatus":
         return (
           <td key={`${row.key}-legalStatus`}>
@@ -4034,7 +4071,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             }
             const virtualValue = getEntityOwnershipSummary(rowNode, nodeList, relList, asOfDate);
             return (
-              <td key={`${row.key}-${field.fieldId}`} className="tabular-cell-wrap" title={virtualValue || ""}>
+              <td
+                key={`${row.key}-${field.fieldId}`}
+                className="tabular-cell-wrap tabular-cell-clickable"
+                title={virtualValue || "Click to edit owners"}
+                onClick={() => openOwnerEditor(rowNode.id)}
+              >
                 {virtualValue || ""}
               </td>
             );
@@ -4122,6 +4164,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   }, [
     nodeList,
     relList,
+    asOfDate,
     parseTableFieldValue,
     removeTableNewRow,
     saveTableRow,
@@ -4927,6 +4970,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     setExplodedAnchorId(null);
   }, [explodedAnchorId]);
 
+  // Keep --app-header-height in sync with the actual (variable) header height,
+  // so fixed-position content below it (error banners, quick view, dialogs) never gets clipped.
+  useEffect(() => {
+    const el = appHeaderRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const update = () => {
+      document.documentElement.style.setProperty("--app-header-height", `${el.offsetHeight}px`);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     if (!settingsOpen) return;
     const handler = (e) => {
@@ -5015,11 +5072,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     setPrintDialogOpen(true);
   }, []);
   const handleQuickFindSelect = useCallback((nodeId) => {
-    setQuickViewNodeId(nodeId);
     setQuickFindQuery("");
     setQuickFindHighlight(-1);
     setQuickFindOpen(false);
-  }, []);
+    setQuickViewNodeId(nodeId);
+    // Focus the selected entity in whichever screen is currently active
+    if (openDialog?.type === "edit-owners") {
+      openOwnerEditor(nodeId);
+    } else if (openDialog?.type === "edit-node") {
+      setEditNodeId(nodeId);
+    } else {
+      setFocusId(nodeId);
+      setViewMode("hierarchy");
+    }
+  }, [openDialog, openOwnerEditor]);
   const focusNodeAndPersistPrimary = useCallback((nodeId) => {
     const nextFocusId = String(nodeId || "");
     if (!nextFocusId) return;
@@ -5068,7 +5134,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       {homeAnimating && (
         <div className="home-anim-overlay" style={{ transformOrigin: homeAnimOrigin }} />
       )}
-      <div className="app-header">
+      <div className="app-header" ref={appHeaderRef}>
         <div style={{ maxWidth: "90%", margin: "0 auto", display: "flex", flexDirection: "column", gap: 8 }}>
           {/* TOP ROW: Logo + Client Name | View Selector + Date + Settings */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 20 }}>
@@ -5096,31 +5162,39 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
             {/* RIGHT ZONE: View Selector + Date + Settings */}
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
-              {/* View Dropdown */}
-              <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
-                <select
-                  value={viewMode}
-                  onChange={(e) => setViewMode(e.target.value)}
-                  style={{
-                    padding: "6px 12px",
-                    fontSize: 13,
-                    fontWeight: 500,
-                    border: "1px solid #cbd5e1",
-                    borderRadius: 6,
-                    background: "#fff",
-                    color: "#475569",
-                    cursor: "pointer",
-                    appearance: "none",
-                    paddingRight: 28,
-                  }}
-                >
-                  <option value="hierarchy">Hierarchy</option>
-                  <option value="directory">Directory</option>
-                  <option value="tabular">Tabular</option>
-                </select>
-                <span style={{ position: "absolute", right: 8, pointerEvents: "none", color: "#6b7280" }}>
-                  ▼
-                </span>
+              {/* View Mode Buttons */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  border: "1px solid #cbd5e1",
+                  borderRadius: 6,
+                  overflow: "hidden",
+                }}
+              >
+                {[
+                  { id: "hierarchy", label: "Hierarchy" },
+                  { id: "directory", label: "Directory" },
+                  { id: "tabular", label: "Tabular" },
+                ].map(({ id, label }, idx) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setViewMode(id)}
+                    style={{
+                      padding: "6px 12px",
+                      fontSize: 13,
+                      fontWeight: 500,
+                      border: "none",
+                      borderLeft: idx === 0 ? "none" : "1px solid #cbd5e1",
+                      background: viewMode === id ? "#3b5bdb" : "#fff",
+                      color: viewMode === id ? "#fff" : "#475569",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
 
               {/* As of Date — always visible */}
@@ -5132,7 +5206,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     max={todayIso}
                     onChange={(e) => setAsOfDate(e.target.value)}
                     style={{
-                      border: "1px solid #cbd5e1",
+                      border: `1px solid ${asOfDate && asOfDate !== todayIso ? "#dc2626" : "#16a34a"}`,
                       borderRadius: 6,
                       padding: "4px 8px",
                       fontSize: 12,
@@ -5155,7 +5229,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         whiteSpace: "nowrap",
                       }}
                     >
-                      Current
+                      Today
                     </button>
                   )}
                 </div>
@@ -7123,7 +7197,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         </div>
                       )}
                     </div>
-                    {!ownerEditorDateRange.isCurrent && (
+                    {ownerEditorDateRange.isCurrent ? (
+                      <div style={{ backgroundColor: '#dcfce7', color: '#166534', padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', marginTop: 2 }}>
+                        CURRENT
+                      </div>
+                    ) : (
                       <div style={{ backgroundColor: '#fee2e2', color: '#991b1b', padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', marginTop: 2 }}>
                         HISTORICAL
                       </div>
@@ -7950,7 +8028,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           {openDialog?.type === "edit-node" && (
             <DialogContent className="dialog-content--tall" style={{ width: "min(1000px, 92vw)", maxWidth: "none" }}>
               <DialogHeader style={{ marginBottom: '24px', marginLeft: 0 }}>
-                <DialogTitle>{nodeDraft.name || "Edit Node"}</DialogTitle>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                  <DialogTitle>{nodeDraft.name || "Edit Node"}</DialogTitle>
+                  {asOfDate && asOfDate !== todayIso ? (
+                    <div style={{ backgroundColor: '#fee2e2', color: '#991b1b', padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', marginTop: 2 }}>
+                      HISTORICAL
+                    </div>
+                  ) : (
+                    <div style={{ backgroundColor: '#dcfce7', color: '#166534', padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', marginTop: 2 }}>
+                      CURRENT
+                    </div>
+                  )}
+                </div>
               </DialogHeader>
               <div className="dialog-body">
                 <div className="form-grid">
@@ -8059,7 +8148,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           field,
                           nodeDraft.customFields?.[field.fieldId],
                           (val) => setNodeDraft((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
-                          { apiBase, token, node: nodeDraft, nodeList, relList, asOfDate, ownershipTimeline: nodeDraft.kind === "entity" ? editNodeOwnershipTimeline : [] }
+                          {
+                            apiBase, token, node: nodeDraft, nodeList, relList, asOfDate,
+                            ownershipTimeline: nodeDraft.kind === "entity" ? editNodeOwnershipTimeline : [],
+                            onOwnershipClick: (id) => { setPrevDialog(openDialog); openOwnerEditor(id); },
+                          }
                         )}
                       </React.Fragment>
                     ))
