@@ -1157,6 +1157,14 @@ input[type="text"] {
     color: #0f172a;
     cursor: pointer;
 }
+/* input[type=date] has higher specificity than .tabular-meta-select alone, so match it explicitly */
+input.tabular-meta-select[type="date"] {
+    font-size: 12px;
+    padding: 3px 6px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    color: #0f172a;
+}
 .tabular-meta-clear {
     font-size: 12px;
     color: #64748b;

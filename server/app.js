@@ -1097,7 +1097,7 @@ app.post("/api/directory", async (req, res) => {
     const { asOf } = req.body || {};
     console.log(`/api/directory called: client=${client} asOf=${asOf || "null"}`);
     const [nodeItems, relItems, ownershipRows] = await Promise.all([
-      listNodeRows(client, null),
+      listNodeRows(client, asOf || null),
       queryRels(client),
       listOwnershipRows(client, asOf || null),
     ]);

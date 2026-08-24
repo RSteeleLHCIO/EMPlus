@@ -1605,6 +1605,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [tabularViewDraft, setTabularViewDraft] = useState({
     name: "",
     columnOrder: [],
+    asOfDate: "",
   });
   const [tabularViewNameError, setTabularViewNameError] = useState("");
   const [tabularDragKey, setTabularDragKey] = useState(null);
@@ -2030,7 +2031,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         const n = Number(v); if (n > 0) columnWidths[k] = n;
       }
     }
-    return { id, name, nodeKind: view.nodeKind || null, columnOrder: visibleOrder, sort, filters, columnWidths };
+    const asOfDate = normalizeDateInput(view.asOfDate) || null;
+    return { id, name, nodeKind: view.nodeKind || null, columnOrder: visibleOrder, sort, filters, columnWidths, asOfDate };
   }, [defaultTabularOrder, normalizeTabularColumnKey]);
 
   const captureHomeScreen = useCallback(() => {
@@ -3089,6 +3091,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       sort: tabularSort,
       filters: { ...tabularFilters },
       columnWidths: { ...(activeTabularView.columnWidths || {}) },
+      asOfDate: activeTabularView.asOfDate || "",
     });
     setTabularDraftFilterKey(null);
     setTabularViewDialogOpen(true);
@@ -3171,12 +3174,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       id: selectedTabularViewId,
       sort: tabularSort,
       filters: { ...tabularFilters },
+      asOfDate,
     });
     if (!nextView) return;
     const nextViews = tabularViews.map((v) => (v.id === selectedTabularViewId ? nextView : v));
     setTabularViews(nextViews);
     persistTabularViewPrefs(nextViews, selectedTabularViewId);
-  }, [activeTabularView, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularFilters, tabularSort, tabularViews]);
+  }, [activeTabularView, asOfDate, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularFilters, tabularSort, tabularViews]);
 
   const openTabularSaveAsNewFromLive = useCallback(() => {
     setTabularViewDraft({
@@ -3185,11 +3189,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       filters: { ...tabularFilters },
       columnOrder: [...(activeTabularView.columnOrder || defaultTabularOrder)],
       columnWidths: { ...(activeTabularView.columnWidths || {}) },
+      asOfDate,
     });
     setTabularSaveAsNewName("");
     setTabularSaveAsNewError("");
     setTabularSaveAsNewOpen(true);
-  }, [activeTabularView, defaultTabularOrder, tabularFilters, tabularSort]);
+  }, [activeTabularView, asOfDate, defaultTabularOrder, tabularFilters, tabularSort]);
 
   const commitTabularSaveAsNew = useCallback(() => {
     const name = tabularSaveAsNewName.trim();
@@ -3223,6 +3228,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     persistTabularViewPrefs(nextViews, selectedTabularViewId);
     setTabularFilters(nextView.filters || {});
     setTabularSort(nextView.sort || null);
+    setAsOfDate(nextView.asOfDate || "");
     setTabularViewDialogOpen(false);
   }, [activeTabularView.name, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularViewDraft, tabularViews]);
 
@@ -3456,6 +3462,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     if (!view) return;
     if (view.sort !== undefined) setTabularSort(view.sort || null);
     if (view.filters !== undefined) setTabularFilters(view.filters || {});
+    if (view.asOfDate !== undefined) setAsOfDate(view.asOfDate || "");
   }, [effectiveSelectedTabularViewId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID) return;
@@ -6660,6 +6667,19 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                             )}
                             {tabularViewDraft.sort && (
                               <button type="button" className="tabular-meta-clear" onClick={() => setTabularViewDraft((prev) => ({ ...prev, sort: null }))}>Clear</button>
+                            )}
+                          </div>
+                          <div className="tabular-view-meta-row">
+                            <span className="tabular-view-label">As of date:</span>
+                            <input
+                              type="date"
+                              className="tabular-meta-select"
+                              value={tabularViewDraft.asOfDate || ""}
+                              max={todayIso}
+                              onChange={(e) => setTabularViewDraft((prev) => ({ ...prev, asOfDate: e.target.value }))}
+                            />
+                            {tabularViewDraft.asOfDate && (
+                              <button type="button" className="tabular-meta-clear" onClick={() => setTabularViewDraft((prev) => ({ ...prev, asOfDate: "" }))}>Clear</button>
                             )}
                           </div>
                           {Object.entries(tabularViewDraft.filters || {}).filter(([, f]) => !isFilterEmpty(f)).length > 0 && (
