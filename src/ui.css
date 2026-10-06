@@ -299,6 +299,9 @@ body {
     min-width: 320px;
     width: fit-content;
     padding: 24px;
+    /* Auto margins center like align-items:center, but never push a too-tall dialog
+       above the overlay's top padding (i.e. under the fixed app header). */
+    margin: auto;
 }
 
 .dialog-content>div {
@@ -346,8 +349,11 @@ body {
 .dialog-content--tall {
     display: flex;
     flex-direction: column;
+    box-sizing: border-box;
     height: calc(100vh - 100px);
-    max-height: 75dvh;
+    /* Never taller than the space below the fixed header (overlay padding: header + 10px top, 16px bottom). */
+    max-height: min(75dvh, calc(100dvh - var(--app-header-height, 130px) - 26px));
+    min-height: 0;
     overflow: hidden;
 }
 
@@ -1053,6 +1059,140 @@ input[type="text"] {
 
 .tabular-row-error td {
     background: #fff7f7;
+}
+
+.tabular-save-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    align-self: center;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: #64748b;
+}
+
+.tabular-save-indicator--saving {
+    color: #1d4ed8;
+}
+
+.tabular-save-indicator--pending {
+    color: #92400e;
+}
+
+.tabular-save-indicator--error {
+    color: #b91c1c;
+}
+
+.tabular-save-indicator-retry {
+    border: 1px solid #fca5a5;
+    background: #fee2e2;
+    color: #b91c1c;
+    border-radius: 6px;
+    padding: 2px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+/* ── Node edit dialog: version history ── */
+.node-version-entered-by {
+    margin-top: 4px;
+    font-size: 12px;
+    font-weight: 400;
+    color: #64748b;
+}
+
+.node-version-nav {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.node-version-nav-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.node-version-nav-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #fff;
+    color: #334155;
+    cursor: pointer;
+}
+
+.node-version-nav-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
+.node-version-pill {
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.node-version-pill--current {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.node-version-pill--historical {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.node-version-pill--future {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.node-version-range {
+    font-size: 11px;
+    color: #64748b;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.node-version-legend {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #92400e;
+}
+
+.node-version-changed {
+    background: #fffbeb;
+    border-left: 3px solid #f59e0b;
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+
+.name-conflict-warning {
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    border-radius: 6px;
+    padding: 8px 10px;
+}
+
+.name-conflict-open {
+    background: none;
+    border: none;
+    padding: 0;
+    color: #2563eb;
+    text-decoration: underline;
+    cursor: pointer;
+    font: inherit;
 }
 
 .tabular-empty {

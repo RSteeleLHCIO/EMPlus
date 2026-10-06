@@ -2,11 +2,23 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import * as XLSX from "xlsx";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet, Save, FilePlus } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet, Save, FilePlus } from "lucide-react";
 import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved, estimatePosterPageCount, generateOrgChartPoster } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone, normalizeDateInput } from "./utils/helpers";
 import { ENTITY_OWNERSHIP_SUMMARY_FIELD, getEntityOwnershipSummary } from "./utils/ownershipSummary";
+import { normalizeSavedColumnOrder, resolveTabularColumns } from "./utils/tabularColumns";
+import {
+  describeSaveRange,
+  describeVersionValue,
+  findVersionIndexAt,
+  formatInclusiveEnd,
+  formatIsoDate,
+  formatVersionRange,
+  getChangedVersionFields,
+  getVersionStatus,
+} from "./utils/nodeVersions";
+import { describeNameConflict, findNameConflicts, normalizeNodeName } from "./utils/nodeNames";
 import { Input } from "./components/ui/input";
 import {
   Dialog,
@@ -799,6 +811,9 @@ const ORG_LINE_COLOR = '#d1d5db';
 const DEFAULT_TABULAR_VIEW_ID = "__default__";
 const DEFAULT_OWNERSHIP_TABULAR_VIEW_ID = "__default_ownership__";
 const TABULAR_PREFS_STORAGE_KEY = "tabularPrefs";
+// Tabular grid autosave: text cells save after a typing pause; dropdowns save right after a pick.
+const TABLE_TEXT_AUTOSAVE_MS = 1000;
+const TABLE_SELECT_AUTOSAVE_MS = 50;
 
 function readStoredTabularPrefs() {
   if (typeof window === "undefined") {
@@ -1417,7 +1432,7 @@ function ColumnFilterPopover({ filterType, enumOptions, currentFilter, popoverPo
   );
 }
 
-export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) {
+export default function EntityApp({ token, clientId: clientIdProp, onSignOut, onStartEmulation, isEmulating }) {
   const [nodeList, setNodeList] = useState(() => (token ? [] : initialNodes));
   const [relList, setRelList] = useState(() => (token ? [] : initialRelationships));
   const [homeScreen, setHomeScreen] = useState(() => {
@@ -1682,6 +1697,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [editNodeId, setEditNodeId] = useState(() => (token ? "" : (initialNodes[0]?.id ?? "")));
   const [editNodeEffectiveDate, setEditNodeEffectiveDate] = useState("");
   const [editNodeOwnershipTimeline, setEditNodeOwnershipTimeline] = useState([]);
+  // Version history shown in the edit dialog (null = loading, false = failed to load).
+  const [editNodeVersions, setEditNodeVersions] = useState(null);
+  const [editNodeVersionIdx, setEditNodeVersionIdx] = useState(-1);
+  const [editNodeInitialVersionIdx, setEditNodeInitialVersionIdx] = useState(-1);
+  const editNodeVersionIdxRef = useRef(-1);
+  editNodeVersionIdxRef.current = editNodeVersionIdx;
   const [nodeDraft, setNodeDraft] = useState({
     id: "",
     name: "",
@@ -1771,6 +1792,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   const [manageUsersLoading, setManageUsersLoading] = useState(false);
   const [manageUsersError, setManageUsersError] = useState("");
   const [manageUsersUpdating, setManageUsersUpdating] = useState(() => new Set());
+  const [emulateUserPrompt, setEmulateUserPrompt] = useState(null);
+  const [emulateUserBusy, setEmulateUserBusy] = useState(false);
   const [addUserDraft, setAddUserDraft] = useState({ loginId: "", password: "", confirm: "" });
   const [addUserBusy, setAddUserBusy] = useState(false);
   const [addUserError, setAddUserError] = useState("");
@@ -2003,25 +2026,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     () => allOwnershipTabularColumns.map((c) => c.key),
     [allOwnershipTabularColumns]
   );
-  const normalizeTabularColumnKey = useCallback((key) => {
-    const text = String(key || "").trim();
-    if (text.startsWith("dd:dd:")) return `dd:${text.slice(6)}`;
-    return text;
-  }, []);
-
   const sanitizeTabularView = useCallback((view) => {
     if (!view || typeof view !== "object") return null;
     const id = String(view.id || "").trim();
     const name = String(view.name || "").trim();
     if (!id || !name) return null;
-    const allowed = new Set(defaultTabularOrder);
-    const rawOrder = Array.isArray(view.columnOrder)
-      ? view.columnOrder.map(normalizeTabularColumnKey).filter((k) => allowed.has(k))
-      : [];
-    const hiddenSet = new Set(Array.isArray(view.hidden)
-      ? view.hidden.map(normalizeTabularColumnKey).filter((k) => allowed.has(k))
-      : []);
-    const visibleOrder = rawOrder.filter((k) => !hiddenSet.has(k));
+    const visibleOrder = normalizeSavedColumnOrder(view.columnOrder, view.hidden);
     const sort = view.sort?.key && (view.sort.dir === "asc" || view.sort.dir === "desc")
       ? { key: view.sort.key, dir: view.sort.dir } : null;
     const filters = (view.filters && typeof view.filters === "object") ? view.filters : {};
@@ -2033,7 +2043,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     }
     const asOfDate = normalizeDateInput(view.asOfDate) || null;
     return { id, name, nodeKind: view.nodeKind || null, columnOrder: visibleOrder, sort, filters, columnWidths, asOfDate };
-  }, [defaultTabularOrder, normalizeTabularColumnKey]);
+  }, []);
 
   const captureHomeScreen = useCallback(() => {
     const screen = {
@@ -2719,6 +2729,96 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return value ?? "";
   }, []);
 
+  // ── Duplicate-name warnings ───────────────────────────────────────────────
+  // The name index (current + former names, incl. deleted nodes) is fetched lazily and
+  // refetched after the node list changes.
+  const nodeNameIndexRef = useRef(null);
+  const nodeListRef = useRef(nodeList);
+  nodeListRef.current = nodeList;
+  const apiRequestRef = useRef(apiRequest);
+  apiRequestRef.current = apiRequest;
+  useEffect(() => {
+    nodeNameIndexRef.current = null;
+  }, [nodeList, clientId]);
+
+  const getNameConflicts = useCallback(async ({ name, kind, excludeId = null }) => {
+    if (!nodeNameIndexRef.current) {
+      const pending = apiRequestRef.current("/api/node-names").then((res) => res?.nodes || []);
+      nodeNameIndexRef.current = pending;
+      pending.catch(() => {
+        if (nodeNameIndexRef.current === pending) nodeNameIndexRef.current = null;
+      });
+    }
+    let index = [];
+    try {
+      index = await nodeNameIndexRef.current;
+    } catch {
+      // Fall back to the loaded node list (current names only).
+    }
+    return findNameConflicts(index, { name, kind, excludeId, extraNodes: nodeListRef.current });
+  }, []);
+
+  // Promise-based confirm on the shared confirm dialog; resolves false if it's dismissed or
+  // replaced. Prompts are queued so concurrent requests don't cancel each other.
+  const confirmResolverRef = useRef(null);
+  // Grid rows: rowKey -> { key: "kind|normalized name", ok } for duplicate-name prompts.
+  const tableNameDecisionsRef = useRef(new Map());
+  const confirmChainRef = useRef(Promise.resolve());
+  const askConfirm = useCallback((options) => {
+    const run = confirmChainRef.current.then(() => new Promise((resolve) => {
+      const dialog = {
+        ...options,
+        onConfirm: () => {
+          resolve(true);
+          setConfirmDialog(null);
+        },
+      };
+      confirmResolverRef.current = { dialog, resolve };
+      setConfirmDialog(dialog);
+    }));
+    confirmChainRef.current = run.catch(() => { });
+    return run;
+  }, []);
+  useEffect(() => {
+    const pending = confirmResolverRef.current;
+    if (pending && pending.dialog !== confirmDialog) {
+      confirmResolverRef.current = null;
+      pending.resolve(false);
+    }
+  }, [confirmDialog]);
+
+  const renderNameConflictMessage = (conflicts, { kind, intro, onOpen } = {}) => (
+    <div style={{ display: "grid", gap: 8, fontSize: 14 }}>
+      {intro && <div>{intro}</div>}
+      <ul style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 4 }}>
+        {conflicts.slice(0, 5).map((conflict) => (
+          <li key={conflict.id}>
+            {describeNameConflict(conflict)}
+            {onOpen && conflict.type !== "deleted" && (
+              <>
+                {" "}
+                <button
+                  type="button"
+                  className="name-conflict-open"
+                  onClick={() => {
+                    setConfirmDialog(null);
+                    onOpen(conflict.id);
+                  }}
+                >
+                  Open it
+                </button>
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+      {conflicts.length > 5 && <div>…and {conflicts.length - 5} more.</div>}
+      <div style={{ color: "#92400e" }}>
+        Reusing a name is usually a mistake. Continue only if this is a different {kind === "person" ? "person" : "entity"}.
+      </div>
+    </div>
+  );
+
   const normalizeCustomFields = useCallback((value) => {
     const obj = value && typeof value === "object" && !Array.isArray(value) ? value : {};
     const normalized = {};
@@ -2832,7 +2932,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     });
   }, [hasNodeDraftChanges, tableDrafts]);
 
-  const saveTableRow = useCallback(async (rowKey) => {
+  // `auto` saves (debounced / on-change) skip new rows; those are created on blur or via Save.
+  const saveTableRow = useCallback(async (rowKey, { auto = false, keepalive = false } = {}) => {
     const newRow = tableNewRows.find((r) => r.key === rowKey);
     const existingNode = newRow ? null : nodeList.find((n) => n.id === rowKey);
     const draft = newRow ? newRow.draft : (tableDrafts[rowKey] || existingNode);
@@ -2845,9 +2946,44 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       return true;
     }
     if (!draft) return false;
+    if (auto && newRow) return false;
     if (!String(draft.name || "").trim()) {
       setTableRowErrors((prev) => ({ ...prev, [rowKey]: "Name is required." }));
       return false;
+    }
+
+    const nameKey = `${draft.kind}|${normalizeNodeName(draft.name)}`;
+    const nameChanged = newRow
+      || nameKey !== `${existingNode?.kind}|${normalizeNodeName(existingNode?.name)}`;
+    const nameDecision = tableNameDecisionsRef.current.get(rowKey);
+    if (nameChanged && !(nameDecision?.key === nameKey && nameDecision.ok)) {
+      const conflicts = await getNameConflicts({ name: draft.name, kind: draft.kind, excludeId: newRow ? null : rowKey });
+      if (conflicts.length) {
+        // Never prompt mid-typing or while the page is unloading; blur, view changes and Retry ask.
+        if (auto || keepalive) return false;
+        // Already declined for this name: stay unsaved until the name changes or Retry is used.
+        if (nameDecision?.key === nameKey) return false;
+        const ok = await askConfirm({
+          title: "Duplicate name",
+          confirmLabel: "Save anyway",
+          message: renderNameConflictMessage(conflicts, {
+            kind: draft.kind,
+            intro: <>You're about to {newRow ? "create" : "rename this row to"} <strong>{draft.name.trim()}</strong>.</>,
+            onOpen: (id) => {
+              setEditNodeId(id);
+              setOpenDialog({ type: "edit-node" });
+            },
+          }),
+        });
+        tableNameDecisionsRef.current.set(rowKey, { key: nameKey, ok });
+        if (!ok) {
+          setTableRowErrors((prev) => ({
+            ...prev,
+            [rowKey]: "Not saved: this name is already used. Change the name, or click Retry to save anyway.",
+          }));
+          return false;
+        }
+      }
     }
 
     setTableSavingKeys((prev) => {
@@ -2877,20 +3013,19 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
           taxId: draft.taxId || "",
           customFields: draft.customFields || {},
         };
-        await apiRequest("/api/nodes", {
+        // The server may assign a different (unique) ID than the one requested.
+        const created = await apiRequest("/api/nodes", {
           method: "POST",
           body: JSON.stringify(payload),
         });
-        setNodeList((prev) => [...prev, payload]);
+        setNodeList((prev) => [...prev, { ...payload, ...created }]);
         removeTableNewRow(rowKey);
       } else if (existingNode) {
-        const newId = makeNodeId(draft.kind, draft.name, rowKey);
         const payload = {
           name: draft.name.trim(),
           kind: draft.kind,
           asOfDate: asOfDate || todayIso,
           client: clientId,
-          newId: newId !== rowKey ? newId : null,
           photo: draft.kind === "person" ? (draft.photo || "") : "",
           logo: draft.kind === "entity" ? (draft.logo || "") : "",
           operationalRole: draft.kind === "entity" ? (draft.operationalRole || "") : "",
@@ -2906,6 +3041,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
         await apiRequest(`/api/nodes/${rowKey}`, {
           method: "PUT",
           body: JSON.stringify(payload),
+          ...(keepalive ? { keepalive: true } : {}),
         });
 
         setNodeList((prev) =>
@@ -2913,7 +3049,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             n.id === rowKey
               ? {
                 ...n,
-                id: newId,
                 name: payload.name,
                 kind: payload.kind,
                 photo: payload.photo,
@@ -2932,36 +3067,26 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               : n
           )
         );
-        if (newId !== rowKey) {
-          setRelList((prev) =>
-            prev.map((r) => ({
-              ...r,
-              from: r.from === rowKey ? newId : r.from,
-              to: r.to === rowKey ? newId : r.to,
-            }))
-          );
-          if (focusId === rowKey) setFocusId(newId);
-          if (editNodeId === rowKey) setEditNodeId(newId);
-        }
         setTableDrafts((prev) => {
+          const latest = prev[rowKey];
           const next = { ...prev };
           delete next[rowKey];
-          if (newId !== rowKey) delete next[newId];
+          // Keep edits made while this save was in flight (cells stay editable during saves).
+          if (latest && latest !== draft) next[rowKey] = latest;
           return next;
         });
         setTableDirtyKeys((prev) => {
           const next = new Set(prev);
           next.delete(rowKey);
-          if (newId !== rowKey) next.delete(newId);
           return next;
         });
         setTableRowErrors((prev) => {
           const next = { ...prev };
           delete next[rowKey];
-          if (newId !== rowKey) delete next[newId];
           return next;
         });
       }
+      tableNameDecisionsRef.current.delete(rowKey);
       setRemoteStatus("connected");
       return true;
     } catch (err) {
@@ -2979,9 +3104,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
   }, [
     asOfDate,
     apiRequest,
+    askConfirm,
     clientId,
     editNodeId,
     focusId,
+    getNameConflicts,
     hasNodeDraftChanges,
     makeNodeId,
     nodeList,
@@ -3001,13 +3128,92 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return pending;
   }, [hasNodeDraftChanges, nodeList, tableDrafts, tableNewRows]);
 
-  const saveAllTableRows = useCallback(async () => {
-    const keys = [...pendingTableKeys];
-    for (const key of keys) {
-      // eslint-disable-next-line no-await-in-loop
-      await saveTableRow(key);
+  // ── Autosave plumbing ─────────────────────────────────────────────────────
+  // Saves run through refs so timers/window events always use the latest render's state.
+  const saveTableRowRef = useRef(saveTableRow);
+  saveTableRowRef.current = saveTableRow;
+  const pendingTableKeysRef = useRef(pendingTableKeys);
+  pendingTableKeysRef.current = pendingTableKeys;
+  const tableSaveTimersRef = useRef(new Map());
+  const tableSaveQueueRef = useRef(new Map());
+
+  // Serializes saves per row: a request made while that row is saving re-runs once afterwards.
+  const requestTableRowSave = useCallback((key, { auto = false, keepalive = false } = {}) => {
+    const timers = tableSaveTimersRef.current;
+    if (timers.has(key)) {
+      clearTimeout(timers.get(key));
+      timers.delete(key);
     }
-  }, [pendingTableKeys, saveTableRow]);
+    const queue = tableSaveQueueRef.current;
+    const existing = queue.get(key);
+    if (existing) {
+      existing.rerun = existing.rerun === "manual" || !auto ? "manual" : "auto";
+      existing.keepalive = existing.keepalive || keepalive;
+      return existing.promise;
+    }
+    const entry = { rerun: null, keepalive, promise: null };
+    const run = async (isAuto) => {
+      const ok = await saveTableRowRef.current(key, { auto: isAuto, keepalive: entry.keepalive });
+      if (!entry.rerun) return ok;
+      const nextAuto = entry.rerun === "auto";
+      entry.rerun = null;
+      // Let React commit the previous save's state before re-reading drafts.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return run(nextAuto);
+    };
+    queue.set(key, entry);
+    entry.promise = run(auto).finally(() => queue.delete(key));
+    return entry.promise;
+  }, []);
+
+  const scheduleTableRowSave = useCallback((key, delayMs) => {
+    const timers = tableSaveTimersRef.current;
+    if (timers.has(key)) clearTimeout(timers.get(key));
+    timers.set(key, setTimeout(() => {
+      timers.delete(key);
+      requestTableRowSave(key, { auto: true });
+    }, delayMs));
+  }, [requestTableRowSave]);
+
+  const flushTableRowSaves = useCallback((options = {}) => {
+    const keys = new Set([...pendingTableKeysRef.current, ...tableSaveTimersRef.current.keys()]);
+    return Promise.all([...keys].map((key) => requestTableRowSave(key, options)));
+  }, [requestTableRowSave]);
+
+  // Switching view/sub-mode/saved view (including via browser Back) unmounts focused cells
+  // without a reliable blur, so save anything outstanding.
+  useEffect(() => {
+    flushTableRowSaves();
+  }, [flushTableRowSaves, viewMode, tabularSubMode, selectedTabularViewId]);
+
+  useEffect(() => {
+    const hasUnsaved = () =>
+      pendingTableKeysRef.current.size > 0
+      || tableSaveTimersRef.current.size > 0
+      || tableSaveQueueRef.current.size > 0;
+    const handleBeforeUnload = (e) => {
+      if (!hasUnsaved()) return;
+      flushTableRowSaves({ keepalive: true });
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    const handlePageHide = () => {
+      if (hasUnsaved()) flushTableRowSaves({ keepalive: true });
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") handlePageHide();
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("pagehide", handlePageHide);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("pagehide", handlePageHide);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      // App is unmounting (sign-out, emulation switch): don't drop queued edits.
+      flushTableRowSaves();
+    };
+  }, [flushTableRowSaves]);
 
   const tableRows = useMemo(() => {
     const kindFilter = tabularSubMode === "entities" ? "entity" : tabularSubMode === "persons" ? "person" : null;
@@ -3063,18 +3269,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     };
   }, [defaultTabularOrder, effectiveSelectedTabularViewId, tabularViewsForCurrentKind]);
 
-  const visibleTabularColumns = useMemo(() => {
-    const byKey = new Map(allTabularColumns.map((c) => [c.key, c]));
-    const seen = new Set();
-    const middle = (activeTabularView.columnOrder || [])
-      .map((key) => byKey.get(key))
-      .filter((col) => {
-        if (!col || seen.has(col.key)) return false;
-        seen.add(col.key);
-        return true;
-      });
-    return middle;
-  }, [activeTabularView.columnOrder, allTabularColumns]);
+  const visibleTabularColumns = useMemo(
+    () => resolveTabularColumns(activeTabularView.columnOrder, allTabularColumns),
+    [activeTabularView.columnOrder, allTabularColumns]
+  );
 
   const availableTabularColumns = useMemo(() => {
     const selected = new Set(tabularViewDraft.columnOrder || []);
@@ -3271,10 +3469,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     const id = String(view.id || "").trim();
     const name = String(view.name || "").trim();
     if (!id || !name) return null;
-    const allowed = new Set(defaultOwnershipTabularOrder);
-    const rawOrder = Array.isArray(view.columnOrder)
-      ? view.columnOrder.filter((k) => allowed.has(k))
-      : [];
+    const rawOrder = normalizeSavedColumnOrder(view.columnOrder);
     const sort = view.sort?.key && (view.sort.dir === "asc" || view.sort.dir === "desc")
       ? { key: view.sort.key, dir: view.sort.dir } : null;
     const filters = (view.filters && typeof view.filters === "object") ? view.filters : {};
@@ -3285,7 +3480,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       }
     }
     return { id, name, columnOrder: rawOrder, sort, filters, columnWidths };
-  }, [defaultOwnershipTabularOrder]);
+  }, []);
 
   const persistOwnershipTabularViewPrefs = useCallback((nextViews, nextSelectedId) => {
     apiRequest("/api/auth/me", {
@@ -3317,14 +3512,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     return found || { id: DEFAULT_OWNERSHIP_TABULAR_VIEW_ID, name: "Default", columnOrder: defaultOwnershipTabularOrder };
   }, [defaultOwnershipTabularOrder, ownershipTabularViews, selectedOwnershipTabularViewId]);
 
-  const visibleOwnershipTabularColumns = useMemo(() => {
-    const byKey = new Map(allOwnershipTabularColumns.map((c) => [c.key, c]));
-    const seen = new Set();
-    const middle = (activeOwnershipTabularView.columnOrder || [])
-      .map((key) => byKey.get(key))
-      .filter((col) => { if (!col || seen.has(col.key)) return false; seen.add(col.key); return true; });
-    return middle;
-  }, [activeOwnershipTabularView.columnOrder, allOwnershipTabularColumns]);
+  const visibleOwnershipTabularColumns = useMemo(
+    () => resolveTabularColumns(activeOwnershipTabularView.columnOrder, allOwnershipTabularColumns),
+    [activeOwnershipTabularView.columnOrder, allOwnershipTabularColumns]
+  );
 
   const availableOwnershipTabularColumns = useMemo(() => {
     const selected = new Set(ownershipTabularViewDraft.columnOrder || []);
@@ -3880,7 +4071,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     }
   }, [nodeList, ownershipTableDrafts, saveOwnershipTableRow, updateOwnershipTableDraft]);
 
-  const renderTabularCell = useCallback((column, { row, rowNode, isSaving, isDirty, rowError, resolvedId }) => {
+  const renderTabularCell = useCallback((column, { row, rowNode, isSaving, isDirty, rowError }) => {
     switch (column.key) {
       case "status":
         return (
@@ -3904,9 +4095,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             <select
               className="tabular-cell-input"
               value={rowNode.kind || "entity"}
-              onChange={(e) => updateTableRowDraft(row, { kind: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
-              disabled={isSaving}
+              onChange={(e) => { updateTableRowDraft(row, { kind: e.target.value }); scheduleTableRowSave(row.key, TABLE_SELECT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
+              disabled={isSaving && row.isNew}
             >
               <option value="entity">Entity</option>
               <option value="person">Person</option>
@@ -3919,10 +4110,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             <input
               className="tabular-cell-input"
               value={rowNode.name || ""}
-              onChange={(e) => updateTableRowDraft(row, { name: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
+              onChange={(e) => { updateTableRowDraft(row, { name: e.target.value }); scheduleTableRowSave(row.key, TABLE_TEXT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
               onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-              disabled={isSaving}
+              disabled={isSaving && row.isNew}
               autoComplete="off"
               data-lpignore="true"
             />
@@ -3934,9 +4125,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             <select
               className="tabular-cell-input"
               value={rowNode.kind === "entity" ? (rowNode.legalStatus || "") : ""}
-              onChange={(e) => updateTableRowDraft(row, { legalStatus: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
-              disabled={isSaving || rowNode.kind !== "entity"}
+              onChange={(e) => { updateTableRowDraft(row, { legalStatus: e.target.value }); scheduleTableRowSave(row.key, TABLE_SELECT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
+              disabled={(isSaving && row.isNew) || rowNode.kind !== "entity"}
             >
               <option value="">-</option>
               <option value="Good Standing">Good Standing</option>
@@ -3952,9 +4143,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             <select
               className="tabular-cell-input"
               value={rowNode.kind === "person" ? (rowNode.personStatus || "") : ""}
-              onChange={(e) => updateTableRowDraft(row, { personStatus: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
-              disabled={isSaving || rowNode.kind !== "person"}
+              onChange={(e) => { updateTableRowDraft(row, { personStatus: e.target.value }); scheduleTableRowSave(row.key, TABLE_SELECT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
+              disabled={(isSaving && row.isNew) || rowNode.kind !== "person"}
             >
               <option value="">-</option>
               <option value="Active">Active</option>
@@ -3970,10 +4161,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             <input
               className="tabular-cell-input"
               value={rowNode.address || ""}
-              onChange={(e) => updateTableRowDraft(row, { address: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
+              onChange={(e) => { updateTableRowDraft(row, { address: e.target.value }); scheduleTableRowSave(row.key, TABLE_TEXT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
               onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-              disabled={isSaving}
+              disabled={isSaving && row.isNew}
               autoComplete="off"
               data-lpignore="true"
             />
@@ -3986,10 +4177,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               className="tabular-cell-input"
               type="tel"
               value={rowNode.workPhone || ""}
-              onChange={(e) => updateTableRowDraft(row, { workPhone: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
+              onChange={(e) => { updateTableRowDraft(row, { workPhone: e.target.value }); scheduleTableRowSave(row.key, TABLE_TEXT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
               onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-              disabled={isSaving}
+              disabled={isSaving && row.isNew}
               autoComplete="off"
               data-lpignore="true"
             />
@@ -4002,10 +4193,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               className="tabular-cell-input"
               type="tel"
               value={rowNode.cellPhone || ""}
-              onChange={(e) => updateTableRowDraft(row, { cellPhone: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
+              onChange={(e) => { updateTableRowDraft(row, { cellPhone: e.target.value }); scheduleTableRowSave(row.key, TABLE_TEXT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
               onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-              disabled={isSaving}
+              disabled={isSaving && row.isNew}
               autoComplete="off"
               data-lpignore="true"
             />
@@ -4018,10 +4209,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
               className="tabular-cell-input"
               type="email"
               value={Array.isArray(rowNode.emails) ? rowNode.emails.join(", ") : (rowNode.emails || "")}
-              onChange={(e) => updateTableRowDraft(row, { emails: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
+              onChange={(e) => { updateTableRowDraft(row, { emails: e.target.value }); scheduleTableRowSave(row.key, TABLE_TEXT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
               onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-              disabled={isSaving}
+              disabled={isSaving && row.isNew}
               autoComplete="off"
               data-lpignore="true"
             />
@@ -4033,10 +4224,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             <input
               className="tabular-cell-input"
               value={rowNode.taxId || ""}
-              onChange={(e) => updateTableRowDraft(row, { taxId: e.target.value })}
-              onBlur={() => saveTableRow(row.key)}
+              onChange={(e) => { updateTableRowDraft(row, { taxId: e.target.value }); scheduleTableRowSave(row.key, TABLE_TEXT_AUTOSAVE_MS); }}
+              onBlur={() => requestTableRowSave(row.key)}
               onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-              disabled={isSaving}
+              disabled={isSaving && row.isNew}
               autoComplete="off"
               data-lpignore="true"
             />
@@ -4050,7 +4241,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => saveTableRow(row.key)}
+                  onClick={() => requestTableRowSave(row.key)}
                   disabled={isSaving || !isDirty}
                 >
                   Save
@@ -4059,7 +4250,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   type="button"
                   variant="outline"
                   onClick={() => removeTableNewRow(row.key)}
-                  disabled={isSaving}
+                  disabled={isSaving && row.isNew}
                 >
                   Cancel
                 </Button>
@@ -4108,9 +4299,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         [field.fieldId]: parseTableFieldValue(field, e.target.value),
                       },
                     });
+                    scheduleTableRowSave(row.key, TABLE_SELECT_AUTOSAVE_MS);
                   }}
-                  onBlur={() => saveTableRow(row.key)}
-                  disabled={isSaving}
+                  onBlur={() => requestTableRowSave(row.key)}
+                  disabled={isSaving && row.isNew}
                 >
                   <option value="">-</option>
                   <option value="true">Yes</option>
@@ -4132,9 +4324,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         [field.fieldId]: parseTableFieldValue(field, e.target.value),
                       },
                     });
+                    scheduleTableRowSave(row.key, TABLE_SELECT_AUTOSAVE_MS);
                   }}
-                  onBlur={() => saveTableRow(row.key)}
-                  disabled={isSaving}
+                  onBlur={() => requestTableRowSave(row.key)}
+                  disabled={isSaving && row.isNew}
                 >
                   <option value=""></option>
                   {validValues.map((v) => (
@@ -4157,10 +4350,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       [field.fieldId]: parseTableFieldValue(field, e.target.value),
                     },
                   });
+                  scheduleTableRowSave(row.key, TABLE_TEXT_AUTOSAVE_MS);
                 }}
-                onBlur={() => saveTableRow(row.key)}
+                onBlur={() => requestTableRowSave(row.key)}
                 onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-                disabled={isSaving}
+                disabled={isSaving && row.isNew}
                 autoComplete="off"
                 data-lpignore="true"
               />
@@ -4174,7 +4368,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     asOfDate,
     parseTableFieldValue,
     removeTableNewRow,
-    saveTableRow,
+    requestTableRowSave,
+    scheduleTableRowSave,
     setEditNodeId,
     setFocusId,
     setOpenDialog,
@@ -4396,6 +4591,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
     if (!name) return;
     setIsCreatingOwnerNode(true);
     try {
+      const nameConflicts = await getNameConflicts({ name, kind });
+      if (nameConflicts.length) {
+        const proceed = await askConfirm({
+          title: "Duplicate name",
+          confirmLabel: "Create anyway",
+          message: renderNameConflictMessage(nameConflicts, {
+            kind,
+            intro: <>You're about to create <strong>{name}</strong> as a new owner, but that name is already used:</>,
+          }),
+        });
+        if (!proceed) return;
+      }
       const created = await apiRequest("/api/nodes", {
         method: "POST",
         body: JSON.stringify({ name, kind, asOfDate: asOfDate || todayIso, client: clientId }),
@@ -4417,23 +4624,31 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
 
   const getNodeName = (id) => getNode(nodeList, id)?.name || id;
 
+  const nodeToEditDraft = (node, id) => ({
+    id,
+    name: node.name || "",
+    kind: node.kind || "entity",
+    photo: node.photo || "",
+    logo: node.logo || "",
+    address: node.address || "",
+    workPhone: node.workPhone || "",
+    cellPhone: node.cellPhone || "",
+    emails: node.emails || "",
+    taxId: node.taxId || "",
+    operationalRole: node.operationalRole || "",
+    legalStatus: node.legalStatus || "",
+    personStatus: node.personStatus || "",
+    customFields: node.customFields || {},
+  });
+
   useEffect(() => {
     const node = getNode(nodeList, editNodeId);
     if (node) {
-      setNodeDraft({
-        id: node.id,
-        name: node.name,
-        kind: node.kind,
-        photo: node.photo || "",
-        logo: node.logo || "",
-        address: node.address || "",
-        workPhone: node.workPhone || "",
-        cellPhone: node.cellPhone || "",
-        emails: node.emails || "",
-        taxId: node.taxId || "",
-        customFields: node.customFields || {},
-      });
-      setEditNodeEffectiveDate("");
+      // While a history version is displayed, keep showing it rather than the list's copy.
+      if (editNodeVersionIdxRef.current < 0) {
+        setNodeDraft(nodeToEditDraft(node, node.id));
+        setEditNodeEffectiveDate("");
+      }
       
       // For entities, fetch ownership timeline to show in the ownership records field
       if (node.kind === "entity") {
@@ -4445,6 +4660,88 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
       }
     }
   }, [editNodeId, nodeList]);
+
+  const isEditNodeDialogOpen = openDialog?.type === "edit-node";
+  useEffect(() => {
+    setEditNodeVersions(null);
+    setEditNodeVersionIdx(-1);
+    setEditNodeInitialVersionIdx(-1);
+    editNodeVersionIdxRef.current = -1;
+    if (!isEditNodeDialogOpen || !editNodeId) return undefined;
+    // Start each dialog session from the list's copy, discarding any previously browsed version.
+    const listNode = getNode(nodeList, editNodeId);
+    if (listNode) {
+      setNodeDraft(nodeToEditDraft(listNode, listNode.id));
+      setEditNodeEffectiveDate("");
+    }
+    if (!token) return undefined;
+    let cancelled = false;
+    apiRequest(`/api/nodes/${encodeURIComponent(editNodeId)}/history`)
+      .then((resp) => {
+        if (cancelled) return;
+        const versions = Array.isArray(resp?.versions) ? resp.versions : [];
+        const idx = findVersionIndexAt(versions, asOfDate || todayIso);
+        setEditNodeVersions(versions);
+        setEditNodeVersionIdx(idx);
+        setEditNodeInitialVersionIdx(idx);
+        editNodeVersionIdxRef.current = idx;
+        if (versions[idx]) setNodeDraft(nodeToEditDraft(versions[idx], editNodeId));
+      })
+      .catch(() => {
+        if (!cancelled) setEditNodeVersions(false);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editNodeId, isEditNodeDialogOpen]);
+
+  const selectEditNodeVersion = (idx) => {
+    const version = editNodeVersions?.[idx];
+    if (!version) return;
+    const apply = () => {
+      setEditNodeVersionIdx(idx);
+      editNodeVersionIdxRef.current = idx;
+      setNodeDraft(nodeToEditDraft(version, editNodeId));
+      // Corrections to a browsed version keep its start date; the initially shown one keeps the default.
+      setEditNodeEffectiveDate(idx === editNodeInitialVersionIdx ? "" : (version.effectiveFrom || ""));
+    };
+    const shown = editNodeVersions?.[editNodeVersionIdx];
+    const hasUnsavedEdits = shown
+      ? getChangedVersionFields(nodeToEditDraft(shown, editNodeId), nodeDraft).size > 0
+      : false;
+    if (!hasUnsavedEdits) {
+      apply();
+      return;
+    }
+    setConfirmDialog({
+      title: "Discard changes?",
+      message: "You have unsaved edits to this version. Discard them and move to another version?",
+      confirmLabel: "Discard",
+      onConfirm: () => {
+        setConfirmDialog(null);
+        apply();
+      },
+    });
+  };
+
+  const editNodeShownVersion = editNodeVersions?.[editNodeVersionIdx] || null;
+  const editNodeChangedFields = editNodeShownVersion && editNodeVersionIdx > 0
+    ? getChangedVersionFields(editNodeVersions[editNodeVersionIdx - 1], editNodeShownVersion)
+    : new Map();
+  const editNodeVersionStatus = editNodeShownVersion
+    ? getVersionStatus(editNodeShownVersion, todayIso)
+    : (asOfDate && asOfDate !== todayIso ? "historical" : "current");
+  const withVersionChangeHighlight = (key, label, element) => {
+    if (!editNodeChangedFields.has(key)) return element;
+    const previous = describeVersionValue(editNodeChangedFields.get(key));
+    return (
+      <div
+        className="node-version-changed"
+        title={`${label} changed in this version. Previous value: ${previous}`}
+      >
+        {element}
+      </div>
+    );
+  };
 
   useEffect(() => {
     const rel = ownerships.find((r) => r.id === editOwnershipId);
@@ -5388,6 +5685,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                           setAddUserError("");
                           setAddUserSuccess("");
                           setManageUsersError("");
+                          setEmulateUserPrompt(null);
                           setManageUsersOpen(true);
                           setManageUsersLoading(true);
                           try {
@@ -6493,13 +6791,30 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       <Plus size={16} />
                       Add
                     </Button>
-                    <Button
-                      type="button"
-                      onClick={saveAllTableRows}
-                      disabled={pendingTableKeys.size === 0 || tableSavingKeys.size > 0}
-                    >
-                      Save Changes ({pendingTableKeys.size})
-                    </Button>
+                    {(() => {
+                      const errorCount = Object.keys(tableRowErrors).length;
+                      if (tableSavingKeys.size > 0) {
+                        return <span className="tabular-save-indicator tabular-save-indicator--saving" role="status">Saving…</span>;
+                      }
+                      if (errorCount > 0) {
+                        return (
+                          <span className="tabular-save-indicator tabular-save-indicator--error" role="status">
+                            Save failed ({errorCount})
+                            <button type="button" className="tabular-save-indicator-retry" onClick={() => {
+                              // Retry re-asks about duplicate names that were declined.
+                              tableNameDecisionsRef.current.forEach((decision, key) => {
+                                if (!decision.ok) tableNameDecisionsRef.current.delete(key);
+                              });
+                              flushTableRowSaves();
+                            }}>Retry</button>
+                          </span>
+                        );
+                      }
+                      if (pendingTableKeys.size > 0) {
+                        return <span className="tabular-save-indicator tabular-save-indicator--pending" role="status">Unsaved changes ({pendingTableKeys.size})</span>;
+                      }
+                      return <span className="tabular-save-indicator tabular-save-indicator--saved" role="status">All changes saved</span>;
+                    })()}
                   </div>
                 </div>
 
@@ -6558,13 +6873,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                             const isSaving = tableSavingKeys.has(row.key);
                             const isDirty = pendingTableKeys.has(row.key);
                             const rowError = tableRowErrors[row.key];
-                            const resolvedId = row.isNew
-                              ? makeNodeId(rowNode.kind, rowNode.name || "")
-                              : makeNodeId(rowNode.kind, rowNode.name || "", row.key);
                             return (
                               <tr key={row.key} className={rowError ? "tabular-row-error" : undefined}>
                                 {visibleTabularColumns.map((column, colIdx) => {
-                                  const cell = renderTabularCell(column, { row, rowNode, isSaving, isDirty, rowError, resolvedId });
+                                  const cell = renderTabularCell(column, { row, rowNode, isSaving, isDirty, rowError });
                                   if (!React.isValidElement(cell)) return cell;
 
                                   let nextCell = cell;
@@ -7686,17 +7998,22 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                 </div>
               </div>
               <DialogFooter style={{ justifyContent: "space-between" }}>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={!nodeList.some((n) => n.id === makeNodeId(newNode.kind, newNode.name))}
-                  onClick={() => {
-                    const id = makeNodeId(newNode.kind, newNode.name);
-                    openOwnerEditor(id);
-                  }}
-                >
-                  Owners
-                </Button>
+                {(() => {
+                  const typedName = newNode.name.trim().toLowerCase();
+                  const matchingNode = typedName
+                    ? nodeList.find((n) => n.kind === newNode.kind && String(n.name || "").trim().toLowerCase() === typedName)
+                    : null;
+                  return (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={!matchingNode}
+                      onClick={() => openOwnerEditor(matchingNode.id)}
+                    >
+                      Owners
+                    </Button>
+                  );
+                })()}
                 <div style={{ display: "flex", gap: 8 }}>
                   <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
                   <Button
@@ -7706,6 +8023,25 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       if (isAddingNode) return;
                       if (!newNode.name.trim()) return;
                       setIsAddingNode(true);
+                      const nameConflicts = await getNameConflicts({ name: newNode.name, kind: newNode.kind });
+                      if (nameConflicts.length) {
+                        const proceed = await askConfirm({
+                          title: "Duplicate name",
+                          confirmLabel: "Create anyway",
+                          message: renderNameConflictMessage(nameConflicts, {
+                            kind: newNode.kind,
+                            intro: <>You're about to create <strong>{newNode.name.trim()}</strong>, but that name is already used:</>,
+                            onOpen: (existingId) => {
+                              setEditNodeId(existingId);
+                              setOpenDialog({ type: "edit-node" });
+                            },
+                          }),
+                        });
+                        if (!proceed) {
+                          setIsAddingNode(false);
+                          return;
+                        }
+                      }
                       const id = makeNodeId(newNode.kind, newNode.name);
                       const payload = {
                         id,
@@ -7723,12 +8059,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         customFields: newNode.customFields || {},
                       };
                       try {
-                        await apiRequest("/api/nodes", {
+                        // The server may assign a different (unique) ID than the one requested.
+                        const created = await apiRequest("/api/nodes", {
                           method: "POST",
                           body: JSON.stringify(payload),
                         });
-                        setNodeList((prev) => [...prev, payload]);
-                        if (!focusId) setFocusId(id);
+                        const createdNode = { ...payload, ...created };
+                        setNodeList((prev) => [...prev, createdNode]);
+                        if (!focusId) setFocusId(createdNode.id);
                         setNewNode({ name: "", kind: newNode.kind, photo: "", logo: "", address: "", workPhone: "", cellPhone: "", emails: "", taxId: "", customFields: {} });
                         setRemoteStatus("connected");
                         setOpenDialog(null);
@@ -8049,17 +8387,71 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
             <DialogContent className="dialog-content--tall" style={{ width: "min(1000px, 92vw)", maxWidth: "none" }}>
               <DialogHeader style={{ marginBottom: '24px', marginLeft: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
-                  <DialogTitle>{nodeDraft.name || "Edit Node"}</DialogTitle>
-                  {asOfDate && asOfDate !== todayIso ? (
-                    <div style={{ backgroundColor: '#fee2e2', color: '#991b1b', padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', marginTop: 2 }}>
-                      HISTORICAL
+                  <div style={{ minWidth: 0 }}>
+                    <DialogTitle>{nodeDraft.name || "Edit Node"}</DialogTitle>
+                    {editNodeShownVersion?.changedAt && (
+                      <div className="node-version-entered-by">
+                        {editNodeShownVersion.changedBy === "import"
+                          ? "This data was imported"
+                          : `This data was entered by ${editNodeShownVersion.changedByName || editNodeShownVersion.changedBy || "an unknown user"}`}
+                        {" on "}
+                        {new Date(editNodeShownVersion.changedAt).toLocaleString("en-US", {
+                          month: "2-digit", day: "2-digit", year: "numeric", hour: "numeric", minute: "2-digit",
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <div className="node-version-nav">
+                    <div className="node-version-nav-row">
+                      {editNodeShownVersion && (
+                        <button
+                          type="button"
+                          className="node-version-nav-btn"
+                          title="Prior version"
+                          aria-label="Prior version"
+                          disabled={editNodeVersionIdx <= 0}
+                          onClick={() => selectEditNodeVersion(editNodeVersionIdx - 1)}
+                        >
+                          <ChevronLeft size={16} />
+                        </button>
+                      )}
+                      <div className={`node-version-pill node-version-pill--${editNodeVersionStatus}`}>
+                        {editNodeVersionStatus.toUpperCase()}
+                      </div>
+                      {editNodeShownVersion && (
+                        <button
+                          type="button"
+                          className="node-version-nav-btn"
+                          title="Next version"
+                          aria-label="Next version"
+                          disabled={editNodeVersionIdx >= editNodeVersions.length - 1}
+                          onClick={() => selectEditNodeVersion(editNodeVersionIdx + 1)}
+                        >
+                          <ChevronRight size={16} />
+                        </button>
+                      )}
                     </div>
-                  ) : (
-                    <div style={{ backgroundColor: '#dcfce7', color: '#166534', padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap', marginTop: 2 }}>
-                      CURRENT
-                    </div>
-                  )}
+                    {editNodeShownVersion ? (
+                      <div className="node-version-range">
+                        <div>{formatVersionRange(editNodeShownVersion.effectiveFrom, editNodeShownVersion.effectiveTo)}</div>
+                        <div>Version {editNodeVersionIdx + 1} of {editNodeVersions.length}</div>
+                      </div>
+                    ) : (
+                      <div className="node-version-range">
+                        {editNodeVersions === null
+                          ? "Loading history…"
+                          : editNodeVersions === false
+                            ? "History unavailable"
+                            : "No change history recorded"}
+                      </div>
+                    )}
+                  </div>
                 </div>
+                {editNodeChangedFields.size > 0 && (
+                  <div className="node-version-legend">
+                    Highlighted fields changed from the prior version (hover to see the previous value).
+                  </div>
+                )}
               </DialogHeader>
               <div className="dialog-body">
                 <div className="form-grid">
@@ -8076,14 +8468,17 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       onChange={(e) => setEditNodeEffectiveDate(e.target.value)}
                     />
                     <span style={{ fontSize: 11, color: "#6b7280", marginLeft: 4 }}>
-                      {editNodeEffectiveDate
-                        ? `Recording change as of ${editNodeEffectiveDate}`
-                        : asOfDate
-                          ? `Using global As-of date (${asOfDate})`
-                          : `Defaulting to today (${todayIso})`}
+                      {editNodeEffectiveDate && editNodeShownVersion && editNodeEffectiveDate === editNodeShownVersion.effectiveFrom
+                        ? `Correcting the displayed version (effective ${formatIsoDate(editNodeEffectiveDate)})`
+                        : editNodeEffectiveDate
+                          ? `Recording change as of ${editNodeEffectiveDate}`
+                          : asOfDate
+                            ? `Using global As-of date (${asOfDate})`
+                            : `Defaulting to today (${todayIso})`}
                     </span>
                   </div>
                   {/* Name — always first, system field */}
+                  {withVersionChangeHighlight("name", "Name", (
                   <div className="form-row">
                     <label className="form-label">Name</label>
                     <input
@@ -8097,7 +8492,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       data-lpignore="true"
                     />
                   </div>
+                  ))}
                   {/* Photo / Logo — built-in system field */}
+                  {withVersionChangeHighlight(nodeDraft.kind === "person" ? "photo" : "logo", nodeDraft.kind === "person" ? "Photo" : "Logo", (
                   <NodeImageField
                     kind={nodeDraft.kind}
                     value={nodeDraft.kind === "person" ? nodeDraft.photo : nodeDraft.logo}
@@ -8105,7 +8502,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     apiBase={apiBase}
                     token={token}
                   />
+                  ))}
                   {/* Built-in contact fields */}
+                  {withVersionChangeHighlight("address", "Address", (
                   <div className="form-row">
                     <label className="form-label">Address</label>
                     <input
@@ -8117,6 +8516,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       data-lpignore="true"
                     />
                   </div>
+                  ))}
+                  {withVersionChangeHighlight("workPhone", "Primary Phone", (
                   <div className="form-row">
                     <label className="form-label">Primary Phone</label>
                     <PhoneInputRow
@@ -8124,7 +8525,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                       onCommit={(val) => setNodeDraft((prev) => ({ ...prev, workPhone: val }))}
                     />
                   </div>
-                  {nodeDraft.kind === "person" && (
+                  ))}
+                  {nodeDraft.kind === "person" && withVersionChangeHighlight("cellPhone", "Cell Phone", (
                     <div className="form-row">
                       <label className="form-label">Cell Phone</label>
                       <PhoneInputRow
@@ -8132,8 +8534,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         onCommit={(val) => setNodeDraft((prev) => ({ ...prev, cellPhone: val }))}
                       />
                     </div>
-                  )}
-                  {nodeDraft.kind === "person" && (
+                  ))}
+                  {nodeDraft.kind === "person" && withVersionChangeHighlight("emails", "e-Mail", (
                     <div className="form-row">
                       <label className="form-label">e-Mail</label>
                       <input
@@ -8145,8 +8547,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         data-lpignore="true"
                       />
                     </div>
-                  )}
-                  {nodeDraft.kind === "entity" && (
+                  ))}
+                  {nodeDraft.kind === "entity" && withVersionChangeHighlight("taxId", "Tax ID", (
                     <div className="form-row">
                       <label className="form-label">Tax ID</label>
                       <input
@@ -8158,13 +8560,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                         data-lpignore="true"
                       />
                     </div>
-                  )}
+                  ))}
                   {[...dataDictionary, ENTITY_OWNERSHIP_SUMMARY_FIELD]
                     .filter((f) => normalizeAppliesTo(f.appliesTo).includes(nodeDraft.kind))
                     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
                     .map((field) => (
-                      <React.Fragment key={field.fieldId}>
-                        {renderDdField(
+                      <React.Fragment key={`${field.fieldId}|${editNodeVersionIdx}`}>
+                        {withVersionChangeHighlight(`cf:${field.fieldId}`, field.prompt || field.fieldId, renderDdField(
                           field,
                           nodeDraft.customFields?.[field.fieldId],
                           (val) => setNodeDraft((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
@@ -8173,7 +8575,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                             ownershipTimeline: nodeDraft.kind === "entity" ? editNodeOwnershipTimeline : [],
                             onOwnershipClick: (id) => { setPrevDialog(openDialog); openOwnerEditor(id); },
                           }
-                        )}
+                        ))}
                       </React.Fragment>
                     ))
                   }
@@ -8266,74 +8668,118 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   </Button>
                   <Button
                     type="button"
-                    onClick={() => {
+                    onClick={async () => {
                       if (!editNodeId || !nodeDraft.name.trim()) return;
-                      const newId = makeNodeId(
-                        nodeDraft.kind,
-                        nodeDraft.name,
-                        editNodeId
-                      );
-                      const payload = {
-                        name: nodeDraft.name.trim(),
-                        kind: nodeDraft.kind,
-                        asOfDate: editNodeEffectiveDate || asOfDate || todayIso,
-                        client: clientId,
-                        newId: newId !== editNodeId ? newId : null,
-                        photo: nodeDraft.kind === "person" ? (nodeDraft.photo || "") : "",
-                        logo: nodeDraft.kind === "entity" ? (nodeDraft.logo || "") : "",
-                        address: nodeDraft.address || "",
-                        workPhone: nodeDraft.workPhone || "",
-                        cellPhone: nodeDraft.cellPhone || "",
-                        emails: nodeDraft.emails || "",
-                        taxId: nodeDraft.taxId || "",
-                        customFields: nodeDraft.customFields || {},
-                      };
-                      apiRequest(`/api/nodes/${editNodeId}`, {
-                        method: "PUT",
-                        body: JSON.stringify(payload),
-                      })
-                        .then(() => {
-                          setNodeList((prev) =>
-                            prev.map((n) =>
-                              n.id === editNodeId
-                                ? {
-                                  ...n,
-                                  id: newId,
-                                  name: nodeDraft.name.trim(),
+                      const baseline = editNodeShownVersion || getNode(nodeList, editNodeId);
+                      const nameChanged = !baseline
+                        || normalizeNodeName(baseline.name) !== normalizeNodeName(nodeDraft.name)
+                        || (baseline.kind || "entity") !== nodeDraft.kind;
+                      const nameConflicts = nameChanged
+                        ? await getNameConflicts({ name: nodeDraft.name, kind: nodeDraft.kind, excludeId: editNodeId })
+                        : [];
+                      const effectiveDate = editNodeEffectiveDate || asOfDate || todayIso;
+                      const range = describeSaveRange(editNodeVersions || [], effectiveDate);
+                      const replacedBy = range.replaces
+                        ? (range.replaces.changedBy === "import" ? "an import" : (range.replaces.changedByName || range.replaces.changedBy || "an unknown user"))
+                        : null;
+                      setConfirmDialog({
+                        title: nameConflicts.length ? "Duplicate name ? confirm save" : "Confirm effective dates",
+                        confirmLabel: nameConflicts.length ? "Save anyway" : "Save",
+                        message: (
+                          <div style={{ display: "grid", gap: 8, fontSize: 14 }}>
+                            {nameConflicts.length > 0 && (
+                              <div className="name-conflict-warning">
+                                {renderNameConflictMessage(nameConflicts, {
                                   kind: nodeDraft.kind,
-                                  photo: payload.photo,
-                                  logo: payload.logo,
-                                  address: payload.address,
-                                  workPhone: payload.workPhone,
-                                  cellPhone: payload.cellPhone,
-                                  emails: payload.emails,
-                                  taxId: payload.taxId,
-                                  customFields: payload.customFields,
-                                  client: n.client || clientId,
-                                }
-                                : n
-                            )
-                          );
-                          if (newId !== editNodeId) {
-                            setRelList((prev) =>
-                              prev.map((r) => ({
-                                ...r,
-                                from: r.from === editNodeId ? newId : r.from,
-                                to: r.to === editNodeId ? newId : r.to,
-                              }))
-                            );
-                            if (focusId === editNodeId) {
-                              setFocusId(newId);
-                            }
-                            setEditNodeId(newId);
-                          }
-                          setRemoteStatus("connected");
-                          setOpenDialog(null);
-                        })
-                        .catch((err) => {
-                          setRemoteStatus("error");
-                          setRemoteError(err.message);
-                        });
+                                  intro: <>The name <strong>{nodeDraft.name.trim()}</strong> is already used:</>,
+                                })}
+                              </div>
+                            )}
+                            <div>
+                              This change will apply <strong>{range.to
+                                ? `from ${formatIsoDate(range.from)} through ${formatInclusiveEnd(range.to)}`
+                                : `from ${formatIsoDate(range.from)} with no end date`}</strong>.
+                            </div>
+                            {!Array.isArray(editNodeVersions) && (
+                              <div style={{ color: "#b91c1c" }}>Version history couldn't be loaded, so later versions (if any) can't be checked.</div>
+                            )}
+                            {range.replaces && (
+                              <div>It replaces the version for the same start date{replacedBy ? ` (entered by ${replacedBy})` : ""}.</div>
+                            )}
+                            {range.splits && (
+                              <div>
+                                The version starting {formatIsoDate(range.splits.effectiveFrom)} will now end on {formatInclusiveEnd(range.from)}.
+                              </div>
+                            )}
+                            {range.to && (
+                              <div style={{ color: "#92400e" }}>
+                                A later version starts {formatIsoDate(range.to)} and is not changed. If this edit should also apply after that date, update the later version(s) too.
+                              </div>
+                            )}
+                            {range.from > todayIso && (
+                              <div style={{ color: "#1d4ed8" }}>This is a future-dated change.</div>
+                            )}
+                          </div>
+                        ),
+                        onConfirm: () => {
+                          setConfirmDialog(null);
+                          const viewDate = asOfDate || todayIso;
+                          const coversView = range.from <= viewDate && (!range.to || viewDate < range.to);
+                          const payload = {
+                            name: nodeDraft.name.trim(),
+                            kind: nodeDraft.kind,
+                            asOfDate: effectiveDate,
+                            client: clientId,
+                            photo: nodeDraft.kind === "person" ? (nodeDraft.photo || "") : "",
+                            logo: nodeDraft.kind === "entity" ? (nodeDraft.logo || "") : "",
+                            operationalRole: nodeDraft.kind === "entity" ? (nodeDraft.operationalRole || "") : "",
+                            legalStatus: nodeDraft.kind === "entity" ? (nodeDraft.legalStatus || "") : "",
+                            personStatus: nodeDraft.kind === "person" ? (nodeDraft.personStatus || "") : "",
+                            address: nodeDraft.address || "",
+                            workPhone: nodeDraft.workPhone || "",
+                            cellPhone: nodeDraft.cellPhone || "",
+                            emails: nodeDraft.emails || "",
+                            taxId: nodeDraft.taxId || "",
+                            customFields: nodeDraft.customFields || {},
+                          };
+                          apiRequest(`/api/nodes/${editNodeId}`, {
+                            method: "PUT",
+                            body: JSON.stringify(payload),
+                          })
+                            .then(() => {
+                              setNodeList((prev) =>
+                                prev.map((n) => {
+                                  if (n.id !== editNodeId) return n;
+                                  // A version outside the date being viewed doesn't change what's shown.
+                                  if (!coversView) return n;
+                                  return {
+                                    ...n,
+                                    name: payload.name,
+                                    kind: payload.kind,
+                                    photo: payload.photo,
+                                    logo: payload.logo,
+                                    operationalRole: payload.operationalRole,
+                                    legalStatus: payload.legalStatus,
+                                    personStatus: payload.personStatus,
+                                    address: payload.address,
+                                    workPhone: payload.workPhone,
+                                    cellPhone: payload.cellPhone,
+                                    emails: payload.emails,
+                                    taxId: payload.taxId,
+                                    customFields: payload.customFields,
+                                    client: n.client || clientId,
+                                  };
+                                })
+                              );
+                              setRemoteStatus("connected");
+                              setOpenDialog(null);
+                            })
+                            .catch((err) => {
+                              setRemoteStatus("error");
+                              setRemoteError(err.message);
+                            });
+                        },
+                      });
                     }}
                   >
                     Update
@@ -8753,7 +9199,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     if (confirmDialog?.onConfirm) confirmDialog.onConfirm();
                   }}
                 >
-                  Delete
+                  {confirmDialog.confirmLabel || "Delete"}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -9178,7 +9624,22 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                     return (
                       <tr key={u.loginId} style={{ borderBottom: "1px solid #f1f5f9" }}>
                         <td style={{ padding: "7px 8px 7px 0", color: isSelf ? "#6b7280" : "#111827" }}>
-                          {u.loginId}{isSelf && <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 6 }}>(you)</span>}
+                          {isSelf || isEmulating ? u.loginId : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setManageUsersError("");
+                                setEmulateUserPrompt(u);
+                              }}
+                              style={{
+                                border: 0, padding: 0, background: "none", color: "#1d4ed8",
+                                font: "inherit", textDecoration: "underline", cursor: "pointer",
+                              }}
+                            >
+                              {u.loginId}
+                            </button>
+                          )}
+                          {isSelf && <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 6 }}>(you)</span>}
                         </td>
                         <td style={{ padding: "7px 8px", color: u.role === "admin" ? "#7c3aed" : "#6b7280" }}>
                           {u.role === "admin" ? "Admin" : "User"}
@@ -9219,6 +9680,57 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut }) 
                   })}
                 </tbody>
               </table>
+            )}
+
+            {emulateUserPrompt && (
+              <div style={{
+                marginBottom: 16, padding: 12, border: "1px solid #fdba74",
+                borderRadius: 6, background: "#fff7ed", color: "#7c2d12",
+              }}>
+                <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+                  Start using <strong>{emulateUserPrompt.loginId}</strong>'s account? You will have that account's permissions, and changes you make will be saved to it. Use the banner at the top of the app to return to your admin account.
+                </div>
+                {manageUsersError && (
+                  <div style={{ color: "#dc2626", fontSize: 13, marginTop: 8 }}>{manageUsersError}</div>
+                )}
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    disabled={emulateUserBusy}
+                    onClick={() => setEmulateUserPrompt(null)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={emulateUserBusy}
+                    onClick={async () => {
+                      setManageUsersError("");
+                      setEmulateUserBusy(true);
+                      try {
+                        const data = await apiRequest("/api/admin/impersonate", {
+                          method: "POST",
+                          body: JSON.stringify({ loginId: emulateUserPrompt.loginId }),
+                        });
+                        if (!data.token || !data.clientId) {
+                          throw new Error("The server returned an incomplete emulation session.");
+                        }
+                        onStartEmulation(data.token, data.clientId, {
+                          loginId: data.loginId,
+                          adminLoginId: data.emulatedBy || myLoginId,
+                        });
+                      } catch (err) {
+                        setManageUsersError(err.message);
+                      } finally {
+                        setEmulateUserBusy(false);
+                      }
+                    }}
+                  >
+                    {emulateUserBusy ? "Starting…" : "Start emulating"}
+                  </Button>
+                </div>
+              </div>
             )}
 
             {/* ─ Add user form ─ */}

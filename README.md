@@ -64,6 +64,12 @@ If these names do not match the tables used on your other machine, update `.env`
 
 Notes
 
+- Saved tabular views retain data-dictionary column IDs while definitions load. Unavailable fields are omitted from the displayed table without removing their IDs from the saved view.
+- Run the tabular-column regression tests with `node --test src\utils\tabularColumns.test.js`.
+- The node edit dialog shows the node's version history from `EMPlusNodeHistory` (`GET /api/nodes/:id/history`): the effective date range, who entered the displayed version, prior/next navigation, and highlights for fields changed from the prior version. End dates are shown inclusive (the day before the next version starts). Updating a browsed version corrects it in place, and the effective date range is confirmed before saving. Run `node --test src\utils\nodeVersions.test.js` for the helper tests.
+- The tabular grid autosaves: dropdowns save immediately, text cells save after a 1-second pause or on blur. Pending edits are also saved when switching views, going Back, hiding or leaving the page. The toolbar shows the save status, with Retry when a save fails.
+- Node IDs are permanent. They are derived from the name when a node is created (`kind:slug(name)`), and the server appends `-2`, `-3`, ? if that ID was ever used, including by a deleted node whose history remains. Renaming a node never changes its ID, so relationships, history and ownership stay attached. CSV/imports still match existing nodes by the name-derived ID, so importing a renamed node under its new name creates a separate node.
+- Creating or renaming a node (Add dialog, tabular grid, edit dialog, new owner) warns when another node of the same kind has, or ever had, the same name, including deleted nodes. Matching ignores case, spacing and punctuation, and uses `GET /api/node-names`. In the grid, a duplicate name is held unsaved until you leave the cell and confirm. Imports don't warn.
 - The preview mounts `src/App.jsx` (this file contains the ported app logic).
 - Small UI shim components are under `src/components/ui/` and provide minimal styling/behavior for the preview.
 - If you have the original `main.js`, it is not required for the preview and may be removed or kept for reference.

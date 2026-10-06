@@ -789,69 +789,6 @@ const deleteRelsForNode = async (clientId, nodeId) => {
   );
 };
 
-const rekeyNodeHistoryForNode = async (clientId, oldNodeId, newNodeId) => {
-  const allHistory = await queryNodeHistory(clientId);
-  const rows = allHistory.filter((row) => row.nodeId === oldNodeId);
-  if (rows.length === 0) return;
-
-  await Promise.all(rows.map((row) => deleteNodeHistory(clientId, row.nodeHistoryKey)));
-  await Promise.all(
-    rows.map((row) => {
-      const effectiveFrom = row.effectiveFrom || "0001-01-01";
-      const versionId = row.versionId || "legacy";
-      return putNodeHistory({
-        ...row,
-        id: newNodeId,
-        nodeId: newNodeId,
-        nodeHistoryKey: makeNodeHistoryKey({ nodeId: newNodeId, effectiveFrom, versionId }),
-      });
-    })
-  );
-};
-
-const rekeyOwnershipForNode = async (clientId, oldNodeId, newNodeId) => {
-  const [currentRows, historyRows] = await Promise.all([
-    queryOwnershipCurrent(clientId),
-    queryOwnershipHistory(clientId),
-  ]);
-
-  const currentToRewrite = currentRows.filter((r) => r.from === oldNodeId || r.to === oldNodeId);
-  const historyToRewrite = historyRows.filter((r) => r.from === oldNodeId || r.to === oldNodeId);
-
-  await Promise.all(currentToRewrite.map((r) => deleteOwnershipCurrent(clientId, r.ownershipKey)));
-  await Promise.all(historyToRewrite.map((r) => deleteOwnershipHistory(clientId, r.ownershipHistoryKey)));
-
-  await Promise.all(
-    currentToRewrite.map((row) => {
-      const from = row.from === oldNodeId ? newNodeId : row.from;
-      const to = row.to === oldNodeId ? newNodeId : row.to;
-      return putOwnershipCurrent({
-        ...row,
-        from,
-        to,
-        id: `owns-${from}-${to}`,
-        ownershipKey: makeOwnershipCurrentKey(from, to),
-      });
-    })
-  );
-
-  await Promise.all(
-    historyToRewrite.map((row) => {
-      const from = row.from === oldNodeId ? newNodeId : row.from;
-      const to = row.to === oldNodeId ? newNodeId : row.to;
-      const setId = row.setId || "legacy";
-      const effectiveFrom = row.effectiveFrom || row.startDate || "0001-01-01";
-      return putOwnershipHistory({
-        ...row,
-        from,
-        to,
-        id: `owns-${from}-${to}`,
-        ownershipHistoryKey: makeOwnershipHistoryKey({ to, effectiveFrom, from, setId }),
-      });
-    })
-  );
-};
-
 const deleteOwnershipReferencesForNode = async (clientId, nodeId) => {
   const [currentRows, historyRows] = await Promise.all([
     queryOwnershipCurrent(clientId),
@@ -1018,6 +955,53 @@ const requireAdmin = async (req, res, next) => {
   }
 };
 
+// POST /api/admin/impersonate — issue a user-scoped token for an admin to test
+// another account in the same client. The token retains the initiating admin ID.
+app.post("/api/admin/impersonate", requireAdmin, async (req, res) => {
+  try {
+    if (req.auth.emulatedBy) {
+      return res.status(403).json({ error: "An emulated session cannot start another emulation" });
+    }
+    const { loginId } = req.body || {};
+    if (!loginId || typeof loginId !== "string") {
+      return res.status(400).json({ error: "loginId is required" });
+    }
+    const targetLoginId = loginId.toLowerCase().trim();
+    if (!targetLoginId) {
+      return res.status(400).json({ error: "loginId is required" });
+    }
+    const user = await getUser(targetLoginId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (user.clientId !== req.auth.clientId) {
+      return res.status(403).json({ error: "User belongs to a different client" });
+    }
+    if (targetLoginId === req.auth.loginId) {
+      return res.status(400).json({ error: "You are already signed in as this user" });
+    }
+
+    const token = jwt.sign(
+      {
+        loginId: user.loginId,
+        clientId: user.clientId,
+        personId: user.personId || null,
+        emulatedBy: req.auth.loginId,
+      },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRY }
+    );
+    res.json({
+      token,
+      loginId: user.loginId,
+      clientId: user.clientId,
+      personId: user.personId || null,
+      emulatedBy: req.auth.loginId,
+    });
+  } catch (err) {
+    console.error("/api/admin/impersonate error", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // openCypher has been removed — backend now uses DynamoDB.
 app.post("/api/cypher", (_req, res) => {
   res.status(410).json({ error: "openCypher endpoint removed; backend now uses DynamoDB." });
@@ -1121,17 +1105,24 @@ app.post("/api/nodes", async (req, res) => {
       operationalRole, legalStatus, personStatus,
       asOfDate,
     } = req.body || {};
-    if (!id || !name || !kind) {
-      return res.status(400).json({ error: "id, name, kind are required" });
+    if (!name || !kind) {
+      return res.status(400).json({ error: "name and kind are required" });
     }
-    const normalizedId = normalizeClientId(client, id);
+    // IDs are permanent and never reused: if the requested/derived ID belongs to an existing
+    // node or to any history (including deleted nodes), allocate a suffixed one instead.
+    const baseId = normalizeClientId(client, id || `${kind}:${slugify(name) || "node"}`);
+    const historyRows = await queryNodeHistory(client);
+    const usedIds = new Set(historyRows.map((row) => row.nodeId));
+    let normalizedId = baseId;
+    for (let n = 2; usedIds.has(normalizedId) || await getNode(client, normalizedId); n += 1) {
+      normalizedId = `${baseId}-${n}`;
+    }
     const now = new Date().toISOString();
-    const existing = await getNode(client, normalizedId);
     const item = buildNodeItem({
       id: normalizedId, name, kind, client, address, workPhone, cellPhone,
       emails, photo, taxId, accountingUrl, hrUrl, logo, customFields,
       operationalRole, legalStatus, personStatus,
-      createdAt: existing?.createdAt || now,
+      createdAt: now,
       updatedAt: now,
     });
     await persistNodeVersion({
@@ -1684,7 +1675,7 @@ app.put("/api/nodes/:id", async (req, res) => {
     const id = req.params.id;
     const client = req.auth.clientId;
     const {
-      name, kind, newId, address, workPhone, cellPhone, emails,
+      name, kind, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo, customFields,
       operationalRole, legalStatus, personStatus,
       asOfDate,
@@ -1692,19 +1683,15 @@ app.put("/api/nodes/:id", async (req, res) => {
     if (!id || !name || !kind) {
       return res.status(400).json({ error: "id, name, kind are required" });
     }
+    // A node's ID is permanent; renaming only changes `name`. Any legacy `newId` is ignored.
     const normalizedId = normalizeClientId(client, id);
-    const normalizedNewId = newId ? normalizeClientId(client, newId) : null;
     const now = new Date().toISOString();
 
     const existing = await getNode(client, normalizedId);
     if (!existing) return res.status(404).json({ error: "node not found" });
 
-    const finalId = (normalizedNewId && normalizedNewId !== normalizedId)
-      ? normalizedNewId
-      : normalizedId;
-
     const item = buildNodeItem({
-      id: finalId, name, kind, client, address, workPhone, cellPhone,
+      id: normalizedId, name, kind, client, address, workPhone, cellPhone,
       emails, photo, taxId, accountingUrl, hrUrl, logo, customFields,
       operationalRole, legalStatus, personStatus,
       createdAt: existing.createdAt || now,
@@ -1717,27 +1704,6 @@ app.put("/api/nodes/:id", async (req, res) => {
       changedBy: req.auth.loginId,
       mode: "upsert",
     });
-
-    // If the ID changed, re-key every relationship that referenced the old ID.
-    if (finalId !== normalizedId) {
-      const [fromRels, toRels] = await Promise.all([
-        queryRelsByFrom(normalizedId),
-        queryRelsByTo(normalizedId),
-      ]);
-      await Promise.all([
-        ...fromRels.map((r) =>
-          putRel({ ...r, clientId: client, relKey: makeRelKey(r.type, finalId, r.to), from: finalId, id: `${r.type}-${finalId}-${r.to}` })
-            .then(() => deleteRel(client, r.relKey))
-        ),
-        ...toRels.map((r) =>
-          putRel({ ...r, clientId: client, relKey: makeRelKey(r.type, r.from, finalId), to: finalId, id: `${r.type}-${r.from}-${finalId}` })
-            .then(() => deleteRel(client, r.relKey))
-        ),
-      ]);
-      await rekeyNodeHistoryForNode(client, normalizedId, finalId);
-      await rekeyOwnershipForNode(client, normalizedId, finalId);
-      await deleteNode(client, normalizedId);
-    }
 
     res.json(toNodeResponse(item));
   } catch (err) {
@@ -1862,6 +1828,95 @@ app.delete("/api/relationships/owns", async (req, res) => {
     res.json({ from: fromId, to: toId });
   } catch (err) {
     console.error("/api/relationships/owns (delete) error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ─── Fetch version history for a node ──────────────────────────────────────
+// Name index for duplicate-name warnings: every node (including deleted ones that still
+// have history) with its current name and each name it has had, with date ranges.
+app.get("/api/node-names", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const [currentNodes, historyRows] = await Promise.all([
+      queryNodes(client),
+      queryNodeHistory(client),
+    ]);
+    const byId = new Map();
+    const ensure = (id) => {
+      if (!byId.has(id)) byId.set(id, { id, kind: null, currentName: null, deleted: true, names: [] });
+      return byId.get(id);
+    };
+    currentNodes.forEach((node) => {
+      const id = node.id || node.nodeId;
+      if (!id) return;
+      const entry = ensure(id);
+      entry.kind = node.kind || null;
+      entry.currentName = node.name || null;
+      entry.deleted = false;
+    });
+    historyRows.forEach((row) => {
+      const id = row.id || row.nodeId;
+      if (!id || !row.name) return;
+      const entry = ensure(id);
+      if (!entry.kind) entry.kind = row.kind || null;
+      entry.names.push({
+        name: row.name,
+        kind: row.kind || null,
+        effectiveFrom: row.effectiveFrom || null,
+        effectiveTo: row.effectiveTo || null,
+      });
+    });
+    byId.forEach((entry) => {
+      entry.names.sort((a, b) => (a.effectiveFrom || "").localeCompare(b.effectiveFrom || ""));
+    });
+    res.json({ nodes: [...byId.values()] });
+  } catch (err) {
+    console.error("/api/node-names error", err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Returns every EMPlusNodeHistory version for the node, oldest first. effectiveTo is
+// exclusive (the version applies while effectiveFrom <= date < effectiveTo).
+app.get("/api/nodes/:id/history", async (req, res) => {
+  try {
+    const client = req.auth.clientId;
+    const nodeId = normalizeClientId(client, req.params.id);
+    const historyRows = await queryNodeHistory(client);
+    const rows = historyRows
+      .filter((row) => row.nodeId === nodeId)
+      .sort((a, b) =>
+        (a.effectiveFrom || "0001-01-01").localeCompare(b.effectiveFrom || "0001-01-01")
+        || String(a.changedAt || "").localeCompare(String(b.changedAt || ""))
+      );
+
+    // changedBy is a loginId; resolve it to the linked person's name when possible.
+    const loginIds = [...new Set(rows.map((r) => r.changedBy).filter(Boolean))];
+    const nameByLogin = new Map();
+    await Promise.all(loginIds.map(async (loginId) => {
+      try {
+        const user = await getUser(loginId);
+        if (!user || user.clientId !== client || !user.personId) return;
+        const person = await getNode(client, normalizeClientId(client, user.personId));
+        if (person?.name) nameByLogin.set(loginId, person.name);
+      } catch {
+        // fall back to the loginId
+      }
+    }));
+
+    const versions = rows.map((row) => ({
+      ...toNodeResponse(row),
+      versionId: row.versionId || row.nodeHistoryKey,
+      effectiveFrom: row.effectiveFrom || null,
+      effectiveTo: row.effectiveTo || null,
+      changedAt: row.changedAt || null,
+      changedBy: row.changedBy || null,
+      changedByName: row.changedBy ? (nameByLogin.get(row.changedBy) || row.changedBy) : null,
+    }));
+    res.json({ nodeId, versions });
+  } catch (err) {
+    console.error("/api/nodes/:id/history error", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
