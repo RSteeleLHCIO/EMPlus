@@ -1121,41 +1121,20 @@ input[type="text"] {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 26px;
     height: 26px;
+    padding: 0 10px;
     border: 1px solid #cbd5e1;
     border-radius: 6px;
     background: #fff;
     color: #334155;
     cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
 }
 
 .node-version-nav-btn:disabled {
     opacity: 0.35;
     cursor: default;
-}
-
-.node-version-pill {
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    white-space: nowrap;
-}
-
-.node-version-pill--current {
-    background: #dcfce7;
-    color: #166534;
-}
-
-.node-version-pill--historical {
-    background: #fee2e2;
-    color: #991b1b;
-}
-
-.node-version-pill--future {
-    background: #dbeafe;
-    color: #1d4ed8;
 }
 
 .node-version-range {
@@ -1165,17 +1144,69 @@ input[type="text"] {
     white-space: nowrap;
 }
 
-.node-version-legend {
-    margin-top: 8px;
-    font-size: 12px;
-    color: #92400e;
+/* ── Node edit dialog: read-only audit trail panel ── */
+.node-history-panel {
+    margin-top: 12px;
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: #f8fafc;
 }
 
-.node-version-changed {
-    background: #fffbeb;
-    border-left: 3px solid #f59e0b;
-    border-radius: 6px;
-    padding: 6px 8px;
+.node-history-panel-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #475569;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 8px;
+}
+
+.node-history-entry {
+    padding: 8px 0;
+    border-top: 1px solid #e2e8f0;
+}
+
+.node-history-entry:first-child {
+    border-top: none;
+    padding-top: 0;
+}
+
+.node-history-entry-range {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.node-history-entry-current {
+    font-weight: 400;
+    color: #16a34a;
+}
+
+.node-history-entry-meta {
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 2px;
+}
+
+.node-history-entry-changes {
+    margin: 6px 0 0;
+    padding-left: 18px;
+    font-size: 12px;
+    color: #334155;
+}
+
+.node-history-entry-changes li + li {
+    margin-top: 2px;
+}
+
+.node-history-entry-nochange {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #94a3b8;
+    font-style: italic;
 }
 
 .name-conflict-warning {
@@ -1994,6 +2025,45 @@ input.tabular-meta-select[type="date"] {
     height: 1px;
     background: var(--border, #e2e8f0);
     margin: 4px 0;
+}
+
+/* ── Time Machine banner ──────────────────────────────────────────────────── */
+.time-machine-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    margin-bottom: 14px;
+    background: #fef3c7;
+    border: 1px solid #f59e0b;
+    border-radius: 8px;
+    color: #78350f;
+    font-size: 13px;
+}
+
+.time-machine-banner svg {
+    flex-shrink: 0;
+    color: #b45309;
+}
+
+.time-machine-banner span {
+    flex: 1;
+}
+
+.time-machine-banner-btn {
+    padding: 5px 12px;
+    font-size: 13px;
+    font-weight: 500;
+    background: #fff;
+    border: 1px solid #f59e0b;
+    border-radius: 6px;
+    color: #92400e;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.time-machine-banner-btn:hover {
+    background: #fffbeb;
 }
 
 /* ── Quick Find + Quick View ─────────────────────────────────────────────── */

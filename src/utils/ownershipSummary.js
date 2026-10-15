@@ -15,7 +15,7 @@ const formatPercent = (value) => {
   return `${parsed}%`;
 };
 
-export const getEntityOwnershipSummary = (node, nodeList, relList, asOfDate = null, ownershipTimeline = null) => {
+export const getEntityOwnershipSummary = (node, nodeList, relList, ownershipTimeline = null) => {
   if (!node || node.kind !== "entity" || !node.id) return "";
 
   const rels = (relList || [])
@@ -64,19 +64,9 @@ export const getEntityOwnershipSummary = (node, nodeList, relList, asOfDate = nu
     return a.ownerName.localeCompare(b.ownerName, undefined, { sensitivity: "base" });
   });
 
-  const summary = rows
+  // Ownership rows passed in here always come from the live/current directory
+  // data (never an as-of/historical filter), so the summary is always current.
+  return rows
     .map((row) => (row.percentText ? `${row.ownerName} (${row.percentText})` : row.ownerName))
     .join("; ");
-
-  // Check if this ownership structure is no longer current:
-  // Historical records have effectiveTo set; if any is in the past relative to today,
-  // the structure shown is not the current one.
-  const today = new Date().toISOString().split("T")[0];
-  const isStale = rows.some((row) => row.effectiveTo && row.effectiveTo !== "9999-12-31" && row.effectiveTo < today);
-
-  if (isStale) {
-    return summary + "  - THIS IS NOT THE CURRENT OWNERSHIP STRUCTURE";
-  }
-
-  return summary;
 };

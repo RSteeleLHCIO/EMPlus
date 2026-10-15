@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import * as XLSX from "xlsx";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
-import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet, Save, FilePlus } from "lucide-react";
+import { Link, Users, Building2, Plus, Pencil, Trash2, ChevronRight, ChevronDown, ChevronsDown, ChevronsUp, Upload, X, Search, Settings, LogOut, GitFork, LayoutList, Home, Download, BookOpen, User, UserPlus, Loader2, Crosshair, Filter, FileSpreadsheet, Save, FilePlus, Clock } from "lucide-react";
 import { generateEntityPdf, generateEntityBook, generateEntityBookInterleaved, estimatePosterPageCount, generateOrgChartPoster } from "./utils/generateEntityPdf";
 import ExportDialog from "./components/ExportDialog";
 import { normalizePhone, formatPhone, normalizeDateInput } from "./utils/helpers";
@@ -11,12 +11,10 @@ import { normalizeSavedColumnOrder, resolveTabularColumns } from "./utils/tabula
 import {
   describeSaveRange,
   describeVersionValue,
-  findVersionIndexAt,
   formatInclusiveEnd,
   formatIsoDate,
   formatVersionRange,
   getChangedVersionFields,
-  getVersionStatus,
 } from "./utils/nodeVersions";
 import { describeNameConflict, findNameConflicts, normalizeNodeName } from "./utils/nodeNames";
 import { Input } from "./components/ui/input";
@@ -29,6 +27,23 @@ import {
 } from "./components/ui/dialog";
 import { Label } from "./components/ui/label";
 import { Switch } from "./components/ui/switch";
+
+// Human-readable labels for built-in node fields, used by the read-only
+// node history / audit trail panel to describe what changed between versions.
+const NODE_VERSION_FIELD_LABELS = {
+  name: "Name",
+  kind: "Type",
+  photo: "Photo",
+  logo: "Logo",
+  address: "Address",
+  workPhone: "Primary Phone",
+  cellPhone: "Cell Phone",
+  emails: "e-Mail",
+  taxId: "Tax ID",
+  operationalRole: "Operational Role",
+  legalStatus: "Legal Status",
+  personStatus: "Person Status",
+};
 
 const DATA_TYPES = [
   { value: "string", label: "Short text" },
@@ -319,11 +334,11 @@ const NodeImageField = ({ kind, value, onChange, apiBase, token }) => {
   );
 };
 
-const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList, relList, asOfDate, ownershipTimeline, onOwnershipClick } = {}) => {
+const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList, relList, ownershipTimeline, onOwnershipClick } = {}) => {
   const { fieldId, prompt, dataType, multiValue, validValues, phoneTypes } = field;
 
   if (field?._virtual) {
-    const computed = getEntityOwnershipSummary(node, nodeList, relList, asOfDate, ownershipTimeline);
+    const computed = getEntityOwnershipSummary(node, nodeList, relList, ownershipTimeline);
     const clickable = Boolean(onOwnershipClick && node?.id);
     return (
       <div className="form-row" key={fieldId}>
@@ -1299,7 +1314,7 @@ function measureTextWidth(text, fontSize = 13) {
   return s.length * fontSize * 0.65;
 }
 
-function getNodeTabularValue(node, column, nodeList = [], relList = [], asOfDate = null) {
+function getNodeTabularValue(node, column, nodeList = [], relList = []) {
   if (!node) return "";
   switch (column.key) {
     case "type": return node.kind || "";
@@ -1314,7 +1329,7 @@ function getNodeTabularValue(node, column, nodeList = [], relList = [], asOfDate
     default:
       if (!column.field) return "";
       if (column.field._virtual) {
-        return getEntityOwnershipSummary(node, nodeList, relList, asOfDate);
+        return getEntityOwnershipSummary(node, nodeList, relList);
       }
       return node.customFields?.[column.field.fieldId] ?? "";
   }
@@ -1458,6 +1473,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  // ── Time Machine: read-only, effective-dated snapshot of Directory/Tabular ──
+  const [timeMachine, setTimeMachine] = useState(null); // null | { active: true, date: "YYYY-MM-DD" }
+  const [timeMachineDraftDate, setTimeMachineDraftDate] = useState("");
+  const [timeMachineLoading, setTimeMachineLoading] = useState(false);
+  const [timeMachineError, setTimeMachineError] = useState("");
+  const liveDirectoryBackupRef = useRef(null); // { nodes, rels } snapshot of live data while time-traveling
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [homeAnimating, setHomeAnimating] = useState(false);
   const [homeAnimOrigin, setHomeAnimOrigin] = useState("50% 50%");
@@ -1620,7 +1641,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const [tabularViewDraft, setTabularViewDraft] = useState({
     name: "",
     columnOrder: [],
-    asOfDate: "",
   });
   const [tabularViewNameError, setTabularViewNameError] = useState("");
   const [tabularDragKey, setTabularDragKey] = useState(null);
@@ -1664,7 +1684,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const [ownershipTableDirtyKeys, setOwnershipTableDirtyKeys] = useState(() => new Set());
   const [ownershipTableSavingKeys, setOwnershipTableSavingKeys] = useState(() => new Set());
   const [ownershipTableRowErrors, setOwnershipTableRowErrors] = useState({});
-  const [asOfDate, setAsOfDate] = useState("");
   const todayIso = useMemo(() => toIsoDate(new Date()), []);
 
   const getTabularPrefsPayload = useCallback((overrides = {}) => ({
@@ -1699,10 +1718,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const [editNodeOwnershipTimeline, setEditNodeOwnershipTimeline] = useState([]);
   // Version history shown in the edit dialog (null = loading, false = failed to load).
   const [editNodeVersions, setEditNodeVersions] = useState(null);
-  const [editNodeVersionIdx, setEditNodeVersionIdx] = useState(-1);
-  const [editNodeInitialVersionIdx, setEditNodeInitialVersionIdx] = useState(-1);
-  const editNodeVersionIdxRef = useRef(-1);
-  editNodeVersionIdxRef.current = editNodeVersionIdx;
+  const [editNodeHistoryOpen, setEditNodeHistoryOpen] = useState(false);
   const [nodeDraft, setNodeDraft] = useState({
     id: "",
     name: "",
@@ -1895,10 +1911,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   
   const quickViewOwnershipSummary = useMemo(() => {
     if (!quickViewNode || quickViewNode.kind !== "entity") return "";
-    const raw = String(getEntityOwnershipSummary(quickViewNode, nodeList, relList, asOfDate, quickViewOwnershipTimeline) || "").trim();
+    const raw = String(getEntityOwnershipSummary(quickViewNode, nodeList, relList, quickViewOwnershipTimeline) || "").trim();
     if (!raw) return "";
     return raw.split(";").map((part) => part.trim()).filter(Boolean).join("\n");
-  }, [nodeList, quickViewNode, relList, asOfDate, quickViewOwnershipTimeline]);
+  }, [nodeList, quickViewNode, relList, quickViewOwnershipTimeline]);
   const quickViewEmailText = useMemo(() => {
     if (!quickViewNode) return "";
     const emails = quickViewNode.emails;
@@ -2041,8 +2057,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         const n = Number(v); if (n > 0) columnWidths[k] = n;
       }
     }
-    const asOfDate = normalizeDateInput(view.asOfDate) || null;
-    return { id, name, nodeKind: view.nodeKind || null, columnOrder: visibleOrder, sort, filters, columnWidths, asOfDate };
+    return { id, name, nodeKind: view.nodeKind || null, columnOrder: visibleOrder, sort, filters, columnWidths };
   }, []);
 
   const captureHomeScreen = useCallback(() => {
@@ -2182,7 +2197,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           "Content-Type": "application/json",
           ...(token ? { "Authorization": `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ debug: false, asOf: asOfDate || null }),
+        body: JSON.stringify({ debug: false }),
       });
       if (!response.ok) {
         throw new Error(`API error ${response.status}`);
@@ -2205,14 +2220,76 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     } finally {
       if (canUpdate()) setDirectoryLoaded(true);
     }
-  }, [apiBase, token, asOfDate]);
+  }, [apiBase, token]);
 
-  // Reload directory whenever asOfDate changes (including to null for current data)
+  // The directory always reflects current data; load it once per session.
   useEffect(() => {
     if (token && apiBase) {
       loadDirectory();
     }
-  }, [asOfDate, loadDirectory, token, apiBase]);
+  }, [loadDirectory, token, apiBase]);
+
+  // ── Time Machine ────────────────────────────────────────────────────────
+  // Loads a read-only, effective-dated snapshot into nodeList/relList (stashing the
+  // live data first) so Directory/Tabular render it with zero other call-site changes.
+  const enterTimeMachine = useCallback(async (rawDate) => {
+    const date = normalizeDateInput(rawDate);
+    if (!date) {
+      setTimeMachineError("Enter a valid date.");
+      return;
+    }
+    setTimeMachineLoading(true);
+    setTimeMachineError("");
+    try {
+      // Flush any outstanding inline edits before swapping in the snapshot, so nothing
+      // pending in the live grid is silently lost underneath it.
+      await flushTableRowSaves();
+      const response = await fetch(`${apiBase}/api/directory`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { "Authorization": `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ asOf: date }),
+      });
+      if (!response.ok) {
+        throw new Error(`API error ${response.status}`);
+      }
+      const data = await response.json();
+      if (!liveDirectoryBackupRef.current) {
+        liveDirectoryBackupRef.current = { nodes: nodeList, rels: relList };
+      }
+      setNodeList(Array.isArray(data.nodes) ? data.nodes : []);
+      setRelList(Array.isArray(data.rels) ? data.rels : []);
+      setTimeMachine({ active: true, date });
+      if (viewMode !== "directory" && viewMode !== "tabular") setViewMode("directory");
+      setOpenDialog(null);
+    } catch (err) {
+      setTimeMachineError(err.message || "Unable to load snapshot for that date.");
+    } finally {
+      setTimeMachineLoading(false);
+    }
+  }, [apiBase, token, nodeList, relList, viewMode, flushTableRowSaves]);
+
+  const exitTimeMachine = useCallback(() => {
+    const backup = liveDirectoryBackupRef.current;
+    if (backup) {
+      setNodeList(backup.nodes);
+      setRelList(backup.rels);
+    }
+    liveDirectoryBackupRef.current = null;
+    setTimeMachine(null);
+    setTimeMachineError("");
+  }, []);
+
+  // Time Machine is scoped to Directory/Tabular only — leaving for any other view
+  // (Hierarchy, Editor) automatically returns to live data.
+  useEffect(() => {
+    if (timeMachine?.active && viewMode !== "directory" && viewMode !== "tabular") {
+      exitTimeMachine();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode]);
 
   // Background ownership import - starts import and returns immediately with feedback
   const startBackgroundOwnershipImport = (rows, csvSkipped) => {
@@ -2999,7 +3076,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           id,
           name: draft.name.trim(),
           kind: draft.kind,
-          asOfDate: asOfDate || todayIso,
+          asOfDate: todayIso,
           client: clientId,
           photo: draft.kind === "person" ? (draft.photo || "") : "",
           logo: draft.kind === "entity" ? (draft.logo || "") : "",
@@ -3024,7 +3101,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         const payload = {
           name: draft.name.trim(),
           kind: draft.kind,
-          asOfDate: asOfDate || todayIso,
+          asOfDate: todayIso,
           client: clientId,
           photo: draft.kind === "person" ? (draft.photo || "") : "",
           logo: draft.kind === "entity" ? (draft.logo || "") : "",
@@ -3102,7 +3179,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       });
     }
   }, [
-    asOfDate,
     apiRequest,
     askConfirm,
     clientId,
@@ -3289,7 +3365,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       sort: tabularSort,
       filters: { ...tabularFilters },
       columnWidths: { ...(activeTabularView.columnWidths || {}) },
-      asOfDate: activeTabularView.asOfDate || "",
     });
     setTabularDraftFilterKey(null);
     setTabularViewDialogOpen(true);
@@ -3372,13 +3447,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       id: selectedTabularViewId,
       sort: tabularSort,
       filters: { ...tabularFilters },
-      asOfDate,
     });
     if (!nextView) return;
     const nextViews = tabularViews.map((v) => (v.id === selectedTabularViewId ? nextView : v));
     setTabularViews(nextViews);
     persistTabularViewPrefs(nextViews, selectedTabularViewId);
-  }, [activeTabularView, asOfDate, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularFilters, tabularSort, tabularViews]);
+  }, [activeTabularView, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularFilters, tabularSort, tabularViews]);
 
   const openTabularSaveAsNewFromLive = useCallback(() => {
     setTabularViewDraft({
@@ -3387,12 +3461,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       filters: { ...tabularFilters },
       columnOrder: [...(activeTabularView.columnOrder || defaultTabularOrder)],
       columnWidths: { ...(activeTabularView.columnWidths || {}) },
-      asOfDate,
     });
     setTabularSaveAsNewName("");
     setTabularSaveAsNewError("");
     setTabularSaveAsNewOpen(true);
-  }, [activeTabularView, asOfDate, defaultTabularOrder, tabularFilters, tabularSort]);
+  }, [activeTabularView, defaultTabularOrder, tabularFilters, tabularSort]);
 
   const commitTabularSaveAsNew = useCallback(() => {
     const name = tabularSaveAsNewName.trim();
@@ -3426,7 +3499,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     persistTabularViewPrefs(nextViews, selectedTabularViewId);
     setTabularFilters(nextView.filters || {});
     setTabularSort(nextView.sort || null);
-    setAsOfDate(nextView.asOfDate || "");
     setTabularViewDialogOpen(false);
   }, [activeTabularView.name, persistTabularViewPrefs, sanitizeTabularView, selectedTabularViewId, tabularViewDraft, tabularViews]);
 
@@ -3653,7 +3725,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     if (!view) return;
     if (view.sort !== undefined) setTabularSort(view.sort || null);
     if (view.filters !== undefined) setTabularFilters(view.filters || {});
-    if (view.asOfDate !== undefined) setAsOfDate(view.asOfDate || "");
   }, [effectiveSelectedTabularViewId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (selectedOwnershipTabularViewId === DEFAULT_OWNERSHIP_TABULAR_VIEW_ID) return;
@@ -3703,7 +3774,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         const node = row.isNew ? row.node : (tableDrafts[row.key] || row.node);
         return active.every(([key, filter]) => {
           const col = colMap.get(key);
-          return col ? matchesTabularFilter(getNodeTabularValue(node, col, nodeList, relList, asOfDate), filter) : true;
+          return col ? matchesTabularFilter(getNodeTabularValue(node, col, nodeList, relList), filter) : true;
         });
       });
     }
@@ -3714,8 +3785,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         rows = [...rows].sort((a, b) => {
           const an = a.isNew ? a.node : (tableDrafts[a.key] || a.node);
           const bn = b.isNew ? b.node : (tableDrafts[b.key] || b.node);
-          const av = getNodeTabularValue(an, col, nodeList, relList, asOfDate);
-          const bv = getNodeTabularValue(bn, col, nodeList, relList, asOfDate);
+          const av = getNodeTabularValue(an, col, nodeList, relList);
+          const bv = getNodeTabularValue(bn, col, nodeList, relList);
           const aBlank = av == null || String(av).trim() === "";
           const bBlank = bv == null || String(bv).trim() === "";
           if (aBlank && bBlank) return 0;
@@ -3787,7 +3858,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       const values = visibleColumns.map((column) => {
         const raw = isOwnershipView
           ? getOwnershipTabularValue({ ...row.rel, ...(ownershipTableDrafts[row.key] || {}) }, nodeList, column)
-          : getNodeTabularValue(row.isNew ? row.node : (tableDrafts[row.key] || row.node), column, nodeList, relList, asOfDate);
+          : getNodeTabularValue(row.isNew ? row.node : (tableDrafts[row.key] || row.node), column, nodeList, relList);
         if (raw == null) return "";
         if (Array.isArray(raw)) return raw.join(", ");
         if (typeof raw === "object") return JSON.stringify(raw);
@@ -3839,7 +3910,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       // Measure every row's display value — use nodeList directly (not tableRows/tableDrafts)
       // so that column widths are stable and don't shift when cell content changes at runtime.
       for (const node of nodeList) {
-        const val = String(getNodeTabularValue(node, column, nodeList, relList, asOfDate) ?? "");
+        const val = String(getNodeTabularValue(node, column, nodeList, relList) ?? "");
         const w = measureTextWidth(val, CELL_FONT) + CELL_PAD + extraPad;
         if (w > maxW) maxW = w;
       }
@@ -3906,7 +3977,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         percent: parsedPercent.value,
         startDate: draft.startDate !== undefined ? (draft.startDate || null) : (original.startDate || null),
         endDate: draft.endDate !== undefined ? (draft.endDate || null) : (original.endDate || null),
-        asOfDate: asOfDate || todayIso,
+        asOfDate: todayIso,
         customFields: { ...(original.customFields || {}), ...(draft.customFields || {}) },
         client: clientId,
       };
@@ -3925,7 +3996,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     } finally {
       setOwnershipTableSavingKeys((prev) => { const next = new Set(prev); next.delete(relId); return next; });
     }
-  }, [apiRequest, asOfDate, clientId, ownerships, ownershipTableDrafts, todayIso]);
+  }, [apiRequest, clientId, ownerships, ownershipTableDrafts, todayIso]);
 
   const pendingOwnershipKeys = useMemo(() => ownershipTableDirtyKeys, [ownershipTableDirtyKeys]);
 
@@ -4072,6 +4143,27 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   }, [nodeList, ownershipTableDrafts, saveOwnershipTableRow, updateOwnershipTableDraft]);
 
   const renderTabularCell = useCallback((column, { row, rowNode, isSaving, isDirty, rowError }) => {
+    // Time Machine: render every cell as plain read-only text — no inputs, no save state.
+    if (timeMachine?.active) {
+      if (column.key === "status" || column.key === "actions") {
+        return <td key={`${row.key}-${column.key}`}></td>;
+      }
+      const field = column.field;
+      let displayValue;
+      if (field?._virtual) {
+        displayValue = getEntityOwnershipSummary(rowNode, nodeList, relList);
+      } else if (field) {
+        const applicable = normalizeAppliesTo(field.appliesTo).includes(rowNode.kind);
+        displayValue = applicable ? tableFieldToString(field, rowNode.customFields?.[field.fieldId]) : "-";
+      } else {
+        displayValue = getNodeTabularValue(rowNode, column, nodeList, relList);
+      }
+      return (
+        <td key={`${row.key}-${column.key}`}>
+          <span className="tabular-cell-ro">{displayValue || ""}</span>
+        </td>
+      );
+    }
     switch (column.key) {
       case "status":
         return (
@@ -4267,7 +4359,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
             if (!applicable) {
               return <td key={`${row.key}-${field.fieldId}`} className="tabular-na">-</td>;
             }
-            const virtualValue = getEntityOwnershipSummary(rowNode, nodeList, relList, asOfDate);
+            const virtualValue = getEntityOwnershipSummary(rowNode, nodeList, relList);
             return (
               <td
                 key={`${row.key}-${field.fieldId}`}
@@ -4365,7 +4457,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   }, [
     nodeList,
     relList,
-    asOfDate,
     parseTableFieldValue,
     removeTableNewRow,
     requestTableRowSave,
@@ -4375,6 +4466,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     setOpenDialog,
     setViewMode,
     tableFieldToString,
+    timeMachine,
     updateTableRowDraft,
   ]);
 
@@ -4392,7 +4484,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       setOwnershipTimeline([]);
     }
 
-    // Find the period that's current as of asOfDate
+    // Current owners (relList always reflects live/current ownership).
     const currentOwners = getOwnersOf(relList, targetId).map((item) => {
       const node = getNode(nodeList, item.nodeId);
       return {
@@ -4605,7 +4697,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       }
       const created = await apiRequest("/api/nodes", {
         method: "POST",
-        body: JSON.stringify({ name, kind, asOfDate: asOfDate || todayIso, client: clientId }),
+        body: JSON.stringify({ name, kind, asOfDate: todayIso, client: clientId }),
       });
       setNodeList((prev) => [...prev, created]);
       setOwnerEditorRows((prev) => [
@@ -4644,12 +4736,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   useEffect(() => {
     const node = getNode(nodeList, editNodeId);
     if (node) {
-      // While a history version is displayed, keep showing it rather than the list's copy.
-      if (editNodeVersionIdxRef.current < 0) {
-        setNodeDraft(nodeToEditDraft(node, node.id));
-        setEditNodeEffectiveDate("");
-      }
-      
+      // Edits always start from the current, live data — never a browsed historical version.
+      setNodeDraft(nodeToEditDraft(node, node.id));
+      setEditNodeEffectiveDate("");
+
       // For entities, fetch ownership timeline to show in the ownership records field
       if (node.kind === "entity") {
         apiRequest(`/api/ownership/history/${encodeURIComponent(node.id)}`)
@@ -4664,11 +4754,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const isEditNodeDialogOpen = openDialog?.type === "edit-node";
   useEffect(() => {
     setEditNodeVersions(null);
-    setEditNodeVersionIdx(-1);
-    setEditNodeInitialVersionIdx(-1);
-    editNodeVersionIdxRef.current = -1;
+    setEditNodeHistoryOpen(false);
     if (!isEditNodeDialogOpen || !editNodeId) return undefined;
-    // Start each dialog session from the list's copy, discarding any previously browsed version.
+    // Start each dialog session from the list's current copy.
     const listNode = getNode(nodeList, editNodeId);
     if (listNode) {
       setNodeDraft(nodeToEditDraft(listNode, listNode.id));
@@ -4676,16 +4764,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     }
     if (!token) return undefined;
     let cancelled = false;
+    // Fetched purely for the read-only History panel and for the "replaces/splits" save
+    // warnings below — it never drives what's shown/edited in the form.
     apiRequest(`/api/nodes/${encodeURIComponent(editNodeId)}/history`)
       .then((resp) => {
         if (cancelled) return;
         const versions = Array.isArray(resp?.versions) ? resp.versions : [];
-        const idx = findVersionIndexAt(versions, asOfDate || todayIso);
         setEditNodeVersions(versions);
-        setEditNodeVersionIdx(idx);
-        setEditNodeInitialVersionIdx(idx);
-        editNodeVersionIdxRef.current = idx;
-        if (versions[idx]) setNodeDraft(nodeToEditDraft(versions[idx], editNodeId));
       })
       .catch(() => {
         if (!cancelled) setEditNodeVersions(false);
@@ -4694,54 +4779,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editNodeId, isEditNodeDialogOpen]);
 
-  const selectEditNodeVersion = (idx) => {
-    const version = editNodeVersions?.[idx];
-    if (!version) return;
-    const apply = () => {
-      setEditNodeVersionIdx(idx);
-      editNodeVersionIdxRef.current = idx;
-      setNodeDraft(nodeToEditDraft(version, editNodeId));
-      // Corrections to a browsed version keep its start date; the initially shown one keeps the default.
-      setEditNodeEffectiveDate(idx === editNodeInitialVersionIdx ? "" : (version.effectiveFrom || ""));
-    };
-    const shown = editNodeVersions?.[editNodeVersionIdx];
-    const hasUnsavedEdits = shown
-      ? getChangedVersionFields(nodeToEditDraft(shown, editNodeId), nodeDraft).size > 0
-      : false;
-    if (!hasUnsavedEdits) {
-      apply();
-      return;
-    }
-    setConfirmDialog({
-      title: "Discard changes?",
-      message: "You have unsaved edits to this version. Discard them and move to another version?",
-      confirmLabel: "Discard",
-      onConfirm: () => {
-        setConfirmDialog(null);
-        apply();
-      },
-    });
-  };
-
-  const editNodeShownVersion = editNodeVersions?.[editNodeVersionIdx] || null;
-  const editNodeChangedFields = editNodeShownVersion && editNodeVersionIdx > 0
-    ? getChangedVersionFields(editNodeVersions[editNodeVersionIdx - 1], editNodeShownVersion)
-    : new Map();
-  const editNodeVersionStatus = editNodeShownVersion
-    ? getVersionStatus(editNodeShownVersion, todayIso)
-    : (asOfDate && asOfDate !== todayIso ? "historical" : "current");
-  const withVersionChangeHighlight = (key, label, element) => {
-    if (!editNodeChangedFields.has(key)) return element;
-    const previous = describeVersionValue(editNodeChangedFields.get(key));
-    return (
-      <div
-        className="node-version-changed"
-        title={`${label} changed in this version. Previous value: ${previous}`}
-      >
-        {element}
-      </div>
-    );
-  };
+  // The node edit dialog no longer supports browsing/editing historical versions in place;
+  // fields are never highlighted for a "shown version" that no longer exists as a concept.
+  const editNodeLatestVersion = Array.isArray(editNodeVersions) && editNodeVersions.length
+    ? editNodeVersions[editNodeVersions.length - 1]
+    : null;
+  const withVersionChangeHighlight = (_key, _label, element) => element;
 
   useEffect(() => {
     const rel = ownerships.find((r) => r.id === editOwnershipId);
@@ -4768,47 +4811,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       });
     }
   }, [editEmploymentId, employments]);
-
-  useEffect(() => {
-    if (!openDialog || openDialog.type !== "edit-owners" || !openDialog.targetId || !ownershipTimeline.length || !asOfDate) {
-      return;
-    }
-
-    // Find the period that matches asOfDate
-    const matchingPeriod = ownershipTimeline.find((period) => {
-      const fromDate = period.effectiveFrom ? new Date(period.effectiveFrom) : null;
-      const toDate = period.effectiveTo ? new Date(period.effectiveTo) : null;
-      const dateToCheck = new Date(asOfDate);
-      
-      if (!fromDate && !toDate) return true; // Unspecified period covers all dates
-      if (!fromDate) return dateToCheck <= toDate;
-      if (!toDate) return dateToCheck >= fromDate;
-      return dateToCheck >= fromDate && dateToCheck <= toDate;
-    });
-
-    if (matchingPeriod) {
-      // Load this period's data
-      const periodRows = matchingPeriod.owners.map((o) => {
-        const node = getNode(nodeList, o.from);
-        return {
-          nodeId: o.from,
-          name: node?.name ?? o.from,
-          percent: String(o.percent),
-          startDate: "",
-          endDate: "",
-          isNew: false,
-        };
-      });
-      setOwnershipSelectedPeriodSetId(matchingPeriod.setId);
-      setOwnerEditorRows(periodRows);
-      setOwnerEditorOriginal(periodRows);
-      setOwnerEditorDateRange({
-        from: matchingPeriod.effectiveFrom,
-        to: matchingPeriod.effectiveTo,
-        isCurrent: !matchingPeriod.effectiveTo,
-      });
-    }
-  }, [asOfDate, ownershipTimeline, openDialog, nodeList]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -5501,43 +5503,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                 ))}
               </div>
 
-              {/* As of Date — always visible */}
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ fontSize: 12, color: "#6b7280", whiteSpace: "nowrap" }}>As of</span>
-                  <input
-                    type="date"
-                    value={asOfDate}
-                    max={todayIso}
-                    onChange={(e) => setAsOfDate(e.target.value)}
-                    style={{
-                      border: `1px solid ${asOfDate && asOfDate !== todayIso ? "#dc2626" : "#16a34a"}`,
-                      borderRadius: 6,
-                      padding: "4px 8px",
-                      fontSize: 12,
-                      color: "#1f2937",
-                      background: "#fff",
-                    }}
-                  />
-                  {asOfDate && (
-                    <button
-                      type="button"
-                      onClick={() => setAsOfDate("")}
-                      style={{
-                        border: "1px solid #cbd5e1",
-                        borderRadius: 6,
-                        padding: "3px 8px",
-                        fontSize: 11,
-                        cursor: "pointer",
-                        background: "#fff",
-                        color: "#475569",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      Today
-                    </button>
-                  )}
-                </div>
-
               {/* Settings Gear */}
               <div className="settings-anchor" ref={settingsRef}>
                 <Button
@@ -5584,20 +5549,34 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     <button
                       className="settings-menu-item"
                       onClick={() => {
-                        setUploadOpen(true);
-                        setUploadStatus("idle");
-                        setUploadError("");
-                        setUploadSummary(null);
-                        setUploadFile(null);
-                        setUploadDetected("");
-                        setUploadPreview(null);
-                        setUploadPreviewLoading(false);
+                        setTimeMachineDraftDate(timeMachine?.date || todayIso);
+                        setTimeMachineError("");
+                        setOpenDialog({ type: "time-machine" });
                         setSettingsOpen(false);
                       }}
                     >
-                      <Upload size={15} />
-                      Import CSV
+                      <Clock size={15} />
+                      Time Machine{timeMachine?.active ? ` (${timeMachine.date})` : ""}
                     </button>
+                    {!timeMachine?.active && (
+                      <button
+                        className="settings-menu-item"
+                        onClick={() => {
+                          setUploadOpen(true);
+                          setUploadStatus("idle");
+                          setUploadError("");
+                          setUploadSummary(null);
+                          setUploadFile(null);
+                          setUploadDetected("");
+                          setUploadPreview(null);
+                          setUploadPreviewLoading(false);
+                          setSettingsOpen(false);
+                        }}
+                      >
+                        <Upload size={15} />
+                        Import CSV
+                      </button>
+                    )}
                     <button
                       className="settings-menu-item"
                       onClick={async () => {
@@ -6257,6 +6236,33 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           </div>
         )}
 
+        {timeMachine?.active && (viewMode === "directory" || viewMode === "tabular") && (
+          <div className="time-machine-banner">
+            <Clock size={15} />
+            <span>
+              Time Machine — viewing as of <strong>{timeMachine.date}</strong> (effective-dated). Read-only.
+            </span>
+            <button
+              type="button"
+              className="time-machine-banner-btn"
+              onClick={() => {
+                setTimeMachineDraftDate(timeMachine.date);
+                setTimeMachineError("");
+                setOpenDialog({ type: "time-machine" });
+              }}
+            >
+              Change Date
+            </button>
+            <button
+              type="button"
+              className="time-machine-banner-btn"
+              onClick={exitTimeMachine}
+            >
+              Return to Live Data
+            </button>
+          </div>
+        )}
+
         {viewMode === "hierarchy" && (
           <>
             <div
@@ -6552,27 +6558,29 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   <CardContent>
                     <div className="section-title" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                       <span>Entities {dirSearchLower ? `(${filteredEntityNodes.length})` : ""}</span>
-                      <button
-                        type="button"
-                        title="Add Entity"
-                        onClick={() => {
-                          setNewNode({ name: "", kind: "entity", photo: "", logo: "", customFields: {} });
-                          setOpenDialog({ type: "add-node" });
-                        }}
-                        style={{
-                          background: "none",
-                          border: "none",
-                          cursor: "pointer",
-                          padding: "4px 8px",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          color: "#6b7280",
-                          fontSize: 16,
-                        }}
-                      >
-                        <Plus size={18} />
-                      </button>
+                      {!timeMachine?.active && (
+                        <button
+                          type="button"
+                          title="Add Entity"
+                          onClick={() => {
+                            setNewNode({ name: "", kind: "entity", photo: "", logo: "", customFields: {} });
+                            setOpenDialog({ type: "add-node" });
+                          }}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            cursor: "pointer",
+                            padding: "4px 8px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            color: "#6b7280",
+                            fontSize: 16,
+                          }}
+                        >
+                          <Plus size={18} />
+                        </button>
+                      )}
                     </div>
                     <div className="directory-scroll">
                       <ul className="directory-list">
@@ -6601,27 +6609,29 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   <CardContent>
                     <div className="section-title" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                       <span>People {dirSearchLower ? `(${filteredPersonNodes.length})` : ""}</span>
-                      <button
-                        type="button"
-                        title="Add Person"
-                        onClick={() => {
-                          setNewNode({ name: "", kind: "person", photo: "", logo: "", customFields: {} });
-                          setOpenDialog({ type: "add-node" });
-                        }}
-                        style={{
-                          background: "none",
-                          border: "none",
-                          cursor: "pointer",
-                          padding: "4px 8px",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          color: "#6b7280",
-                          fontSize: 16,
-                        }}
-                      >
-                        <Plus size={18} />
-                      </button>
+                      {!timeMachine?.active && (
+                        <button
+                          type="button"
+                          title="Add Person"
+                          onClick={() => {
+                            setNewNode({ name: "", kind: "person", photo: "", logo: "", customFields: {} });
+                            setOpenDialog({ type: "add-node" });
+                          }}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            cursor: "pointer",
+                            padding: "4px 8px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            color: "#6b7280",
+                            fontSize: 16,
+                          }}
+                        >
+                          <Plus size={18} />
+                        </button>
+                      )}
                     </div>
                     <div className="directory-scroll">
                       <ul className="directory-list">
@@ -6779,18 +6789,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       <FileSpreadsheet size={16} />
                       Export
                     </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => {
-                        const kind = tabularSubMode === "entities" ? "entity" : "person";
-                        setNewNode({ name: "", kind, photo: "", logo: "", customFields: {} });
-                        setOpenDialog({ type: "add-node" });
-                      }}
-                    >
-                      <Plus size={16} />
-                      Add
-                    </Button>
+                    {!timeMachine?.active && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => {
+                          const kind = tabularSubMode === "entities" ? "entity" : "person";
+                          setNewNode({ name: "", kind, photo: "", logo: "", customFields: {} });
+                          setOpenDialog({ type: "add-node" });
+                        }}
+                      >
+                        <Plus size={16} />
+                        Add
+                      </Button>
+                    )}
                     {(() => {
                       const errorCount = Object.keys(tableRowErrors).length;
                       if (tableSavingKeys.size > 0) {
@@ -6880,7 +6892,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                                   if (!React.isValidElement(cell)) return cell;
 
                                   let nextCell = cell;
-                                  if (colIdx === 0 && !row.isNew) {
+                                  if (colIdx === 0 && !row.isNew && !timeMachine?.active) {
                                     nextCell = React.cloneElement(nextCell, {
                                       className: `${nextCell.props.className || ""} tabular-actions-anchor`.trim(),
                                       children: (
@@ -6979,19 +6991,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                             )}
                             {tabularViewDraft.sort && (
                               <button type="button" className="tabular-meta-clear" onClick={() => setTabularViewDraft((prev) => ({ ...prev, sort: null }))}>Clear</button>
-                            )}
-                          </div>
-                          <div className="tabular-view-meta-row">
-                            <span className="tabular-view-label">As of date:</span>
-                            <input
-                              type="date"
-                              className="tabular-meta-select"
-                              value={tabularViewDraft.asOfDate || ""}
-                              max={todayIso}
-                              onChange={(e) => setTabularViewDraft((prev) => ({ ...prev, asOfDate: e.target.value }))}
-                            />
-                            {tabularViewDraft.asOfDate && (
-                              <button type="button" className="tabular-meta-clear" onClick={() => setTabularViewDraft((prev) => ({ ...prev, asOfDate: "" }))}>Clear</button>
                             )}
                           </div>
                           {Object.entries(tabularViewDraft.filters || {}).filter(([, f]) => !isFilterEmpty(f)).length > 0 && (
@@ -7245,6 +7244,55 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         )}
 
         <Dialog open={Boolean(openDialog)} onOpenChange={() => { setOpenDialog(null); setPrevDialog(null); setDupMatches([]); setOwnerSearch(""); setOwnerSearchOpen(false); }}>
+
+          {openDialog?.type === "time-machine" && (
+            <DialogContent style={{ width: "min(480px, 92vw)", maxWidth: "none" }}>
+              <DialogHeader style={{ marginBottom: 16, marginLeft: 0 }}>
+                <DialogTitle>Time Machine</DialogTitle>
+              </DialogHeader>
+              <div className="form-grid">
+                <p style={{ fontSize: 13, color: "#64748b", marginTop: 0 }}>
+                  View the Directory and Tabular grids as they looked on a past date, using each
+                  record's effective-dated history. The snapshot is <strong>read-only</strong> — no
+                  edits are possible while time-traveling.
+                </p>
+                <div className="form-row">
+                  <label className="form-label">Date</label>
+                  <input
+                    type="date"
+                    className="form-input"
+                    value={timeMachineDraftDate}
+                    max={todayIso}
+                    onChange={(e) => setTimeMachineDraftDate(e.target.value)}
+                  />
+                </div>
+                {timeMachineError && (
+                  <div style={{ color: "#dc2626", fontSize: 13 }}>{timeMachineError}</div>
+                )}
+              </div>
+              <DialogFooter style={{ justifyContent: "space-between", marginTop: 16 }}>
+                {timeMachine?.active ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => { exitTimeMachine(); setOpenDialog(null); }}
+                  >
+                    Return to Live Data
+                  </Button>
+                ) : <span />}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
+                  <Button
+                    type="button"
+                    onClick={() => enterTimeMachine(timeMachineDraftDate)}
+                    disabled={timeMachineLoading || !timeMachineDraftDate}
+                  >
+                    {timeMachineLoading ? "Loading…" : "View Snapshot"}
+                  </Button>
+                </div>
+              </DialogFooter>
+            </DialogContent>
+          )}
 
           {openDialog?.type === "data-dictionary" && (
             <DialogContent className="dialog-content--tall" style={{ width: "min(900px, 92vw)", maxWidth: "none" }}>
@@ -7632,7 +7680,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                                             to: period.effectiveTo,
                                             isCurrent: !period.effectiveTo,
                                           });
-                                          setAsOfDate(period.effectiveFrom || "");
                                         }}
                                         title="Click to view this period"
                                       >
@@ -7990,7 +8037,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                           field,
                           newNode.customFields?.[field.fieldId],
                           (val) => setNewNode((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
-                          { apiBase, token, node: newNode, nodeList, relList, asOfDate, ownershipTimeline: newNode.kind === "entity" ? editNodeOwnershipTimeline : [] }
+                          { apiBase, token, node: newNode, nodeList, relList, ownershipTimeline: newNode.kind === "entity" ? editNodeOwnershipTimeline : [] }
                         )}
                       </React.Fragment>
                     ))
@@ -8047,7 +8094,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                         id,
                         name: newNode.name.trim(),
                         kind: newNode.kind,
-                        asOfDate: asOfDate || todayIso,
+                        asOfDate: todayIso,
                         client: clientId,
                         photo: newNode.kind === "person" ? (newNode.photo || "") : "",
                         logo: newNode.kind === "entity" ? (newNode.logo || "") : "",
@@ -8201,7 +8248,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       percent: parsedPercent.value,
                       startDate: newOwnership.startDate || null,
                       endDate: newOwnership.endDate || null,
-                      asOfDate: asOfDate || todayIso,
+                      asOfDate: todayIso,
                       client: clientId,
                     };
                     try {
@@ -8389,67 +8436,88 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
                   <div style={{ minWidth: 0 }}>
                     <DialogTitle>{nodeDraft.name || "Edit Node"}</DialogTitle>
-                    {editNodeShownVersion?.changedAt && (
+                    {editNodeLatestVersion?.changedAt && (
                       <div className="node-version-entered-by">
-                        {editNodeShownVersion.changedBy === "import"
+                        {editNodeLatestVersion.changedBy === "import"
                           ? "This data was imported"
-                          : `This data was entered by ${editNodeShownVersion.changedByName || editNodeShownVersion.changedBy || "an unknown user"}`}
+                          : `This data was last entered by ${editNodeLatestVersion.changedByName || editNodeLatestVersion.changedBy || "an unknown user"}`}
                         {" on "}
-                        {new Date(editNodeShownVersion.changedAt).toLocaleString("en-US", {
+                        {new Date(editNodeLatestVersion.changedAt).toLocaleString("en-US", {
                           month: "2-digit", day: "2-digit", year: "numeric", hour: "numeric", minute: "2-digit",
                         })}
                       </div>
                     )}
                   </div>
                   <div className="node-version-nav">
-                    <div className="node-version-nav-row">
-                      {editNodeShownVersion && (
-                        <button
-                          type="button"
-                          className="node-version-nav-btn"
-                          title="Prior version"
-                          aria-label="Prior version"
-                          disabled={editNodeVersionIdx <= 0}
-                          onClick={() => selectEditNodeVersion(editNodeVersionIdx - 1)}
-                        >
-                          <ChevronLeft size={16} />
-                        </button>
-                      )}
-                      <div className={`node-version-pill node-version-pill--${editNodeVersionStatus}`}>
-                        {editNodeVersionStatus.toUpperCase()}
-                      </div>
-                      {editNodeShownVersion && (
-                        <button
-                          type="button"
-                          className="node-version-nav-btn"
-                          title="Next version"
-                          aria-label="Next version"
-                          disabled={editNodeVersionIdx >= editNodeVersions.length - 1}
-                          onClick={() => selectEditNodeVersion(editNodeVersionIdx + 1)}
-                        >
-                          <ChevronRight size={16} />
-                        </button>
-                      )}
-                    </div>
-                    {editNodeShownVersion ? (
-                      <div className="node-version-range">
-                        <div>{formatVersionRange(editNodeShownVersion.effectiveFrom, editNodeShownVersion.effectiveTo)}</div>
-                        <div>Version {editNodeVersionIdx + 1} of {editNodeVersions.length}</div>
-                      </div>
-                    ) : (
-                      <div className="node-version-range">
-                        {editNodeVersions === null
-                          ? "Loading history…"
-                          : editNodeVersions === false
-                            ? "History unavailable"
+                    <button
+                      type="button"
+                      className="node-version-nav-btn node-version-history-btn"
+                      onClick={() => setEditNodeHistoryOpen((prev) => !prev)}
+                      disabled={!Array.isArray(editNodeVersions) || editNodeVersions.length === 0}
+                      title="View this node's audit trail"
+                    >
+                      {editNodeHistoryOpen ? "Hide history" : "View history"}
+                    </button>
+                    <div className="node-version-range">
+                      {editNodeVersions === null
+                        ? "Loading history…"
+                        : editNodeVersions === false
+                          ? "History unavailable"
+                          : Array.isArray(editNodeVersions) && editNodeVersions.length > 0
+                            ? (editNodeVersions.length === 1
+                                ? "No changes since creation"
+                                : `${editNodeVersions.length - 1} change${editNodeVersions.length - 1 === 1 ? "" : "s"} since creation`)
                             : "No change history recorded"}
-                      </div>
-                    )}
+                    </div>
                   </div>
                 </div>
-                {editNodeChangedFields.size > 0 && (
-                  <div className="node-version-legend">
-                    Highlighted fields changed from the prior version (hover to see the previous value).
+                {editNodeHistoryOpen && Array.isArray(editNodeVersions) && editNodeVersions.length > 0 && (
+                  <div className="node-history-panel">
+                    <div className="node-history-panel-title">Audit trail — read only</div>
+                    {[...editNodeVersions].reverse().map((version, revIdx) => {
+                      const idx = editNodeVersions.length - 1 - revIdx;
+                      const prior = idx > 0 ? editNodeVersions[idx - 1] : null;
+                      const changed = prior ? getChangedVersionFields(prior, version) : new Map();
+                      const enteredBy = version.changedBy === "import"
+                        ? "Imported"
+                        : `Entered by ${version.changedByName || version.changedBy || "an unknown user"}`;
+                      return (
+                        <div key={version.versionId || idx} className="node-history-entry">
+                          <div className="node-history-entry-range">
+                            {formatVersionRange(version.effectiveFrom, version.effectiveTo)}
+                            {idx === editNodeVersions.length - 1 && <span className="node-history-entry-current"> (current)</span>}
+                          </div>
+                          <div className="node-history-entry-meta">
+                            {enteredBy}
+                            {version.changedAt && ` on ${new Date(version.changedAt).toLocaleString("en-US", {
+                              month: "2-digit", day: "2-digit", year: "numeric", hour: "numeric", minute: "2-digit",
+                            })}`}
+                          </div>
+                          {prior ? (
+                            changed.size > 0 ? (
+                              <ul className="node-history-entry-changes">
+                                {[...changed.entries()].map(([key, previousValue]) => {
+                                  const fieldId = key.startsWith("cf:") ? key.slice(3) : null;
+                                  const label = fieldId
+                                    ? (dataDictionary.find((f) => f.fieldId === fieldId)?.prompt || fieldId)
+                                    : (NODE_VERSION_FIELD_LABELS[key] || key);
+                                  const newValue = fieldId ? version.customFields?.[fieldId] : version[key];
+                                  return (
+                                    <li key={key}>
+                                      <strong>{label}:</strong> {describeVersionValue(previousValue)} → {describeVersionValue(newValue)}
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            ) : (
+                              <div className="node-history-entry-nochange">No tracked fields changed.</div>
+                            )
+                          ) : (
+                            <div className="node-history-entry-nochange">Initial recorded version.</div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </DialogHeader>
@@ -8457,24 +8525,20 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                 <div className="form-grid">
                   {/* Effective date of this change */}
                   <div className="form-row">
-                    <label className="form-label" title="Leave blank to use the global As-of date, or today if none is set">
+                    <label className="form-label" title="Leave blank to default to today">
                       Change effective
                     </label>
                     <input
                       className="form-input"
                       type="date"
                       value={editNodeEffectiveDate}
-                      placeholder={asOfDate || todayIso}
+                      placeholder={todayIso}
                       onChange={(e) => setEditNodeEffectiveDate(e.target.value)}
                     />
                     <span style={{ fontSize: 11, color: "#6b7280", marginLeft: 4 }}>
-                      {editNodeEffectiveDate && editNodeShownVersion && editNodeEffectiveDate === editNodeShownVersion.effectiveFrom
-                        ? `Correcting the displayed version (effective ${formatIsoDate(editNodeEffectiveDate)})`
-                        : editNodeEffectiveDate
-                          ? `Recording change as of ${editNodeEffectiveDate}`
-                          : asOfDate
-                            ? `Using global As-of date (${asOfDate})`
-                            : `Defaulting to today (${todayIso})`}
+                      {editNodeEffectiveDate
+                        ? `Recording change as of ${editNodeEffectiveDate}`
+                        : `Defaulting to today (${todayIso})`}
                     </span>
                   </div>
                   {/* Name — always first, system field */}
@@ -8565,13 +8629,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     .filter((f) => normalizeAppliesTo(f.appliesTo).includes(nodeDraft.kind))
                     .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
                     .map((field) => (
-                      <React.Fragment key={`${field.fieldId}|${editNodeVersionIdx}`}>
+                      <React.Fragment key={field.fieldId}>
                         {withVersionChangeHighlight(`cf:${field.fieldId}`, field.prompt || field.fieldId, renderDdField(
                           field,
                           nodeDraft.customFields?.[field.fieldId],
                           (val) => setNodeDraft((prev) => ({ ...prev, customFields: { ...prev.customFields, [field.fieldId]: val } })),
                           {
-                            apiBase, token, node: nodeDraft, nodeList, relList, asOfDate,
+                            apiBase, token, node: nodeDraft, nodeList, relList,
                             ownershipTimeline: nodeDraft.kind === "entity" ? editNodeOwnershipTimeline : [],
                             onOwnershipClick: (id) => { setPrevDialog(openDialog); openOwnerEditor(id); },
                           }
@@ -8643,7 +8707,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                         onConfirm: () => {
                           apiRequest(`/api/nodes/${targetId}`, {
                             method: "DELETE",
-                            body: JSON.stringify({ asOfDate: asOfDate || todayIso, client: clientId }),
+                            body: JSON.stringify({ asOfDate: todayIso, client: clientId }),
                           })
                             .then(() => {
                               setNodeList((prev) => prev.filter((n) => n.id !== targetId));
@@ -8670,14 +8734,14 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     type="button"
                     onClick={async () => {
                       if (!editNodeId || !nodeDraft.name.trim()) return;
-                      const baseline = editNodeShownVersion || getNode(nodeList, editNodeId);
+                      const baseline = getNode(nodeList, editNodeId);
                       const nameChanged = !baseline
                         || normalizeNodeName(baseline.name) !== normalizeNodeName(nodeDraft.name)
                         || (baseline.kind || "entity") !== nodeDraft.kind;
                       const nameConflicts = nameChanged
                         ? await getNameConflicts({ name: nodeDraft.name, kind: nodeDraft.kind, excludeId: editNodeId })
                         : [];
-                      const effectiveDate = editNodeEffectiveDate || asOfDate || todayIso;
+                      const effectiveDate = editNodeEffectiveDate || todayIso;
                       const range = describeSaveRange(editNodeVersions || [], effectiveDate);
                       const replacedBy = range.replaces
                         ? (range.replaces.changedBy === "import" ? "an import" : (range.replaces.changedByName || range.replaces.changedBy || "an unknown user"))
@@ -8723,7 +8787,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                         ),
                         onConfirm: () => {
                           setConfirmDialog(null);
-                          const viewDate = asOfDate || todayIso;
+                          const viewDate = todayIso;
                           const coversView = range.from <= viewDate && (!range.to || viewDate < range.to);
                           const payload = {
                             name: nodeDraft.name.trim(),
@@ -8939,7 +9003,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                           body: JSON.stringify({
                             from: ownershipDraft.from,
                             to: ownershipDraft.to,
-                            asOfDate: asOfDate || todayIso,
+                            asOfDate: todayIso,
                             client: clientId,
                           }),
                         })
@@ -8976,7 +9040,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       percent: parsedPercent.value,
                       startDate: ownershipDraft.startDate || null,
                       endDate: ownershipDraft.endDate || null,
-                      asOfDate: asOfDate || todayIso,
+                      asOfDate: todayIso,
                       client: clientId,
                     };
                     apiRequest("/api/relationships/owns", {
@@ -10095,33 +10159,37 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
             >
               <GitFork size={14} /> Hierarchy
             </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={async () => {
-                setFocusId(quickViewNode.id);
-                setViewMode("hierarchy");
-                setQuickViewNodeId("");
-                if (quickViewNode.kind === "entity") {
-                  await openOwnerEditor(quickViewNode.id);
-                }
-              }}
-              disabled={quickViewNode.kind !== "entity"}
-              title={quickViewNode.kind === "entity" ? "Edit owners" : "Owners are only available for entities"}
-            >
-              <Users size={14} /> Owners
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                setEditNodeId(quickViewNode.id);
-                setOpenDialog({ type: "edit-node" });
-                setQuickViewNodeId("");
-              }}
-            >
-              <Pencil size={14} /> View/Edit
-            </Button>
+            {!timeMachine?.active && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={async () => {
+                  setFocusId(quickViewNode.id);
+                  setViewMode("hierarchy");
+                  setQuickViewNodeId("");
+                  if (quickViewNode.kind === "entity") {
+                    await openOwnerEditor(quickViewNode.id);
+                  }
+                }}
+                disabled={quickViewNode.kind !== "entity"}
+                title={quickViewNode.kind === "entity" ? "Edit owners" : "Owners are only available for entities"}
+              >
+                <Users size={14} /> Owners
+              </Button>
+            )}
+            {!timeMachine?.active && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setEditNodeId(quickViewNode.id);
+                  setOpenDialog({ type: "edit-node" });
+                  setQuickViewNodeId("");
+                }}
+              >
+                <Pencil size={14} /> View/Edit
+              </Button>
+            )}
           </div>
         </aside>
       )}

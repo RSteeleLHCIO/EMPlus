@@ -1078,17 +1078,24 @@ app.post("/api/graph", async (req, res) => {
 app.post("/api/directory", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { asOf } = req.body || {};
-    console.log(`/api/directory called: client=${client} asOf=${asOf || "null"}`);
+    // By default the directory always reflects current data. An optional `asOf`
+    // (YYYY-MM-DD) opts into the "Time Machine": a read-only, effective-dated
+    // reconstruction of the whole directory as it looked on that date. This never
+    // happens unless a caller explicitly asks for it — see /api/nodes/:id/history
+    // and /api/ownership/history/:entityId for the equivalent per-entity audit trail.
+    const asOf = normalizeDateInput(req.body?.asOf) || null;
     const [nodeItems, relItems, ownershipRows] = await Promise.all([
-      listNodeRows(client, asOf || null),
+      listNodeRows(client, asOf),
       queryRels(client),
-      listOwnershipRows(client, asOf || null),
+      listOwnershipRows(client, asOf),
     ]);
-    const employs = relItems.filter((r) => r.type === "employs");
+    const employs = relItems
+      .filter((r) => r.type === "employs")
+      .filter((r) => (asOf ? relActiveAt(r, asOf) : true));
     res.json({
       nodes: nodeItems.map(toNodeResponse),
       rels: [...ownershipRows, ...employs].map(toRelResponse),
+      asOf,
     });
   } catch (err) {
     console.error("/api/directory error", err);
@@ -2022,6 +2029,22 @@ app.put("/api/ownership/update-period", async (req, res) => {
     if (entityRecords.length === 0) {
       return res.status(404).json({ error: "Ownership group not found" });
     }
+
+    // Same effectiveFrom means "replace that dated set" (mirrors persistOwnershipSet):
+    // if another period for this entity already starts on newFromDate, delete it first
+    // so moving this period onto that date can't leave two periods with the same start.
+    const collidingCurrent = currentRows.filter(
+      (r) => r.type === "owns" && r.to === toId && r.setId !== setId
+        && normalizeDateInput(r.effectiveFrom) === newFromDate
+    );
+    await Promise.all(collidingCurrent.map((r) => deleteOwnershipCurrent(client, r.ownershipKey)));
+
+    const allHistoryForCollision = await queryOwnershipHistory(client);
+    const collidingHistory = allHistoryForCollision.filter(
+      (r) => r.type === "owns" && r.to === toId && r.setId !== setId
+        && normalizeDateInput(r.effectiveFrom) === newFromDate
+    );
+    await Promise.all(collidingHistory.map((r) => deleteOwnershipHistory(client, r.ownershipHistoryKey)));
 
     // Delete old records with this setId in current table
     for (const record of entityRecords) {

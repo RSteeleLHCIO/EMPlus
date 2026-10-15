@@ -9,6 +9,7 @@
         "preview": "vite preview",
         "server": "node server/index.js",
         "clamp-ownership-dates": "node server/scripts/clampOwnershipEffectiveDates.js",
+        "dedupe-ownership-periods": "node server/scripts/dedupeOwnershipPeriods.js",
         "build:lambda": "npm install --omit=dev --omit=optional && node build-lambda-zip.cjs && npm install"
     },
     "dependencies": {
