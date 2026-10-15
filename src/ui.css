@@ -2027,6 +2027,27 @@ input.tabular-meta-select[type="date"] {
     margin: 4px 0;
 }
 
+/* ── Time Machine header badge ────────────────────────────────────────────── */
+.time-machine-header-badge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    background: #f59e0b;
+    border: none;
+    border-radius: 999px;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(180, 83, 9, 0.35);
+}
+
+.time-machine-header-badge:hover {
+    background: #d97706;
+}
+
 /* ── Time Machine banner ──────────────────────────────────────────────────── */
 .time-machine-banner {
     display: flex;

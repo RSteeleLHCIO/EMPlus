@@ -421,9 +421,12 @@ const listNodeRows = async (clientId, asOf = null) => {
   const targetAsOf = asOf || null;
   if (targetAsOf) {
     try {
-      const historyRows = await queryNodeHistory(clientId);
+      const [historyRows, currentRows] = await Promise.all([
+        queryNodeHistory(clientId),
+        queryNodes(clientId),
+      ]);
       const activeRows = historyRows
-        .filter((row) => isNodeActiveAt(row, targetAsOf))
+        .filter((row) => !row.deleted && isNodeActiveAt(row, targetAsOf))
         .sort((a, b) => {
           const as = a.effectiveFrom || "0001-01-01";
           const bs = b.effectiveFrom || "0001-01-01";
@@ -435,12 +438,58 @@ const listNodeRows = async (clientId, asOf = null) => {
         if (!row.nodeId) return;
         if (!byNodeId.has(row.nodeId)) byNodeId.set(row.nodeId, row);
       });
+
+      // Nodes with zero history rows predate version tracking (e.g. legacy/imported
+      // data that never went through persistNodeVersion). With no record of them ever
+      // being different, assume they've always existed and include their current data.
+      const historyNodeIds = new Set(historyRows.map((row) => row.nodeId));
+      currentRows.forEach((node) => {
+        const id = node.id || node.nodeId;
+        if (id && !historyNodeIds.has(id) && !byNodeId.has(id)) {
+          byNodeId.set(id, node);
+        }
+      });
+
       if (byNodeId.size > 0) return [...byNodeId.values()];
     } catch (err) {
       console.warn("listNodeRows: history query failed, falling back to current nodes:", err.message);
     }
   }
   return queryNodes(clientId);
+};
+
+// Recorded/audit-date mode: reconstruct what a live query of the system would have
+// shown at a real wall-clock instant, ignoring business effective dating entirely.
+// Selects, per node, the most recently *written* version whose changedAt is at or
+// before the cutoff — but only among versions that were ever the live "current" record
+// (wasCurrent !== false; legacy rows predating this field default to eligible).
+const listNodeRowsRecorded = async (clientId, cutoffIso) => {
+  const [historyRows, currentRows] = await Promise.all([
+    queryNodeHistory(clientId),
+    queryNodes(clientId),
+  ]);
+  const eligible = historyRows.filter(
+    (row) => row.wasCurrent !== false && row.changedAt && row.changedAt <= cutoffIso
+  );
+  const latestByNodeId = new Map();
+  eligible.forEach((row) => {
+    if (!row.nodeId) return;
+    const existing = latestByNodeId.get(row.nodeId);
+    if (!existing || row.changedAt > existing.changedAt) latestByNodeId.set(row.nodeId, row);
+  });
+
+  const results = [];
+  latestByNodeId.forEach((row) => {
+    if (!row.deleted) results.push(row);
+  });
+
+  // Nodes with zero history rows at all predate version tracking — assume always existed.
+  const historyNodeIds = new Set(historyRows.map((row) => row.nodeId));
+  currentRows.forEach((node) => {
+    const id = node.id || node.nodeId;
+    if (id && !historyNodeIds.has(id)) results.push(node);
+  });
+  return results;
 };
 
 const persistNodeVersion = async ({ clientId, nodeItem, asOfDate, changedBy, mode = "upsert" }) => {
@@ -502,7 +551,26 @@ const persistNodeVersion = async ({ clientId, nodeItem, asOfDate, changedBy, mod
   }
 
   if (mode === "delete") {
-    if (shouldReplaceCurrent) await deleteNode(clientId, nodeId);
+    if (shouldReplaceCurrent) {
+      await deleteNode(clientId, nodeId);
+      // Tombstone: Recorded/audit-date mode picks "most recently changed" rows by
+      // changedAt alone (ignoring effective dating), so without this marker a deleted
+      // node would appear to live on forever in that mode. Effective-dated mode already
+      // explicitly excludes deleted rows (see isNodeActiveAt callers), so this is inert there.
+      await putNodeHistory({
+        clientId,
+        nodeId,
+        id: nodeId,
+        nodeHistoryKey: makeNodeHistoryKey({ nodeId, effectiveFrom, versionId }),
+        effectiveFrom,
+        effectiveTo: nextStartAfterIncoming,
+        versionId,
+        changedAt: now,
+        changedBy: changedBy || null,
+        wasCurrent: true,
+        deleted: true,
+      });
+    }
     return null;
   }
 
@@ -515,6 +583,10 @@ const persistNodeVersion = async ({ clientId, nodeItem, asOfDate, changedBy, mod
     versionId,
     changedAt: now,
     changedBy: changedBy || null,
+    // Recorded/audit-date mode only considers rows that were ever the live "current"
+    // record — this distinguishes a normal edit from a backdated historical insert that
+    // never actually appeared as the live view (shouldReplaceCurrent === false).
+    wasCurrent: shouldReplaceCurrent,
   };
   await putNodeHistory(historyItem);
 
@@ -581,7 +653,10 @@ const listOwnershipRows = async (clientId, asOf = null) => {
   const targetAsOf = asOf || null;
   if (targetAsOf) {
     try {
-      const historyRows = await queryOwnershipHistory(clientId);
+      const [historyRows, currentRows] = await Promise.all([
+        queryOwnershipHistory(clientId),
+        queryOwnershipCurrent(clientId),
+      ]);
       const ownsRows = historyRows.filter((r) => r.type === "owns");
 
       // Compute effectiveTo for each row: the start of the next ownership set for the same owned entity.
@@ -604,10 +679,19 @@ const listOwnershipRows = async (clientId, asOf = null) => {
       });
 
       const active = withEffectiveTo.filter((r) => isOwnershipActiveAt(r, targetAsOf));
+
+      // Owned entities with zero ownership-history rows predate history tracking
+      // (e.g. legacy/imported data that never went through persistOwnershipSet). With no
+      // record of their ownership ever being different, assume it's always existed and
+      // include their current ownership unconditionally.
+      const historyToIds = new Set(ownsRows.map((r) => r.to));
+      const currentOwns = currentRows.filter((r) => r.type === "owns");
+      const untrackedCurrent = currentOwns.filter((r) => r.to && !historyToIds.has(r.to));
+
       // Return the filtered result regardless — even if empty.
       // An empty result correctly means "no ownership records active on this date".
       // Do NOT fall through to the legacy fallback, which has no date filtering.
-      return dedupeOwnershipRows(active);
+      return dedupeOwnershipRows([...active, ...untrackedCurrent]);
     } catch (err) {
       console.warn("listOwnershipRows: history query failed, falling back to current:", err.message);
       // Only fall through on exception — not on legitimately empty results.
@@ -628,6 +712,47 @@ const listOwnershipRows = async (clientId, asOf = null) => {
   return legacy
     .filter((r) => r.type === "owns")
     .filter((r) => (targetAsOf ? relActiveAt(r, targetAsOf) : true));
+};
+
+// Recorded/audit-date mode: for each owned entity, pick the ownership set (grouped by
+// setId) whose changedAt is the most recent at-or-before the cutoff — among sets that
+// were ever the live "current" ownership (wasCurrent !== false; legacy rows predating
+// this field default to eligible). Ignores business effective dating entirely.
+const listOwnershipRowsRecorded = async (clientId, cutoffIso) => {
+  const [historyRows, currentRows] = await Promise.all([
+    queryOwnershipHistory(clientId),
+    queryOwnershipCurrent(clientId),
+  ]);
+  const ownsHistory = historyRows.filter((r) => r.type === "owns");
+  const eligible = ownsHistory.filter(
+    (r) => r.wasCurrent !== false && r.changedAt && r.changedAt <= cutoffIso
+  );
+
+  const bestSetIdByTo = new Map(); // to -> { setId, changedAt }
+  eligible.forEach((r) => {
+    if (!r.to || !r.setId) return;
+    const existing = bestSetIdByTo.get(r.to);
+    if (!existing || r.changedAt > existing.changedAt) {
+      bestSetIdByTo.set(r.to, { setId: r.setId, changedAt: r.changedAt });
+    }
+  });
+
+  const results = [];
+  bestSetIdByTo.forEach(({ setId }, to) => {
+    eligible
+      .filter((r) => r.to === to && r.setId === setId)
+      .forEach((r) => results.push(r));
+  });
+
+  // Owned entities with zero ownership-history rows at all predate history tracking —
+  // assume their current ownership has always existed.
+  const historyToIds = new Set(ownsHistory.map((r) => r.to));
+  const currentOwns = currentRows.filter((r) => r.type === "owns");
+  currentOwns
+    .filter((r) => r.to && !historyToIds.has(r.to))
+    .forEach((r) => results.push(r));
+
+  return dedupeOwnershipRows(results);
 };
 
 const persistOwnershipSet = async ({ clientId, ownedId, rows, asOfDate, changedBy }) => {
@@ -708,6 +833,10 @@ const persistOwnershipSet = async ({ clientId, ownedId, rows, asOfDate, changedB
     setId,
     changedAt: now,
     changedBy: changedBy || null,
+    // Recorded/audit-date mode only considers sets that were ever the live "current"
+    // ownership — this distinguishes a normal edit from a backdated historical insert
+    // that never actually appeared as the live view (shouldReplaceCurrent === false).
+    wasCurrent: shouldReplaceCurrent,
   }));
 
   const currentItems = setRows.map((row) => ({
@@ -767,9 +896,11 @@ const toNodeResponse = ({
   changedBy: _cb,
   closedAt: _clA,
   closedBy: _clB,
+  wasCurrent: _wc,
+  deleted: _del,
   ...rest
 }) => rest;
-const toRelResponse = ({ clientId: _c, relKey: _r, ...rest }) => rest;
+const toRelResponse = ({ clientId: _c, relKey: _r, wasCurrent: _wc, ...rest }) => rest;
 
 // Check whether a relationship is active on a given date string (YYYY-MM-DD).
 const relActiveAt = (rel, asOf) => {
@@ -1079,16 +1210,34 @@ app.post("/api/directory", async (req, res) => {
   try {
     const client = req.auth.clientId;
     // By default the directory always reflects current data. An optional `asOf`
-    // (YYYY-MM-DD) opts into the "Time Machine": a read-only, effective-dated
-    // reconstruction of the whole directory as it looked on that date. This never
-    // happens unless a caller explicitly asks for it — see /api/nodes/:id/history
-    // and /api/ownership/history/:entityId for the equivalent per-entity audit trail.
+    // (YYYY-MM-DD) opts into the "Time Machine": a read-only reconstruction of the
+    // whole directory as it looked on that date. This never happens unless a caller
+    // explicitly asks for it — see /api/nodes/:id/history and
+    // /api/ownership/history/:entityId for the equivalent per-entity audit trail.
+    //
+    // Two reconstruction modes:
+    //  - "effective" (default): business effective-from/to dating.
+    //  - "recorded": what a live query would literally have shown at that real-world
+    //    instant, ignoring effective dating — selected by each record's changedAt.
     const asOf = normalizeDateInput(req.body?.asOf) || null;
-    const [nodeItems, relItems, ownershipRows] = await Promise.all([
-      listNodeRows(client, asOf),
-      queryRels(client),
-      listOwnershipRows(client, asOf),
-    ]);
+    const mode = req.body?.mode === "recorded" ? "recorded" : "effective";
+    let nodeItems;
+    let ownershipRows;
+    if (asOf && mode === "recorded") {
+      const cutoffIso = `${asOf}T23:59:59.999Z`;
+      [nodeItems, ownershipRows] = await Promise.all([
+        listNodeRowsRecorded(client, cutoffIso),
+        listOwnershipRowsRecorded(client, cutoffIso),
+      ]);
+    } else {
+      [nodeItems, ownershipRows] = await Promise.all([
+        listNodeRows(client, asOf),
+        listOwnershipRows(client, asOf),
+      ]);
+    }
+    const relItems = await queryRels(client);
+    // Employment relationships aren't tracked in the audit-date (changedAt) system —
+    // they only carry business effective dates, so both modes use the same filter here.
     const employs = relItems
       .filter((r) => r.type === "employs")
       .filter((r) => (asOf ? relActiveAt(r, asOf) : true));
@@ -1096,6 +1245,7 @@ app.post("/api/directory", async (req, res) => {
       nodes: nodeItems.map(toNodeResponse),
       rels: [...ownershipRows, ...employs].map(toRelResponse),
       asOf,
+      mode: asOf ? mode : null,
     });
   } catch (err) {
     console.error("/api/directory error", err);

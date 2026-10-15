@@ -1474,8 +1474,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showStats, setShowStats] = useState(false);
   // ── Time Machine: read-only, effective-dated snapshot of Directory/Tabular ──
-  const [timeMachine, setTimeMachine] = useState(null); // null | { active: true, date: "YYYY-MM-DD" }
+  const [timeMachine, setTimeMachine] = useState(null); // null | { active: true, date: "YYYY-MM-DD", mode: "effective" | "recorded" }
   const [timeMachineDraftDate, setTimeMachineDraftDate] = useState("");
+  const [timeMachineDraftMode, setTimeMachineDraftMode] = useState("effective");
   const [timeMachineLoading, setTimeMachineLoading] = useState(false);
   const [timeMachineError, setTimeMachineError] = useState("");
   const liveDirectoryBackupRef = useRef(null); // { nodes, rels } snapshot of live data while time-traveling
@@ -2230,27 +2231,25 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   }, [loadDirectory, token, apiBase]);
 
   // ── Time Machine ────────────────────────────────────────────────────────
-  // Loads a read-only, effective-dated snapshot into nodeList/relList (stashing the
-  // live data first) so Directory/Tabular render it with zero other call-site changes.
-  const enterTimeMachine = useCallback(async (rawDate) => {
+  // Loads a read-only snapshot into nodeList/relList (stashing the live data first) so
+  // Directory/Tabular render it with zero other call-site changes.
+  const enterTimeMachine = useCallback(async (rawDate, rawMode) => {
     const date = normalizeDateInput(rawDate);
     if (!date) {
       setTimeMachineError("Enter a valid date.");
       return;
     }
+    const mode = rawMode === "recorded" ? "recorded" : "effective";
     setTimeMachineLoading(true);
     setTimeMachineError("");
     try {
-      // Flush any outstanding inline edits before swapping in the snapshot, so nothing
-      // pending in the live grid is silently lost underneath it.
-      await flushTableRowSaves();
       const response = await fetch(`${apiBase}/api/directory`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(token ? { "Authorization": `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ asOf: date }),
+        body: JSON.stringify({ asOf: date, mode }),
       });
       if (!response.ok) {
         throw new Error(`API error ${response.status}`);
@@ -2261,7 +2260,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       }
       setNodeList(Array.isArray(data.nodes) ? data.nodes : []);
       setRelList(Array.isArray(data.rels) ? data.rels : []);
-      setTimeMachine({ active: true, date });
+      setTimeMachine({ active: true, date, mode });
       if (viewMode !== "directory" && viewMode !== "tabular") setViewMode("directory");
       setOpenDialog(null);
     } catch (err) {
@@ -2269,7 +2268,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     } finally {
       setTimeMachineLoading(false);
     }
-  }, [apiBase, token, nodeList, relList, viewMode, flushTableRowSaves]);
+  }, [apiBase, token, nodeList, relList, viewMode]);
 
   const exitTimeMachine = useCallback(() => {
     const backup = liveDirectoryBackupRef.current;
@@ -4143,27 +4142,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   }, [nodeList, ownershipTableDrafts, saveOwnershipTableRow, updateOwnershipTableDraft]);
 
   const renderTabularCell = useCallback((column, { row, rowNode, isSaving, isDirty, rowError }) => {
-    // Time Machine: render every cell as plain read-only text — no inputs, no save state.
-    if (timeMachine?.active) {
-      if (column.key === "status" || column.key === "actions") {
-        return <td key={`${row.key}-${column.key}`}></td>;
-      }
-      const field = column.field;
-      let displayValue;
-      if (field?._virtual) {
-        displayValue = getEntityOwnershipSummary(rowNode, nodeList, relList);
-      } else if (field) {
-        const applicable = normalizeAppliesTo(field.appliesTo).includes(rowNode.kind);
-        displayValue = applicable ? tableFieldToString(field, rowNode.customFields?.[field.fieldId]) : "-";
-      } else {
-        displayValue = getNodeTabularValue(rowNode, column, nodeList, relList);
-      }
-      return (
-        <td key={`${row.key}-${column.key}`}>
-          <span className="tabular-cell-ro">{displayValue || ""}</span>
-        </td>
-      );
-    }
     switch (column.key) {
       case "status":
         return (
@@ -4466,7 +4444,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     setOpenDialog,
     setViewMode,
     tableFieldToString,
-    timeMachine,
     updateTableRowDraft,
   ]);
 
@@ -5466,6 +5443,26 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
               </div>
             </div>
 
+            {/* CENTER ZONE: Time Machine indicator */}
+            <div style={{ flex: 1, display: "flex", justifyContent: "center", minWidth: 0 }}>
+              {timeMachine?.active && (
+                <button
+                  type="button"
+                  className="time-machine-header-badge"
+                  onClick={() => {
+                    setTimeMachineDraftDate(timeMachine.date);
+                    setTimeMachineDraftMode(timeMachine.mode || "effective");
+                    setTimeMachineError("");
+                    setOpenDialog({ type: "time-machine" });
+                  }}
+                  title="Click to change date or return to live data"
+                >
+                  <Clock size={15} />
+                  Time Machine — {timeMachine.date} · {timeMachine.mode === "recorded" ? "As Recorded" : "Effective"} (read-only)
+                </button>
+              )}
+            </div>
+
             {/* RIGHT ZONE: View Selector + Date + Settings */}
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
               {/* View Mode Buttons */}
@@ -5550,6 +5547,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       className="settings-menu-item"
                       onClick={() => {
                         setTimeMachineDraftDate(timeMachine?.date || todayIso);
+                        setTimeMachineDraftMode(timeMachine?.mode || "effective");
                         setTimeMachineError("");
                         setOpenDialog({ type: "time-machine" });
                         setSettingsOpen(false);
@@ -6240,13 +6238,15 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           <div className="time-machine-banner">
             <Clock size={15} />
             <span>
-              Time Machine — viewing as of <strong>{timeMachine.date}</strong> (effective-dated). Read-only.
+              Time Machine — viewing as of <strong>{timeMachine.date}</strong> (
+              {timeMachine.mode === "recorded" ? "as recorded" : "effective-dated"}). Read-only.
             </span>
             <button
               type="button"
               className="time-machine-banner-btn"
               onClick={() => {
                 setTimeMachineDraftDate(timeMachine.date);
+                setTimeMachineDraftMode(timeMachine.mode || "effective");
                 setTimeMachineError("");
                 setOpenDialog({ type: "time-machine" });
               }}
@@ -6892,7 +6892,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                                   if (!React.isValidElement(cell)) return cell;
 
                                   let nextCell = cell;
-                                  if (colIdx === 0 && !row.isNew && !timeMachine?.active) {
+                                  // Time Machine: disable the cell's form control (if any) in place —
+                                  // the edit affordances stay visible/tappable, just non-interactive —
+                                  // rather than hiding the cell or replacing it with plain text.
+                                  if (timeMachine?.active && React.isValidElement(nextCell.props.children)) {
+                                    const childType = nextCell.props.children.type;
+                                    if (childType === "input" || childType === "select" || childType === "textarea") {
+                                      nextCell = React.cloneElement(nextCell, {
+                                        children: React.cloneElement(nextCell.props.children, { disabled: true }),
+                                      });
+                                    }
+                                  }
+                                  if (colIdx === 0 && !row.isNew) {
                                     nextCell = React.cloneElement(nextCell, {
                                       className: `${nextCell.props.className || ""} tabular-actions-anchor`.trim(),
                                       children: (
@@ -7252,9 +7263,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
               </DialogHeader>
               <div className="form-grid">
                 <p style={{ fontSize: 13, color: "#64748b", marginTop: 0 }}>
-                  View the Directory and Tabular grids as they looked on a past date, using each
-                  record's effective-dated history. The snapshot is <strong>read-only</strong> — no
-                  edits are possible while time-traveling.
+                  View the Directory and Tabular grids as they looked on a past date. The
+                  snapshot is <strong>read-only</strong> — no edits are possible while
+                  time-traveling.
                 </p>
                 <div className="form-row">
                   <label className="form-label">Date</label>
@@ -7265,6 +7276,46 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     max={todayIso}
                     onChange={(e) => setTimeMachineDraftDate(e.target.value)}
                   />
+                </div>
+                <div>
+                  <label className="form-label">Reconstruction</label>
+                  <div style={{ display: "flex", gap: 10, flexDirection: "column", marginTop: 8 }}>
+                    <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: 14 }}>
+                      <input
+                        type="radio"
+                        name="time-machine-mode"
+                        value="effective"
+                        checked={timeMachineDraftMode === "effective"}
+                        onChange={() => setTimeMachineDraftMode("effective")}
+                        style={{ marginTop: 3 }}
+                      />
+                      <span>
+                        <strong>Data effective as of the selected day</strong>
+                        <div style={{ fontSize: 12, color: "#64748b" }}>
+                          Uses each record's business effective-from/to dates — e.g. an ownership
+                          change backdated to when it actually took effect.
+                        </div>
+                      </span>
+                    </label>
+                    <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: 14 }}>
+                      <input
+                        type="radio"
+                        name="time-machine-mode"
+                        value="recorded"
+                        checked={timeMachineDraftMode === "recorded"}
+                        onChange={() => setTimeMachineDraftMode("recorded")}
+                        style={{ marginTop: 3 }}
+                      />
+                      <span>
+                        <strong>Data as it existed on the selected day</strong>
+                        <div style={{ fontSize: 12, color: "#64748b" }}>
+                          Reconstructs what a live query would literally have shown at the end of
+                          that day, based on when each change was actually made — ignoring
+                          effective dating.
+                        </div>
+                      </span>
+                    </label>
+                  </div>
                 </div>
                 {timeMachineError && (
                   <div style={{ color: "#dc2626", fontSize: 13 }}>{timeMachineError}</div>
@@ -7284,7 +7335,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
                   <Button
                     type="button"
-                    onClick={() => enterTimeMachine(timeMachineDraftDate)}
+                    onClick={async () => {
+                      // Flush any outstanding inline edits before swapping in the snapshot,
+                      // so nothing pending in the live grid is silently lost underneath it.
+                      await flushTableRowSaves();
+                      enterTimeMachine(timeMachineDraftDate, timeMachineDraftMode);
+                    }}
                     disabled={timeMachineLoading || !timeMachineDraftDate}
                   >
                     {timeMachineLoading ? "Loading…" : "View Snapshot"}
@@ -7841,16 +7897,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                           }}>
                             <GitFork size={14} /> Hierarchy
                           </Button>
-                          <Button type="button" variant="outline" onClick={() => setOwnershipDeleteConfirm(true)} title="Permanently delete this ownership group" style={{ color: '#dc2626', borderColor: '#dc2626' }}>
+                          <Button type="button" variant="outline" disabled={!!timeMachine?.active} onClick={() => setOwnershipDeleteConfirm(true)} title="Permanently delete this ownership group" style={{ color: '#dc2626', borderColor: '#dc2626' }}>
                             Delete this group
                           </Button>
-                          <Button type="button" variant="outline" onClick={() => {
+                          <Button type="button" variant="outline" disabled={!!timeMachine?.active} onClick={() => {
                             setOwnerEditorMode("edit-existing");
                             setOwnerEditorEffectiveDate(ownerEditorDateRange.from || "");
                           }}>
                             Update this period
                           </Button>
-                          <Button type="button" variant="default" onClick={() => {
+                          <Button type="button" variant="default" disabled={!!timeMachine?.active} onClick={() => {
                             // Save the original state for restoration on cancel
                             setOwnerEditorOriginal(ownerEditorRows);
                             setOwnerEditorMode("create-new");
@@ -8522,6 +8578,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                 )}
               </DialogHeader>
               <div className="dialog-body">
+                <fieldset
+                  disabled={!!timeMachine?.active}
+                  style={{ border: "none", margin: 0, padding: 0, minWidth: 0 }}
+                >
                 <div className="form-grid">
                   {/* Effective date of this change */}
                   <div className="form-row">
@@ -8644,6 +8704,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     ))
                   }
                 </div>
+                </fieldset>
               </div>
               <DialogFooter
                 style={{
@@ -8698,6 +8759,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   <Button
                     type="button"
                     variant="outline"
+                    disabled={!!timeMachine?.active}
                     onClick={() => {
                       if (!editNodeId) return;
                       const targetId = editNodeId;
@@ -8732,6 +8794,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   </Button>
                   <Button
                     type="button"
+                    disabled={!!timeMachine?.active}
                     onClick={async () => {
                       if (!editNodeId || !nodeDraft.name.trim()) return;
                       const baseline = getNode(nodeList, editNodeId);
@@ -10159,37 +10222,37 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
             >
               <GitFork size={14} /> Hierarchy
             </Button>
-            {!timeMachine?.active && (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={async () => {
+            <Button
+              type="button"
+              variant="outline"
+              onClick={async () => {
+                // Avoid switching to Hierarchy while time-traveling — that view is out of
+                // Time Machine's scope and would silently exit back to live data.
+                if (!timeMachine?.active) {
                   setFocusId(quickViewNode.id);
                   setViewMode("hierarchy");
-                  setQuickViewNodeId("");
-                  if (quickViewNode.kind === "entity") {
-                    await openOwnerEditor(quickViewNode.id);
-                  }
-                }}
-                disabled={quickViewNode.kind !== "entity"}
-                title={quickViewNode.kind === "entity" ? "Edit owners" : "Owners are only available for entities"}
-              >
-                <Users size={14} /> Owners
-              </Button>
-            )}
-            {!timeMachine?.active && (
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  setEditNodeId(quickViewNode.id);
-                  setOpenDialog({ type: "edit-node" });
-                  setQuickViewNodeId("");
-                }}
-              >
-                <Pencil size={14} /> View/Edit
-              </Button>
-            )}
+                }
+                setQuickViewNodeId("");
+                if (quickViewNode.kind === "entity") {
+                  await openOwnerEditor(quickViewNode.id);
+                }
+              }}
+              disabled={quickViewNode.kind !== "entity"}
+              title={quickViewNode.kind === "entity" ? "View owners" : "Owners are only available for entities"}
+            >
+              <Users size={14} /> Owners
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setEditNodeId(quickViewNode.id);
+                setOpenDialog({ type: "edit-node" });
+                setQuickViewNodeId("");
+              }}
+            >
+              <Pencil size={14} /> View/Edit
+            </Button>
           </div>
         </aside>
       )}
