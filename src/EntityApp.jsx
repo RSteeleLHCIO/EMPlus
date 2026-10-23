@@ -1365,11 +1365,32 @@ function matchesTabularFilter(value, filter) {
 
 function ColumnFilterPopover({ filterType, enumOptions, currentFilter, popoverPos, onChange, onClose }) {
   const ref = React.useRef(null);
+  const [placement, setPlacement] = React.useState(null);
   React.useEffect(() => {
     const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
     document.addEventListener("mousedown", handler, true);
     return () => document.removeEventListener("mousedown", handler, true);
   }, [onClose]);
+
+  // Keep the popover inside the viewport: open below the filter button when it fits,
+  // otherwise above it, otherwise pinned to the bottom edge (scrolling internally if needed).
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const margin = 8;
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+    const height = el.offsetHeight;
+    const width = el.offsetWidth;
+    let top = popoverPos.top;
+    if (top + height > vh - margin) {
+      const anchorTop = popoverPos.anchorTop ?? popoverPos.top;
+      const above = anchorTop - 4 - height;
+      top = above >= margin ? above : Math.max(margin, vh - margin - height);
+    }
+    const left = Math.max(margin, Math.min(popoverPos.left, vw - margin - width));
+    setPlacement((prev) => (prev && prev.top === top && prev.left === left ? prev : { top, left }));
+  }, [popoverPos.top, popoverPos.left, popoverPos.anchorTop, filterType, enumOptions?.length]);
 
   const textVal = currentFilter?.type === "text" ? (currentFilter.value || "") : "";
   const enumSel = currentFilter?.type === "enum" ? (currentFilter.selected || []) : [];
@@ -1383,7 +1404,16 @@ function ColumnFilterPopover({ filterType, enumOptions, currentFilter, popoverPo
     <div
       ref={ref}
       className="tabular-filter-popover"
-      style={{ position: "fixed", top: popoverPos.top, left: popoverPos.left, zIndex: 9999 }}
+      style={{
+        position: "fixed",
+        top: placement ? placement.top : popoverPos.top,
+        left: placement ? placement.left : popoverPos.left,
+        maxHeight: "calc(100vh - 16px)",
+        overflowY: "auto",
+        boxSizing: "border-box",
+        visibility: placement ? "visible" : "hidden",
+        zIndex: 9999,
+      }}
       onClick={(e) => e.stopPropagation()}
     >
       <button className="tabular-filter-confirm-btn" title="Done" onClick={onClose}>
@@ -3393,17 +3423,38 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const openTabularViewManager = useCallback(() => {
     const nodeKind = tabularSubMode === "entities" ? "entity" : tabularSubMode === "persons" ? "person" : null;
     setTabularViewNameError("");
-    setTabularViewDraft({
+    const baselineDraft = {
       name: activeTabularView.name || "",
       nodeKind,
       columnOrder: [...(activeTabularView.columnOrder || defaultTabularOrder)],
       sort: tabularSort,
       filters: { ...tabularFilters },
       columnWidths: { ...(activeTabularView.columnWidths || {}) },
-    });
+    };
+    setTabularViewDraft(baselineDraft);
     setTabularDraftFilterKey(null);
+    setTabularViewDiscardPromptOpen(false);
+    tabularViewDraftBaselineRef.current = JSON.stringify(baselineDraft);
     setTabularViewDialogOpen(true);
   }, [activeTabularView, defaultTabularOrder, tabularSort, tabularFilters, tabularSubMode]);
+
+  const tabularViewDraftBaselineRef = useRef("");
+  const [tabularViewDiscardPromptOpen, setTabularViewDiscardPromptOpen] = useState(false);
+  const closeTabularViewDialog = useCallback(() => {
+    setTabularViewDiscardPromptOpen(false);
+    setTabularDraftFilterKey(null);
+    setTabularViewDialogOpen(false);
+  }, []);
+  // Close / Escape / click-outside: warn first if the draft differs from what was opened.
+  const requestCloseTabularViewDialog = useCallback(() => {
+    // A nested prompt (this one, Save As New, Delete) owns Escape while it's open.
+    if (tabularViewDiscardPromptOpen || tabularSaveAsNewOpen || tabularDeleteConfirmOpen) return;
+    if (JSON.stringify(tabularViewDraft) !== tabularViewDraftBaselineRef.current) {
+      setTabularViewDiscardPromptOpen(true);
+      return;
+    }
+    closeTabularViewDialog();
+  }, [closeTabularViewDialog, tabularViewDraft, tabularViewDiscardPromptOpen, tabularSaveAsNewOpen, tabularDeleteConfirmOpen]);
 
   const handleTabularDragDrop = useCallback((dragKey, dropKey) => {
     if (!dragKey || !dropKey || dragKey === dropKey) return;
@@ -3790,7 +3841,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
 
   const toggleTabularFilter = useCallback((key, e) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    setTabularFilterPopoverPos({ top: rect.bottom + 4, left: rect.left });
+    setTabularFilterPopoverPos({ top: rect.bottom + 4, left: rect.left, anchorTop: rect.top });
     setOpenTabularFilterKey((prev) => (prev === key ? null : key));
   }, []);
   const toggleOwnershipTabularFilter = useCallback((key, e) => {
@@ -4777,6 +4828,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   // Cancel, Escape and clicking outside all route through here so unsaved edits are never
   // silently dropped.
   const requestCloseOpenDialog = () => {
+    if (discardEditPromptOpen || confirmDialog) return;
     if (isEditNodeDialogOpen && hasNodeDraftChanges(getNode(nodeList, editNodeId), nodeDraft)) {
       setDiscardEditPromptOpen(true);
       return;
@@ -7058,7 +7110,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                 })()}
 
                 {tabularViewDialogOpen && (
-                  <Dialog open={tabularViewDialogOpen} onOpenChange={setTabularViewDialogOpen}>
+                  <Dialog open={tabularViewDialogOpen} onOpenChange={requestCloseTabularViewDialog}>
                     <DialogContent style={{ width: "min(760px, 92vw)", maxWidth: "none" }}>
                       <DialogHeader>
                         <DialogTitle>
@@ -7192,7 +7244,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         const rect = e.currentTarget.getBoundingClientRect();
-                                        setTabularDraftFilterPopoverPos({ top: rect.bottom + 4, left: rect.left });
+                                        setTabularDraftFilterPopoverPos({ top: rect.bottom + 4, left: rect.left, anchorTop: rect.top });
                                         setTabularDraftFilterKey((prev) => (prev === key ? null : key));
                                       }}
                                     >
@@ -7230,16 +7282,50 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                         );
                       })()}
                       <DialogFooter style={{ justifyContent: "space-between" }}>
-                        <div style={{ display: "flex", gap: 8 }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                           <Button type="button" variant="outline" onClick={updateCurrentTabularView} disabled={selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID}>Save</Button>
+                          {selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID && (
+                            <span style={{ fontSize: 12, color: "#64748b" }}>The Default view can't be changed — use Save As New… to keep your changes.</span>
+                          )}
                           {selectedTabularViewId !== DEFAULT_TABULAR_VIEW_ID && (
                             <Button type="button" variant="outline" onClick={deleteCurrentTabularView}>Delete This View</Button>
                           )}
                         </div>
                         <div style={{ display: "flex", gap: 8 }}>
                           <Button type="button" variant="outline" onClick={saveTabularViewAsNew}>Save As New…</Button>
-                          <Button type="button" variant="secondary" onClick={() => setTabularViewDialogOpen(false)}>Close</Button>
+                          <Button type="button" variant="secondary" onClick={requestCloseTabularViewDialog}>Close</Button>
                         </div>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                )}
+
+                {tabularViewDialogOpen && tabularViewDiscardPromptOpen && (
+                  <Dialog open onOpenChange={() => setTabularViewDiscardPromptOpen(false)}>
+                    <DialogContent style={{ width: "min(440px, 92vw)", maxWidth: "none" }}>
+                      <DialogHeader>
+                        <DialogTitle>Unsaved changes</DialogTitle>
+                      </DialogHeader>
+                      <div style={{ paddingTop: 4 }}>
+                        You have changes to the <strong>{activeTabularView.name}</strong> view that haven't been saved.
+                        {selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID && " The Default view can't be changed, but you can keep these changes as a new view."}
+                      </div>
+                      <DialogFooter style={{ marginTop: 20 }}>
+                        <Button type="button" variant="secondary" onClick={closeTabularViewDialog}>
+                          Continue with cancel (lose changes)
+                        </Button>
+                        {selectedTabularViewId === DEFAULT_TABULAR_VIEW_ID ? (
+                          <Button type="button" variant="outline" onClick={() => { setTabularViewDiscardPromptOpen(false); saveTabularViewAsNew(); }}>
+                            Save As New…
+                          </Button>
+                        ) : (
+                          <Button type="button" variant="outline" onClick={() => { setTabularViewDiscardPromptOpen(false); updateCurrentTabularView(); }}>
+                            Save
+                          </Button>
+                        )}
+                        <Button type="button" autoFocus onClick={() => setTabularViewDiscardPromptOpen(false)}>
+                          Return to editing
+                        </Button>
                       </DialogFooter>
                     </DialogContent>
                   </Dialog>
