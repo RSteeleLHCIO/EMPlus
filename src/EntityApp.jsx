@@ -1347,6 +1347,9 @@ function getOwnershipTabularValue(rel, nodeList, column) {
   }
 }
 
+// Minimum auto width for date columns: fits "MM/DD/YYYY" plus the browser's calendar icon.
+const DATE_INPUT_MIN_WIDTH = 150;
+
 function matchesTabularFilter(value, filter) {
   if (isFilterEmpty(filter)) return true;
   if (filter.type === "text") return String(value ?? "").toLowerCase().includes(filter.value.toLowerCase());
@@ -4005,8 +4008,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       const { filterType } = getColumnFilterConfig(column);
       const extraPad = filterType === "enum" ? SELECT_ARROW : 0;
 
-      // Auto: start with header label width
-      let maxW = 60; // minimum; header is excluded (it wraps)
+      // Auto: start with header label width. Date cells are date inputs whose display
+      // (locale format + calendar icon) is wider than the stored ISO text.
+      let maxW = filterType === "daterange" ? DATE_INPUT_MIN_WIDTH : 60; // header is excluded (it wraps)
 
       // Measure every row's display value — use nodeList directly (not tableRows/tableDrafts)
       // so that column widths are stable and don't shift when cell content changes at runtime.
@@ -4035,7 +4039,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       const { filterType } = getColumnFilterConfig(column);
       const extraPad = filterType === "enum" ? SELECT_ARROW : 0;
 
-      let maxW = 60; // minimum; header is excluded (it wraps)
+      let maxW = filterType === "daterange" ? DATE_INPUT_MIN_WIDTH : 60; // header is excluded (it wraps)
 
       for (const row of ownershipTableRows) {
         const rel = { ...row.rel, ...(ownershipTableDrafts[row.key] || {}) };
