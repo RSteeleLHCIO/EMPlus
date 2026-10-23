@@ -2114,13 +2114,19 @@ app.get("/api/nodes/:id/history", async (req, res) => {
         || String(a.changedAt || "").localeCompare(String(b.changedAt || ""))
       );
 
-    // changedBy is a loginId; resolve it to the linked person's name when possible.
+    // changedBy is a loginId; resolve it to the user's name (or linked person's name).
     const loginIds = [...new Set(rows.map((r) => r.changedBy).filter(Boolean))];
     const nameByLogin = new Map();
     await Promise.all(loginIds.map(async (loginId) => {
       try {
         const user = await getUser(loginId);
-        if (!user || user.clientId !== client || !user.personId) return;
+        if (!user || user.clientId !== client) return;
+        const ownName = String(user.name || "").trim();
+        if (ownName) {
+          nameByLogin.set(loginId, ownName);
+          return;
+        }
+        if (!user.personId) return;
         const person = await getNode(client, normalizeClientId(client, user.personId));
         if (person?.name) nameByLogin.set(loginId, person.name);
       } catch {
@@ -2825,7 +2831,7 @@ app.patch("/api/auth/me", async (req, res) => {
 app.post("/api/auth/users", requireAdmin, async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const { loginId, password, personId, role } = req.body || {};
+    const { loginId, password, personId, role, name } = req.body || {};
     if (!loginId || !password) {
       return res.status(400).json({ error: "loginId and password are required" });
     }
@@ -2842,8 +2848,10 @@ app.post("/api/auth/users", requireAdmin, async (req, res) => {
       passwordHash,
       createdAt: new Date().toISOString(),
     };
+    const trimmedName = String(name || "").trim();
+    if (trimmedName) user.name = trimmedName;
     await putUser(user);
-    res.status(201).json({ loginId: user.loginId, clientId: user.clientId, role: user.role });
+    res.status(201).json({ loginId: user.loginId, clientId: user.clientId, role: user.role, name: user.name || "" });
   } catch (err) {
     console.error("/api/auth/users error", err);
     res.status(err.status || 500).json({ error: err.message });
@@ -2862,21 +2870,29 @@ app.get("/api/auth/users", requireAdmin, async (req, res) => {
   }
 });
 
-// PATCH /api/auth/users/:loginId — change a user's role (admin only).
+// PATCH /api/auth/users/:loginId — change a user's role and/or name (admin only).
 // Only users belonging to req.auth.clientId may be updated.
 app.patch("/api/auth/users/:loginId", requireAdmin, async (req, res) => {
   try {
     const client = req.auth.clientId;
     const targetId = String(req.params.loginId).toLowerCase().trim();
-    const { role } = req.body || {};
-    if (role !== "admin" && role !== "user") {
+    const { role, name } = req.body || {};
+    if (role === undefined && name === undefined) {
+      return res.status(400).json({ error: "role or name is required" });
+    }
+    if (role !== undefined && role !== "admin" && role !== "user") {
       return res.status(400).json({ error: "role must be \"admin\" or \"user\"" });
     }
     const user = await getUser(targetId);
     if (!user) return res.status(404).json({ error: "User not found" });
     if (user.clientId !== client) return res.status(403).json({ error: "User belongs to a different client" });
-    await putUser({ ...user, role });
-    res.json({ loginId: user.loginId, clientId: user.clientId, role });
+    const updated = {
+      ...user,
+      ...(role !== undefined && { role }),
+      ...(name !== undefined && { name: String(name).trim() }),
+    };
+    await putUser(updated);
+    res.json({ loginId: updated.loginId, clientId: updated.clientId, role: updated.role || "user", name: updated.name || "" });
   } catch (err) {
     console.error("/api/auth/users/:loginId PATCH error", err);
     res.status(err.status || 500).json({ error: err.message });
@@ -2993,6 +3009,7 @@ app.post("/api/admin/clone-client", requireAdmin, async (req, res) => {
       personId: null,
       role: "admin",
       passwordHash: srcUser.passwordHash,
+      ...(srcUser.name && { name: srcUser.name }),
       createdAt: now,
     });
 

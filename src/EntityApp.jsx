@@ -1819,9 +1819,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const [manageUsersLoading, setManageUsersLoading] = useState(false);
   const [manageUsersError, setManageUsersError] = useState("");
   const [manageUsersUpdating, setManageUsersUpdating] = useState(() => new Set());
+  const [manageUsersNameEdit, setManageUsersNameEdit] = useState(null);
   const [emulateUserPrompt, setEmulateUserPrompt] = useState(null);
   const [emulateUserBusy, setEmulateUserBusy] = useState(false);
-  const [addUserDraft, setAddUserDraft] = useState({ loginId: "", password: "", confirm: "" });
+  const [addUserDraft, setAddUserDraft] = useState({ name: "", loginId: "", password: "", confirm: "" });
   const [addUserBusy, setAddUserBusy] = useState(false);
   const [addUserError, setAddUserError] = useState("");
   const [addUserSuccess, setAddUserSuccess] = useState("");
@@ -1830,6 +1831,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const [accountInfoBusy, setAccountInfoBusy] = useState(false);
   const [accountInfoError, setAccountInfoError] = useState("");
   const [myLoginId, setMyLoginId] = useState("");
+  const [myName, setMyName] = useState("");
   const [myRole, setMyRole] = useState(() => {
     if (token) return "user";
     try { return localStorage.getItem("myRole") || "user"; } catch { return "user"; }
@@ -4999,6 +5001,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         if (data?.loginId) {
           setMyLoginId(data.loginId);
         }
+        setMyName(String(data?.name || "").trim());
         if (data?.role) {
           setMyRole(data.role);
           try { localStorage.setItem("myRole", data.role); } catch { }
@@ -5724,7 +5727,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                         className="settings-menu-item"
                         onClick={async () => {
                           setSettingsOpen(false);
-                          setAddUserDraft({ loginId: "", password: "", confirm: "" });
+                          setAddUserDraft({ name: "", loginId: "", password: "", confirm: "" });
+                          setManageUsersNameEdit(null);
                           setAddUserError("");
                           setAddUserSuccess("");
                           setManageUsersError("");
@@ -5803,6 +5807,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     <div className="settings-menu-version">
                       <div>Client {formatBuildInfo(CLIENT_BUILD_INFO)}</div>
                       <div>Server {serverBuildInfo ? formatBuildInfo(serverBuildInfo) : "…"}</div>
+                      {myLoginId && (
+                        <div className="settings-menu-identity">
+                          {myName ? `${myName} (${myLoginId})` : myLoginId}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -9719,6 +9728,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       method: "PATCH",
                       body: JSON.stringify(accountInfoDraft),
                     });
+                    setMyName(String(accountInfoDraft.name || "").trim());
                     setAccountInfoOpen(false);
                   } catch (err) {
                     setAccountInfoError(err.message);
@@ -9749,7 +9759,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
               <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 20, fontSize: 14 }}>
                 <thead>
                   <tr style={{ borderBottom: "2px solid #e5e7eb" }}>
-                    <th style={{ textAlign: "left", padding: "4px 8px 6px 0", color: "#374151", fontWeight: 600 }}>Login ID</th>
+                    <th style={{ textAlign: "left", padding: "4px 8px 6px 0", color: "#374151", fontWeight: 600 }}>Name</th>
+                    <th style={{ textAlign: "left", padding: "4px 8px 6px", color: "#374151", fontWeight: 600 }}>Login ID</th>
                     <th style={{ textAlign: "left", padding: "4px 8px 6px", color: "#374151", fontWeight: 600 }}>Role</th>
                     <th style={{ padding: "4px 0 6px" }}></th>
                   </tr>
@@ -9758,9 +9769,63 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   {manageUsersList.map((u) => {
                     const isSelf = u.loginId === myLoginId;
                     const isUpdating = manageUsersUpdating.has(u.loginId);
+                    const isEditingName = manageUsersNameEdit?.loginId === u.loginId;
+                    const saveName = async () => {
+                      const edit = manageUsersNameEdit;
+                      if (!edit || edit.loginId !== u.loginId) return;
+                      const nextName = String(edit.value || "").trim();
+                      setManageUsersNameEdit(null);
+                      if (nextName === String(u.name || "").trim()) return;
+                      setManageUsersUpdating((prev) => new Set([...prev, u.loginId]));
+                      try {
+                        await apiRequest(`/api/auth/users/${encodeURIComponent(u.loginId)}`, {
+                          method: "PATCH",
+                          body: JSON.stringify({ name: nextName }),
+                        });
+                        setManageUsersList((prev) =>
+                          prev.map((x) => x.loginId === u.loginId ? { ...x, name: nextName } : x)
+                        );
+                        if (isSelf) setMyName(nextName);
+                      } catch (err) {
+                        setManageUsersError(err.message);
+                      } finally {
+                        setManageUsersUpdating((prev) => { const s = new Set(prev); s.delete(u.loginId); return s; });
+                      }
+                    };
                     return (
                       <tr key={u.loginId} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                        <td style={{ padding: "7px 8px 7px 0", color: isSelf ? "#6b7280" : "#111827" }}>
+                        <td style={{ padding: "7px 8px 7px 0", color: "#111827" }}>
+                          {isEditingName ? (
+                            <input
+                              className="form-input"
+                              style={{ padding: "3px 6px", fontSize: 14, minWidth: 0, width: "100%" }}
+                              value={manageUsersNameEdit.value}
+                              autoFocus
+                              placeholder="Full name"
+                              onChange={(e) => setManageUsersNameEdit({ loginId: u.loginId, value: e.target.value })}
+                              onBlur={saveName}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") { e.preventDefault(); saveName(); }
+                                if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setManageUsersNameEdit(null); }
+                              }}
+                            />
+                          ) : (
+                            <button
+                              type="button"
+                              title="Click to edit name"
+                              disabled={isUpdating}
+                              onClick={() => setManageUsersNameEdit({ loginId: u.loginId, value: u.name || "" })}
+                              style={{
+                                border: 0, padding: 0, background: "none", font: "inherit", textAlign: "left",
+                                cursor: isUpdating ? "default" : "text",
+                                color: u.name ? "#111827" : "#9ca3af", fontStyle: u.name ? "normal" : "italic",
+                              }}
+                            >
+                              {u.name || "Add name"}
+                            </button>
+                          )}
+                        </td>
+                        <td style={{ padding: "7px 8px", color: isSelf ? "#6b7280" : "#111827" }}>
                           {isSelf || isEmulating ? u.loginId : (
                             <button
                               type="button"
@@ -9825,7 +9890,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                 borderRadius: 6, background: "#fff7ed", color: "#7c2d12",
               }}>
                 <div style={{ fontSize: 13, lineHeight: 1.5 }}>
-                  Start using <strong>{emulateUserPrompt.loginId}</strong>'s account? You will have that account's permissions, and changes you make will be saved to it. Use the banner at the top of the app to return to your admin account.
+                  Start using <strong>{emulateUserPrompt.name ? `${emulateUserPrompt.name} (${emulateUserPrompt.loginId})` : emulateUserPrompt.loginId}</strong>'s account? You will have that account's permissions, and changes you make will be saved to it. Use the banner at the top of the app to return to your admin account.
                 </div>
                 {manageUsersError && (
                   <div style={{ color: "#dc2626", fontSize: 13, marginTop: 8 }}>{manageUsersError}</div>
@@ -9879,12 +9944,24 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   <span style={{ fontSize: 13 }}>{addUserSuccess}</span>
                   <button
                     style={{ marginLeft: 12, fontSize: 12, color: "#6b7280", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
-                    onClick={() => { setAddUserSuccess(""); setAddUserDraft({ loginId: "", password: "", confirm: "" }); }}
+                    onClick={() => { setAddUserSuccess(""); setAddUserDraft({ name: "", loginId: "", password: "", confirm: "" }); }}
                   >Add another</button>
                 </div>
               ) : (
                 <>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                    <div style={{ gridColumn: "1 / -1" }}>
+                      <label className="form-label" style={{ fontSize: 12 }}>Name</label>
+                      <input
+                        className="form-input"
+                        type="text"
+                        value={addUserDraft.name}
+                        onChange={(e) => setAddUserDraft((p) => ({ ...p, name: e.target.value }))}
+                        autoComplete="off"
+                        data-lpignore="true"
+                        placeholder="e.g. Alice Smith"
+                      />
+                    </div>
                     <div style={{ gridColumn: "1 / -1" }}>
                       <label className="form-label" style={{ fontSize: 12 }}>Login ID</label>
                       <input
@@ -9925,7 +10002,8 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     type="button"
                     disabled={addUserBusy}
                     onClick={async () => {
-                      const { loginId, password, confirm } = addUserDraft;
+                      const { name, loginId, password, confirm } = addUserDraft;
+                      if (!name.trim()) { setAddUserError("Name is required."); return; }
                       if (!loginId.trim()) { setAddUserError("Login ID is required."); return; }
                       if (!password) { setAddUserError("Password is required."); return; }
                       if (password !== confirm) { setAddUserError("Passwords do not match."); return; }
@@ -9934,10 +10012,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       try {
                         const data = await apiRequest("/api/auth/users", {
                           method: "POST",
-                          body: JSON.stringify({ loginId: loginId.trim().toLowerCase(), password }),
+                          body: JSON.stringify({ name: name.trim(), loginId: loginId.trim().toLowerCase(), password }),
                         });
-                        setAddUserSuccess(data.loginId);
-                        setManageUsersList((prev) => [...prev, { loginId: data.loginId, role: data.role || "user" }]);
+                        setAddUserSuccess(data.name ? `${data.name} (${data.loginId})` : data.loginId);
+                        setManageUsersList((prev) => [...prev, { loginId: data.loginId, role: data.role || "user", name: data.name || name.trim() }]);
                       } catch (err) {
                         setAddUserError(err.message);
                       } finally {

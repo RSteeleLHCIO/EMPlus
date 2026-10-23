@@ -2065,6 +2065,12 @@ input.tabular-meta-select[type="date"] {
     user-select: text;
 }
 
+.settings-menu-identity {
+    margin-top: 4px;
+    font-size: 12px;
+    color: #475569;
+}
+
 /* ── Time Machine header badge ────────────────────────────────────────────── */
 .time-machine-header-badge {
     display: flex;
