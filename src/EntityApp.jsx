@@ -4765,6 +4765,24 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   }, [editNodeId, nodeList]);
 
   const isEditNodeDialogOpen = openDialog?.type === "edit-node";
+  const [discardEditPromptOpen, setDiscardEditPromptOpen] = useState(false);
+  const closeOpenDialog = () => {
+    setDiscardEditPromptOpen(false);
+    setOpenDialog(null);
+    setPrevDialog(null);
+    setDupMatches([]);
+    setOwnerSearch("");
+    setOwnerSearchOpen(false);
+  };
+  // Cancel, Escape and clicking outside all route through here so unsaved edits are never
+  // silently dropped.
+  const requestCloseOpenDialog = () => {
+    if (isEditNodeDialogOpen && hasNodeDraftChanges(getNode(nodeList, editNodeId), nodeDraft)) {
+      setDiscardEditPromptOpen(true);
+      return;
+    }
+    closeOpenDialog();
+  };
   useEffect(() => {
     setEditNodeVersions(null);
     setEditNodeHistoryOpen(false);
@@ -7335,7 +7353,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           </div>
         )}
 
-        <Dialog open={Boolean(openDialog)} onOpenChange={() => { setOpenDialog(null); setPrevDialog(null); setDupMatches([]); setOwnerSearch(""); setOwnerSearchOpen(false); }}>
+        <Dialog open={Boolean(openDialog)} onOpenChange={requestCloseOpenDialog}>
 
           {openDialog?.type === "time-machine" && (
             <DialogContent style={{ width: "min(480px, 92vw)", maxWidth: "none" }}>
@@ -8799,7 +8817,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   </Button>
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                  <Button variant="secondary" onClick={() => setOpenDialog(null)}>Cancel</Button>
+                  <Button variant="secondary" onClick={requestCloseOpenDialog}>Cancel</Button>
                   <Button
                     type="button"
                     variant="outline"
@@ -9328,6 +9346,25 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
               </DialogFooter>
             </DialogContent>
           )}
+        </Dialog>
+
+        <Dialog open={discardEditPromptOpen && isEditNodeDialogOpen} onOpenChange={() => setDiscardEditPromptOpen(false)}>
+          <DialogContent style={{ width: "min(440px, 92vw)", maxWidth: "none" }}>
+            <DialogHeader>
+              <DialogTitle>Unsaved changes</DialogTitle>
+            </DialogHeader>
+            <div style={{ paddingTop: 4 }}>
+              You have changes to <strong>{nodeDraft.name || "this record"}</strong> that haven't been saved.
+            </div>
+            <DialogFooter style={{ marginTop: 20 }}>
+              <Button type="button" variant="secondary" onClick={closeOpenDialog}>
+                Continue with cancel (lose changes)
+              </Button>
+              <Button type="button" autoFocus onClick={() => setDiscardEditPromptOpen(false)}>
+                Return to editing
+              </Button>
+            </DialogFooter>
+          </DialogContent>
         </Dialog>
 
         <Dialog open={Boolean(confirmDialog)} onOpenChange={() => setConfirmDialog(null)}>
