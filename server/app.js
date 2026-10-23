@@ -2547,6 +2547,40 @@ app.get("/api/proxy-image", async (req, res) => {
 
 // ─── DATA DICTIONARY ──────────────────────────────────────────────────────────
 
+// Whether a stored value is already in the form the given data type expects. Used to gate
+// Data Dictionary type changes: existing values are never rewritten, so a change is only
+// allowed when every current value already fits the new type.
+const isScalar = (v) => ["string", "number", "boolean"].includes(typeof v);
+function isStoredValueValidForType(dataType, value) {
+  if (value === undefined || value === null || value === "") return true;
+  if (dataType === "phone") {
+    if (Array.isArray(value)) return value.every((e) => e && typeof e === "object" && "number" in e);
+    return typeof value === "object";
+  }
+  if (Array.isArray(value)) return value.every((v) => isStoredValueValidForType(dataType, v));
+  if (!isScalar(value)) return false;
+  const s = String(value).trim();
+  if (s === "") return true;
+  switch (dataType) {
+    case "string": case "textarea": case "address": return true;
+    case "number": case "currency": case "percentage": return /^-?\d+(\.\d+)?$/.test(s);
+    case "year": return /^\d{4}$/.test(s);
+    case "date": return /^\d{4}-\d{2}-\d{2}$/.test(s) && normalizeDateInput(s) === s;
+    case "time": return /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(s);
+    case "boolean": return s === "true" || s === "false";
+    case "email": return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+    case "link": return !/\s/.test(s);
+    default: return false; // e.g. "file": stored as uploaded-file metadata, never plain text
+  }
+}
+
+async function findValuesInvalidForType(clientId, fieldId, dataType) {
+  const nodes = await queryNodes(clientId);
+  return nodes
+    .filter((n) => n.customFields && !isStoredValueValidForType(dataType, n.customFields[fieldId]))
+    .map((n) => ({ name: n.name || n.id, value: n.customFields[fieldId] }));
+}
+
 const VALID_DATA_TYPES = new Set([
   "string", "textarea", "number", "currency", "percentage",
   "boolean", "date", "time", "phone", "email", "link", "file", "address", "year",
@@ -2638,6 +2672,20 @@ app.put("/api/data-dictionary/:fieldId", async (req, res) => {
     }
     const existing = await getDDField(client, fieldId);
     if (!existing) return res.status(404).json({ error: "field not found" });
+    if (existing.dataType && existing.dataType !== dataType) {
+      const invalid = await findValuesInvalidForType(client, fieldId, dataType);
+      if (invalid.length > 0) {
+        const examples = invalid.slice(0, 10)
+          .map((x) => `• ${x.name}: ${JSON.stringify(x.value)}`).join("\n");
+        return res.status(409).json({
+          error:
+            `Can't change type from ${existing.dataType} to ${dataType}: ` +
+            `${invalid.length} existing value(s) aren't valid ${dataType} values. ` +
+            `Correct or clear them first.\n${examples}` +
+            (invalid.length > 10 ? `\n…and ${invalid.length - 10} more` : ""),
+        });
+      }
+    }
     const item = {
       ...existing,
       prompt: prompt.trim(),

@@ -42,9 +42,13 @@ const slugify = (value) =>
     .replace(/(^-|-$)/g, "") || "report";
 
 const formatFieldValue = (field, value) => {
+  if (field.dataType === "boolean") {
+    if (value === true || value === "true") return "Yes";
+    if (value === false || value === "false") return "No";
+    return "";
+  }
   if (value == null || value === "" || value === false) return "";
   const { dataType } = field;
-  if (dataType === "boolean") return value ? "Yes" : "No";
   if (dataType === "date") {
     try {
       return new Date(String(value) + "T00:00:00").toLocaleDateString(undefined, {

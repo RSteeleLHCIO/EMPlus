@@ -56,10 +56,14 @@ const formatDate = (iso) => {
 };
 
 const formatFieldValue = (field, value) => {
+  if (field.dataType === "boolean") {
+    if (value === true || value === "true") return "Yes";
+    if (value === false || value === "false") return "No";
+    return "";
+  }
   if (value == null || value === "" || value === false) return "";
   const { dataType } = field;
   if (dataType === "virtual") return String(value || "");
-  if (dataType === "boolean") return value ? "Yes" : "No";
   if (dataType === "date") return formatDate(String(value));
   if (dataType === "currency") {
     const num = Number(value);

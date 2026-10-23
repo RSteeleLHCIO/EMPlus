@@ -422,18 +422,21 @@ const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList,
   }
 
   if (dataType === "boolean") {
+    // Three states: Yes / No / undeclared ("-"). Blank is not the same as an explicit No.
+    const selected = value === true || value === "true" ? "true" : value === false || value === "false" ? "false" : "";
     return (
       <div className="form-row">
         <label className="form-label">{prompt}</label>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <Switch
-            checked={value === "true" || value === true}
-            onCheckedChange={(v) => onChange(v ? "true" : "false")}
-          />
-          <span style={{ fontSize: 14, color: (value === "true" || value === true) ? "#374151" : "#6b7280" }}>
-            {(value === "true" || value === true) ? "Yes" : "No"}
-          </span>
-        </div>
+        <select
+          className="form-select"
+          style={{ width: 120 }}
+          value={selected}
+          onChange={(e) => onChange(e.target.value === "" ? "" : e.target.value === "true")}
+        >
+          <option value="">-</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
       </div>
     );
   }
@@ -512,7 +515,7 @@ const renderDdField = (field, value, onChange, { apiBase, token, node, nodeList,
       <input
         className="form-input"
         type={dataTypeToHtmlInput(dataType)}
-        value={value || ""}
+        value={dataType === "date" ? (normalizeDateInput(value) || "") : (value || "")}
         onChange={(e) => onChange(e.target.value)}
         autoComplete="off"
         data-lpignore="true"
@@ -1262,7 +1265,7 @@ function isFilterEmpty(filter) {
 function formatFilterSummary(filter) {
   if (!filter) return "";
   if (filter.type === "text") return `"${filter.value}"`;
-  if (filter.type === "enum") return (filter.selected || []).join(", ");
+  if (filter.type === "enum") return (filter.selected || []).map((s) => (s === "" ? "Undeclared" : s)).join(", ");
   if (filter.type === "range") {
     const parts = [];
     if (filter.min !== "" && filter.min != null) parts.push(`\u2265 ${filter.min}`);
@@ -1286,7 +1289,7 @@ function getColumnFilterConfig(column) {
   if (key === "personStatus") return { filterType: "enum", enumOptions: ["Active", "Inactive", "Deceased", "Former"].map((v) => ({ value: v, label: v })) };
   if (key === "percent") return { filterType: "range" };
   if (key === "startDate" || key === "endDate") return { filterType: "daterange" };
-  if (column.field?.dataType === "boolean") return { filterType: "enum", enumOptions: [{ value: "true", label: "Yes" }, { value: "false", label: "No" }] };
+  if (column.field?.dataType === "boolean") return { filterType: "enum", enumOptions: [{ value: "true", label: "Yes" }, { value: "false", label: "No" }, { value: "", label: "Undeclared" }] };
   if (column.field?.dataType === "date") return { filterType: "daterange" };
   if (["number", "currency", "percentage"].includes(column.field?.dataType)) return { filterType: "range" };
   if ((column.field?.validValues || []).length > 0) return { filterType: "enum", enumOptions: column.field.validValues.map((v) => ({ value: v, label: v })) };
@@ -1355,7 +1358,10 @@ function matchesTabularFilter(value, filter) {
     return true;
   }
   if (filter.type === "daterange") {
-    const v = String(value ?? "");
+    // Blank or unparseable dates never match an active date filter. Stored values may be in
+    // legacy formats (e.g. MM/DD/YYYY), so compare normalized ISO dates.
+    const v = normalizeDateInput(value);
+    if (!v) return false;
     if (filter.from && v < filter.from) return false;
     if (filter.to && v > filter.to) return false;
     return true;
@@ -1895,6 +1901,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const [ddEntryDraft, setDdEntryDraft] = useState(emptyDdDraft);
   const [ddEntryId, setDdEntryId] = useState(null);
   const [isSavingDdEntry, setIsSavingDdEntry] = useState(false);
+  const [ddEntryError, setDdEntryError] = useState("");
 
   const focusNode = useMemo(() => getNode(nodeList, focusId), [nodeList, focusId]);
   const quickFindMatches = useMemo(() => {
@@ -2740,11 +2747,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const openNewDdEntry = () => {
     setDdEntryId(null);
     setDdEntryDraft(emptyDdDraft);
+    setDdEntryError("");
     setOpenDialog({ type: "data-dictionary-entry" });
   };
 
   const openDdEntry = (entry) => {
     setDdEntryId(entry.id);
+    setDdEntryError("");
     setDdEntryDraft({
       prompt: entry.prompt,
       dataType: entry.dataType,
@@ -2760,6 +2769,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const saveDdEntry = async () => {
     if (!ddEntryDraft.prompt.trim()) return;
     setIsSavingDdEntry(true);
+    setDdEntryError("");
     const validValues = ddEntryDraft.validValuesText
       .split("\n")
       .map((v) => v.trim())
@@ -2793,8 +2803,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       }
       setOpenDialog({ type: "data-dictionary" });
     } catch (err) {
-      setRemoteStatus("error");
-      setRemoteError(err.message);
+      let message = err.message;
+      try { message = JSON.parse(message).error || message; } catch { /* not JSON */ }
+      setDdEntryError(message);
     } finally {
       setIsSavingDdEntry(false);
     }
@@ -3880,7 +3891,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           if (bBlank) return -1;
           const cmp = filterType === "range"
             ? (Number(av) || 0) - (Number(bv) || 0)
-            : String(av ?? "").localeCompare(String(bv ?? ""), undefined, { sensitivity: "base" });
+            : filterType === "daterange"
+              ? (normalizeDateInput(av) || String(av)).localeCompare(normalizeDateInput(bv) || String(bv))
+              : String(av ?? "").localeCompare(String(bv ?? ""), undefined, { sensitivity: "base" });
           return tabularSort.dir === "asc" ? cmp : -cmp;
         });
       }
@@ -3917,7 +3930,9 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           if (bBlank) return -1;
           const cmp = filterType === "range"
             ? (Number(av) || 0) - (Number(bv) || 0)
-            : String(av ?? "").localeCompare(String(bv ?? ""), undefined, { sensitivity: "base" });
+            : filterType === "daterange"
+              ? (normalizeDateInput(av) || String(av)).localeCompare(normalizeDateInput(bv) || String(bv))
+              : String(av ?? "").localeCompare(String(bv ?? ""), undefined, { sensitivity: "base" });
           return ownershipTabularSort.dir === "asc" ? cmp : -cmp;
         });
       }
@@ -7711,6 +7726,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   </div>
                 )}
               </div>
+              {ddEntryError && (
+                <div role="alert" style={{ marginTop: 12, padding: "8px 10px", border: "1px solid #fca5a5", background: "#fef2f2", color: "#991b1b", borderRadius: 6, fontSize: 13, whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>
+                  {ddEntryError}
+                </div>
+              )}
               <DialogFooter style={{ marginTop: 16 }}>
                 <Button variant="secondary" onClick={() => setOpenDialog({ type: "data-dictionary" })}>Cancel</Button>
                 <Button type="button" disabled={isSavingDdEntry || !ddEntryDraft.prompt.trim()} onClick={saveDdEntry}>
