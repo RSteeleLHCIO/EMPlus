@@ -136,6 +136,49 @@ export async function queryNodeHistory(clientId) {
   });
 }
 
+// Every history key starts with `NODE#<nodeId>#AT#` (see makeNodeHistoryKey in app.js);
+// the trailing "#AT#" keeps "entity:a" from also matching "entity:a-2".
+const nodeHistoryPrefix = (nodeId) => `NODE#${nodeId}#AT#`;
+
+// All history rows for a single node, without reading the rest of the client's history.
+export async function queryNodeHistoryForNode(clientId, nodeId) {
+  return paginatedQuery({
+    TableName: NODE_HISTORY_TABLE,
+    KeyConditionExpression: "clientId = :c AND begins_with(nodeHistoryKey, :p)",
+    ExpressionAttributeValues: { ":c": clientId, ":p": nodeHistoryPrefix(nodeId) },
+  });
+}
+
+export async function nodeHasHistory(clientId, nodeId) {
+  const result = await ddb.send(
+    new QueryCommand({
+      TableName: NODE_HISTORY_TABLE,
+      KeyConditionExpression: "clientId = :c AND begins_with(nodeHistoryKey, :p)",
+      ExpressionAttributeValues: { ":c": clientId, ":p": nodeHistoryPrefix(nodeId) },
+      Limit: 1,
+    })
+  );
+  return (result.Items || []).length > 0;
+}
+
+// Streams a client's full history one DynamoDB page (<= 1 MB) at a time, so callers can
+// reduce it as they go instead of holding every row in memory at once.
+export async function forEachNodeHistoryPage(clientId, onPage) {
+  let lastKey;
+  do {
+    const result = await ddb.send(
+      new QueryCommand({
+        TableName: NODE_HISTORY_TABLE,
+        KeyConditionExpression: "clientId = :c",
+        ExpressionAttributeValues: { ":c": clientId },
+        ExclusiveStartKey: lastKey,
+      })
+    );
+    await onPage(result.Items || []);
+    lastKey = result.LastEvaluatedKey;
+  } while (lastKey);
+}
+
 export async function batchPutNodeHistory(items) {
   const MAX_RETRIES = 3;
   

@@ -67,7 +67,7 @@ function Root() {
   return (
     <>
       {emulation && (
-        <div style={{
+        <div className="emulation-banner" style={{
           display: "flex", alignItems: "center", justifyContent: "center", gap: 12,
           padding: "8px 16px", background: "#fff7ed", borderBottom: "1px solid #fdba74",
           color: "#9a3412", fontSize: 13, fontWeight: 600,

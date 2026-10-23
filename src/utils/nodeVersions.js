@@ -69,7 +69,7 @@ const emailsValue = (v) => (Array.isArray(v) ? v.join(", ") : (v || ""));
 
 export const NODE_VERSION_FIELDS = [
   "name", "kind", "photo", "logo", "address", "workPhone", "cellPhone",
-  "emails", "taxId", "operationalRole", "legalStatus", "personStatus",
+  "emails", "taxId", "operationalRole", "legalStatus", "personStatus", "notes",
 ];
 
 // Map of changed keys → previous value. Built-in fields use their own key;

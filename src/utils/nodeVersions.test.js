@@ -52,6 +52,13 @@ test("getChangedVersionFields reports changed built-in and custom fields", () =>
   assert.equal(changed.get("cf:f1"), "x");
 });
 
+test("getChangedVersionFields tracks notes and treats a missing attribute as blank", () => {
+  assert.equal(getChangedVersionFields({ name: "A" }, { name: "A", notes: "" }).size, 0);
+  const changed = getChangedVersionFields({ name: "A" }, { name: "A", notes: "Call Dr. K" });
+  assert.deepEqual([...changed.keys()], ["notes"]);
+  assert.equal(changed.get("notes"), undefined);
+});
+
 test("describeSaveRange mirrors server version placement", () => {
   const correction = describeSaveRange(versions, "2025-06-01");
   assert.equal(correction.replaces, versions[1]);

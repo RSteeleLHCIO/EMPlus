@@ -589,8 +589,17 @@ input[type="text"] {
     flex-direction: column;
     gap: 12px;
     min-width: 0;
-    height: calc(100vh - var(--app-header-height, 120px));
+    height: calc(100vh - var(--app-header-height, 120px) - 24px);
+    /* clip (unlike hidden) can't be scrolled programmatically — e.g. by the browser
+       revealing a focused cell — which would push the toolbar out of view. */
     overflow: hidden;
+    overflow: clip;
+}
+
+/* The sub-mode tabs, stats strip and toolbar keep their natural height; only the
+   table card flexes to fill the remaining space. */
+.tabular-grid > :not(.tabular-card) {
+    flex-shrink: 0;
 }
 
 .tabular-toolbar {
@@ -641,9 +650,9 @@ input[type="text"] {
 }
 
 .tabular-card {
-    min-height: 220px;
+    min-height: 0;
     min-width: 0;
-    height: 100%;
+    flex: 1 1 0;
     display: flex;
     flex-direction: column;
 }
@@ -1013,6 +1022,18 @@ input[type="text"] {
 .tabular-edit-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+/* Rows with notes: the pencil is highlighted and its tooltip shows the notes. */
+.tabular-edit-btn--has-notes {
+    color: #b45309;
+    background-color: #fef3c7;
+    box-shadow: inset 0 0 0 1px #fcd34d;
+}
+
+.tabular-edit-btn--has-notes:hover:not(:disabled) {
+    color: #92400e;
+    background-color: #fde68a;
 }
 
 .tabular-status {
@@ -1950,9 +1971,17 @@ input.tabular-meta-select[type="date"] {
 }
 
 /* ── App header (fixed) ── */
-.app-header {
+.emulation-banner {
     position: fixed;
     top: 0;
+    left: 0;
+    right: 0;
+    z-index: 101;
+}
+
+.app-header {
+    position: fixed;
+    top: var(--emulation-banner-height, 0px);
     left: 0;
     right: 0;
     z-index: 100;
@@ -2025,6 +2054,15 @@ input.tabular-meta-select[type="date"] {
     height: 1px;
     background: var(--border, #e2e8f0);
     margin: 4px 0;
+}
+
+.settings-menu-version {
+    padding: 4px 12px 6px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: #94a3b8;
+    white-space: nowrap;
+    user-select: text;
 }
 
 /* ── Time Machine header badge ────────────────────────────────────────────── */

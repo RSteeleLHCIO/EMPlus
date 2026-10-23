@@ -8,6 +8,7 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { randomBytes } from "crypto";
 import { normalizeDateInput } from "./dateUtils.js";
+import { getServerBuildInfo } from "./buildInfo.js";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   getNode,
@@ -16,7 +17,9 @@ import {
   queryNodes,
   putNodeHistory,
   deleteNodeHistory,
-  queryNodeHistory,
+  queryNodeHistoryForNode,
+  nodeHasHistory,
+  forEachNodeHistoryPage,
   getRel,
   putRel,
   deleteRel,
@@ -132,6 +135,7 @@ const FIELD_SYNONYMS = {
   legalStatus:     ["legal status", "legalstatus", "entity structure", "structure", "corp type", "company type", "incorporation type"],
   operationalRole: ["operational role", "operationalrole", "role", "function", "operational function", "business role"],
   personStatus:    ["person status", "personstatus", "status", "employment status"],
+  notes:           ["notes", "note", "comments", "comment", "memo", "remarks"],
 };
 
 // Strips punctuation, lowercases, and collapses whitespace in a header string.
@@ -382,7 +386,7 @@ const xlsxBufferToCsv = (buffer) => {
 const buildNodeItem = (
   { id, name, kind, client, address, workPhone, cellPhone, emails, photo,
     taxId, accountingUrl, hrUrl, logo, customFields,
-    operationalRole, legalStatus, personStatus,
+    operationalRole, legalStatus, personStatus, notes,
     createdAt, updatedAt }
 ) => ({
   clientId: client,
@@ -403,6 +407,7 @@ const buildNodeItem = (
   operationalRole: operationalRole || "",
   legalStatus: legalStatus || "",
   personStatus: personStatus || "",
+  notes: notes || "",
   customFields: customFields || {},
   createdAt,
   updatedAt,
@@ -421,28 +426,30 @@ const listNodeRows = async (clientId, asOf = null) => {
   const targetAsOf = asOf || null;
   if (targetAsOf) {
     try {
-      const [historyRows, currentRows] = await Promise.all([
-        queryNodeHistory(clientId),
-        queryNodes(clientId),
-      ]);
-      const activeRows = historyRows
-        .filter((row) => !row.deleted && isNodeActiveAt(row, targetAsOf))
-        .sort((a, b) => {
-          const as = a.effectiveFrom || "0001-01-01";
-          const bs = b.effectiveFrom || "0001-01-01";
-          return bs.localeCompare(as);
-        });
-
+      // History is reduced page by page, keeping only the winning row per node, so memory
+      // scales with the number of nodes rather than with total accumulated history.
+      // Winner: the active, non-deleted row with the latest effectiveFrom (first seen wins ties).
       const byNodeId = new Map();
-      activeRows.forEach((row) => {
-        if (!row.nodeId) return;
-        if (!byNodeId.has(row.nodeId)) byNodeId.set(row.nodeId, row);
-      });
+      const historyNodeIds = new Set();
+      const [currentRows] = await Promise.all([
+        queryNodes(clientId),
+        forEachNodeHistoryPage(clientId, (page) => {
+          page.forEach((row) => {
+            if (!row.nodeId) return;
+            historyNodeIds.add(row.nodeId);
+            if (row.deleted || !isNodeActiveAt(row, targetAsOf)) return;
+            const existing = byNodeId.get(row.nodeId);
+            const start = row.effectiveFrom || "0001-01-01";
+            if (!existing || start > (existing.effectiveFrom || "0001-01-01")) {
+              byNodeId.set(row.nodeId, row);
+            }
+          });
+        }),
+      ]);
 
       // Nodes with zero history rows predate version tracking (e.g. legacy/imported
       // data that never went through persistNodeVersion). With no record of them ever
       // being different, assume they've always existed and include their current data.
-      const historyNodeIds = new Set(historyRows.map((row) => row.nodeId));
       currentRows.forEach((node) => {
         const id = node.id || node.nodeId;
         if (id && !historyNodeIds.has(id) && !byNodeId.has(id)) {
@@ -464,19 +471,20 @@ const listNodeRows = async (clientId, asOf = null) => {
 // before the cutoff — but only among versions that were ever the live "current" record
 // (wasCurrent !== false; legacy rows predating this field default to eligible).
 const listNodeRowsRecorded = async (clientId, cutoffIso) => {
-  const [historyRows, currentRows] = await Promise.all([
-    queryNodeHistory(clientId),
-    queryNodes(clientId),
-  ]);
-  const eligible = historyRows.filter(
-    (row) => row.wasCurrent !== false && row.changedAt && row.changedAt <= cutoffIso
-  );
   const latestByNodeId = new Map();
-  eligible.forEach((row) => {
-    if (!row.nodeId) return;
-    const existing = latestByNodeId.get(row.nodeId);
-    if (!existing || row.changedAt > existing.changedAt) latestByNodeId.set(row.nodeId, row);
-  });
+  const historyNodeIds = new Set();
+  const [currentRows] = await Promise.all([
+    queryNodes(clientId),
+    forEachNodeHistoryPage(clientId, (page) => {
+      page.forEach((row) => {
+        if (!row.nodeId) return;
+        historyNodeIds.add(row.nodeId);
+        if (row.wasCurrent === false || !row.changedAt || row.changedAt > cutoffIso) return;
+        const existing = latestByNodeId.get(row.nodeId);
+        if (!existing || row.changedAt > existing.changedAt) latestByNodeId.set(row.nodeId, row);
+      });
+    }),
+  ]);
 
   const results = [];
   latestByNodeId.forEach((row) => {
@@ -484,7 +492,6 @@ const listNodeRowsRecorded = async (clientId, cutoffIso) => {
   });
 
   // Nodes with zero history rows at all predate version tracking — assume always existed.
-  const historyNodeIds = new Set(historyRows.map((row) => row.nodeId));
   currentRows.forEach((node) => {
     const id = node.id || node.nodeId;
     if (id && !historyNodeIds.has(id)) results.push(node);
@@ -492,27 +499,62 @@ const listNodeRowsRecorded = async (clientId, cutoffIso) => {
   return results;
 };
 
-const persistNodeVersion = async ({ clientId, nodeItem, asOfDate, changedBy, mode = "upsert" }) => {
+// `replaceSameStart` controls what happens when a save's effective date collides with an
+// existing history row for the same node:
+//  - true (default): replace it — this is the original "correct a backdated entry" behavior,
+//    still used where a caller may intentionally pick an explicit effective date (e.g. CSV
+//    node imports/corrections).
+//  - false: keep it — used for plain entity field edits, where every save is now recorded as
+//    effective from the entity's creation date by policy, so collisions are the norm rather
+//    than a correction. Keeping prior rows (and letting the "close any still-open row" step
+//    below mark them superseded) preserves the full per-edit audit trail (who/what/when) in
+//    EMPlusNodeHistory / GET /api/nodes/:id/history, instead of erasing it on every save.
+//
+// `useOriginDate`: when true, ignore `asOfDate` entirely and anchor this save to the node's
+// own earliest recorded effectiveFrom (falling back to nodeItem.createdAt if it has no
+// history yet) — i.e. the date the entity actually came into existence from a business
+// standpoint. This matters because `createdAt` is just the literal system timestamp of the
+// DB write; an entity imported via CSV with a backdated "effective as of" (e.g. 12/31/2025)
+// has a *business* origin date earlier than that. Anchoring to the true origin, rather than
+// a date a caller supplies, means `nextStartAfterIncoming` below can never find a legitimate
+// "later" row to mistake for a pending future version IF — and only if — every other row for
+// this node already shares that same origin date. Pre-existing nodes whose history still has
+// genuinely varying dates (any node edited before this policy existed, since the old UI
+// defaulted an edit's date to "today") need the one-time server/scripts/normalizeNodeEffectiveDates.js
+// migration to flatten their history onto this same anchor; this flag alone does not retroactively
+// fix already-divergent historical dates.
+const persistNodeVersion = async ({ clientId, nodeItem, asOfDate, changedBy, mode = "upsert", replaceSameStart = true, useOriginDate = false }) => {
   if (!nodeItem?.nodeId) {
     throw Object.assign(new Error("nodeItem.nodeId is required"), { status: 400 });
   }
   const now = new Date().toISOString();
-  const effectiveFrom = normalizeDateInput(asOfDate) || now.slice(0, 10);
-  const versionId = `${effectiveFrom}-${randomBytes(8).toString("hex")}`;
   const nodeId = nodeItem.nodeId;
 
-  const allHistory = await queryNodeHistory(clientId);
-  const nodeHistoryAll = allHistory.filter((row) => row.nodeId === nodeId);
-  const sameStartRows = nodeHistoryAll.filter(
-    (row) => normalizeDateInput(row.effectiveFrom) === effectiveFrom
-  );
+  const nodeHistoryAll = (await queryNodeHistoryForNode(clientId, nodeId))
+    .filter((row) => row.nodeId === nodeId);
+
+  const effectiveFrom = useOriginDate
+    ? (
+        nodeHistoryAll
+          .map((row) => normalizeDateInput(row.effectiveFrom))
+          .filter(Boolean)
+          .sort((a, b) => a.localeCompare(b))[0]
+        || normalizeDateInput(nodeItem.createdAt)
+        || now.slice(0, 10)
+      )
+    : (normalizeDateInput(asOfDate) || now.slice(0, 10));
+  const versionId = `${effectiveFrom}-${randomBytes(8).toString("hex")}`;
+
+  const sameStartRows = replaceSameStart
+    ? nodeHistoryAll.filter((row) => normalizeDateInput(row.effectiveFrom) === effectiveFrom)
+    : [];
   await Promise.all(
     sameStartRows.map((row) => deleteNodeHistory(clientId, row.nodeHistoryKey))
   );
 
-  const nodeHistory = nodeHistoryAll.filter(
-    (row) => normalizeDateInput(row.effectiveFrom) !== effectiveFrom
-  );
+  const nodeHistory = replaceSameStart
+    ? nodeHistoryAll.filter((row) => normalizeDateInput(row.effectiveFrom) !== effectiveFrom)
+    : nodeHistoryAll;
 
   const nextStartAfterIncoming = nodeHistory
     .map((row) => normalizeDateInput(row.effectiveFrom))
@@ -1072,6 +1114,10 @@ app.use("/api", (req, res, next) => {
   }
 });
 
+app.get("/api/version", (_req, res) => {
+  res.json(getServerBuildInfo());
+});
+
 // ─── Admin middleware ────────────────────────────────────────────────────────
 // Use as a route-level middleware: app.get("/api/foo", requireAdmin, handler)
 const requireAdmin = async (req, res, next) => {
@@ -1259,8 +1305,7 @@ app.post("/api/nodes", async (req, res) => {
     const {
       id, name, kind, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo, customFields,
-      operationalRole, legalStatus, personStatus,
-      asOfDate,
+      operationalRole, legalStatus, personStatus, notes,
     } = req.body || {};
     if (!name || !kind) {
       return res.status(400).json({ error: "name and kind are required" });
@@ -1268,24 +1313,29 @@ app.post("/api/nodes", async (req, res) => {
     // IDs are permanent and never reused: if the requested/derived ID belongs to an existing
     // node or to any history (including deleted nodes), allocate a suffixed one instead.
     const baseId = normalizeClientId(client, id || `${kind}:${slugify(name) || "node"}`);
-    const historyRows = await queryNodeHistory(client);
-    const usedIds = new Set(historyRows.map((row) => row.nodeId));
     let normalizedId = baseId;
-    for (let n = 2; usedIds.has(normalizedId) || await getNode(client, normalizedId); n += 1) {
+    for (
+      let n = 2;
+      (await nodeHasHistory(client, normalizedId)) || (await getNode(client, normalizedId));
+      n += 1
+    ) {
       normalizedId = `${baseId}-${n}`;
     }
     const now = new Date().toISOString();
     const item = buildNodeItem({
       id: normalizedId, name, kind, client, address, workPhone, cellPhone,
       emails, photo, taxId, accountingUrl, hrUrl, logo, customFields,
-      operationalRole, legalStatus, personStatus,
+      operationalRole, legalStatus, personStatus, notes,
       createdAt: now,
       updatedAt: now,
     });
+    // A new entity is, by definition, effective from the moment it's created — not a
+    // client-supplied date — so asOfDate is computed here rather than trusted from the
+    // request.
     await persistNodeVersion({
       clientId: client,
       nodeItem: item,
-      asOfDate,
+      asOfDate: now.slice(0, 10),
       changedBy: req.auth.loginId,
       mode: "upsert",
     });
@@ -1301,10 +1351,10 @@ app.post("/api/nodes", async (req, res) => {
 const importNodeRows = async (rows, client, asOfDate) => {
   const now = new Date().toISOString();
   const importBatchId = now;
-  const effectiveAsOf = normalizeDateInput(asOfDate);
-  if (!effectiveAsOf) {
-    throw Object.assign(new Error("asOfDate (YYYY-MM-DD) is required for node imports"), { status: 400 });
-  }
+  // Imported entities are new records, effective from the moment they're created. An
+  // explicit asOfDate is still honored if a caller supplies one (e.g. a historical
+  // backfill), but it's no longer required — entities no longer have a UI for picking it.
+  const effectiveAsOf = normalizeDateInput(asOfDate) || now.slice(0, 10);
   const items = rows.map((row) =>
     buildNodeItem({
       id: row.id, name: row.name, kind: row.kind, client,
@@ -1672,6 +1722,9 @@ const resolveExtraHeaders = async (extraHeaders, client, existingFields = null) 
   return headerToFieldId;
 };
 
+// `asOfDate` is accepted for backward compatibility but intentionally unused: details
+// imports update existing entities, so each row's effective date is always that entity's
+// own creation date (computed per-row below), never a caller-supplied batch date.
 const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preloadedDdFields = null, asOfDate = null, changedBy = null) => {
   const [allNodes, ddFields] = await Promise.all([
     queryNodes(client),
@@ -1713,10 +1766,10 @@ const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preload
   const nameMap = new Map(allNodes.map((n) => [String(n.name || "").toLowerCase(), n]));
 
   const now = new Date().toISOString();
-  const effectiveAsOf = normalizeDateInput(asOfDate);
-  if (!effectiveAsOf) {
-    throw Object.assign(new Error("asOfDate (YYYY-MM-DD) is required for details imports"), { status: 400 });
-  }
+  // Entities no longer support a per-edit effective date: each row is recorded as
+  // effective from that specific entity's own origin date (`useOriginDate` in
+  // persistNodeVersion, computed per-row from its existing history), not a single
+  // shared date for the whole import batch.
   const importBatchId = now;
   const updated = [];
   const notFoundList = [];
@@ -1768,9 +1821,10 @@ const applyDetailRows = async (rows, extraHeaders, client, guessed = {}, preload
     await persistNodeVersion({
       clientId: client,
       nodeItem: item,
-      asOfDate: effectiveAsOf,
       changedBy: changedBy || "import",
       mode: "upsert",
+      replaceSameStart: false,
+      useOriginDate: true,
     });
   }
   const ddCreated = Object.entries(headerToFieldId);
@@ -1834,8 +1888,7 @@ app.put("/api/nodes/:id", async (req, res) => {
     const {
       name, kind, address, workPhone, cellPhone, emails,
       photo, taxId, accountingUrl, hrUrl, logo, customFields,
-      operationalRole, legalStatus, personStatus,
-      asOfDate,
+      operationalRole, legalStatus, personStatus, notes,
     } = req.body || {};
     if (!id || !name || !kind) {
       return res.status(400).json({ error: "id, name, kind are required" });
@@ -1851,15 +1904,26 @@ app.put("/api/nodes/:id", async (req, res) => {
       id: normalizedId, name, kind, client, address, workPhone, cellPhone,
       emails, photo, taxId, accountingUrl, hrUrl, logo, customFields,
       operationalRole, legalStatus, personStatus,
+      // Notes aren't shown in every editing surface, so a request that omits them (e.g. a
+      // client built before Notes existed) keeps the stored value instead of wiping it.
+      notes: notes !== undefined ? notes : existing.notes,
       createdAt: existing.createdAt || now,
       updatedAt: now,
     });
+    // Entities no longer support a per-edit effective date — every field change is
+    // recorded as effective from the entity's own origin date (its earliest recorded
+    // effective date, which may predate `createdAt` for backdated imports — see
+    // `useOriginDate` above), computed here rather than trusted from the request.
+    // `replaceSameStart: false` keeps every prior edit's history row intact (instead of
+    // overwriting it) so the full audit trail survives repeated edits that all share
+    // this same effective date.
     await persistNodeVersion({
       clientId: client,
       nodeItem: item,
-      asOfDate,
       changedBy: req.auth.loginId,
       mode: "upsert",
+      replaceSameStart: false,
+      useOriginDate: true,
     });
 
     res.json(toNodeResponse(item));
@@ -1995,15 +2059,29 @@ app.delete("/api/relationships/owns", async (req, res) => {
 app.get("/api/node-names", async (req, res) => {
   try {
     const client = req.auth.clientId;
-    const [currentNodes, historyRows] = await Promise.all([
-      queryNodes(client),
-      queryNodeHistory(client),
-    ]);
     const byId = new Map();
     const ensure = (id) => {
       if (!byId.has(id)) byId.set(id, { id, kind: null, currentName: null, deleted: true, names: [] });
       return byId.get(id);
     };
+    // History is consumed page by page; only the small per-name entries are retained.
+    const [currentNodes] = await Promise.all([
+      queryNodes(client),
+      forEachNodeHistoryPage(client, (page) => {
+        page.forEach((row) => {
+          const id = row.id || row.nodeId;
+          if (!id || !row.name) return;
+          const entry = ensure(id);
+          if (!entry.kind) entry.kind = row.kind || null;
+          entry.names.push({
+            name: row.name,
+            kind: row.kind || null,
+            effectiveFrom: row.effectiveFrom || null,
+            effectiveTo: row.effectiveTo || null,
+          });
+        });
+      }),
+    ]);
     currentNodes.forEach((node) => {
       const id = node.id || node.nodeId;
       if (!id) return;
@@ -2011,18 +2089,6 @@ app.get("/api/node-names", async (req, res) => {
       entry.kind = node.kind || null;
       entry.currentName = node.name || null;
       entry.deleted = false;
-    });
-    historyRows.forEach((row) => {
-      const id = row.id || row.nodeId;
-      if (!id || !row.name) return;
-      const entry = ensure(id);
-      if (!entry.kind) entry.kind = row.kind || null;
-      entry.names.push({
-        name: row.name,
-        kind: row.kind || null,
-        effectiveFrom: row.effectiveFrom || null,
-        effectiveTo: row.effectiveTo || null,
-      });
     });
     byId.forEach((entry) => {
       entry.names.sort((a, b) => (a.effectiveFrom || "").localeCompare(b.effectiveFrom || ""));
@@ -2040,7 +2106,7 @@ app.get("/api/nodes/:id/history", async (req, res) => {
   try {
     const client = req.auth.clientId;
     const nodeId = normalizeClientId(client, req.params.id);
-    const historyRows = await queryNodeHistory(client);
+    const historyRows = await queryNodeHistoryForNode(client, nodeId);
     const rows = historyRows
       .filter((row) => row.nodeId === nodeId)
       .sort((a, b) =>

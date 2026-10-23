@@ -10,6 +10,9 @@
         "server": "node server/index.js",
         "clamp-ownership-dates": "node server/scripts/clampOwnershipEffectiveDates.js",
         "dedupe-ownership-periods": "node server/scripts/dedupeOwnershipPeriods.js",
+        "normalize-node-effective-dates": "node server/scripts/normalizeNodeEffectiveDates.js",
+        "find-nodes-without-history": "node server/scripts/findNodesWithoutHistory.js",
+        "repair-node-history-keys": "node server/scripts/repairNodeHistoryKeys.js",
         "build:lambda": "npm install --omit=dev --omit=optional && node build-lambda-zip.cjs && npm install"
     },
     "dependencies": {

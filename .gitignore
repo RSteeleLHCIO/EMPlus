@@ -137,3 +137,6 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Build stamp written by build-lambda-zip.cjs
+server/buildInfo.json

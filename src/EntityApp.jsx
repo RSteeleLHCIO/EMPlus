@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { Card, CardContent } from "./components/ui/card";
 import { Button } from "./components/ui/button";
@@ -9,11 +9,7 @@ import { normalizePhone, formatPhone, normalizeDateInput } from "./utils/helpers
 import { ENTITY_OWNERSHIP_SUMMARY_FIELD, getEntityOwnershipSummary } from "./utils/ownershipSummary";
 import { normalizeSavedColumnOrder, resolveTabularColumns } from "./utils/tabularColumns";
 import {
-  describeSaveRange,
   describeVersionValue,
-  formatInclusiveEnd,
-  formatIsoDate,
-  formatVersionRange,
   getChangedVersionFields,
 } from "./utils/nodeVersions";
 import { describeNameConflict, findNameConflicts, normalizeNodeName } from "./utils/nodeNames";
@@ -43,6 +39,7 @@ const NODE_VERSION_FIELD_LABELS = {
   operationalRole: "Operational Role",
   legalStatus: "Legal Status",
   personStatus: "Person Status",
+  notes: "Notes",
 };
 
 const DATA_TYPES = [
@@ -1447,6 +1444,19 @@ function ColumnFilterPopover({ filterType, enumOptions, currentFilter, popoverPo
   );
 }
 
+const CLIENT_BUILD_INFO = typeof __CLIENT_BUILD_INFO__ !== "undefined" ? __CLIENT_BUILD_INFO__ : null;
+
+function formatBuildInfo(info) {
+  if (!info) return "unknown";
+  if (info.error) return info.error;
+  const built = info.builtAt ? new Date(info.builtAt) : null;
+  const when = built && !Number.isNaN(built.getTime())
+    ? built.toLocaleString(undefined, { month: "numeric", day: "numeric", year: "2-digit", hour: "numeric", minute: "2-digit" })
+    : "";
+  const commit = `${info.commit || "unknown"}${info.dirty ? "+" : ""}`;
+  return `${info.version || "?"} (${commit}${when ? `, ${when}` : ""})`;
+}
+
 export default function EntityApp({ token, clientId: clientIdProp, onSignOut, onStartEmulation, isEmulating }) {
   const [nodeList, setNodeList] = useState(() => (token ? [] : initialNodes));
   const [relList, setRelList] = useState(() => (token ? [] : initialRelationships));
@@ -1472,11 +1482,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     }
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [serverBuildInfo, setServerBuildInfo] = useState(null);
   const [showStats, setShowStats] = useState(false);
-  // ── Time Machine: read-only, effective-dated snapshot of Directory/Tabular ──
-  const [timeMachine, setTimeMachine] = useState(null); // null | { active: true, date: "YYYY-MM-DD", mode: "effective" | "recorded" }
+  // ── Time Machine: read-only, audit-dated (as-recorded) snapshot of Directory/Tabular ──
+  const [timeMachine, setTimeMachine] = useState(null); // null | { active: true, date: "YYYY-MM-DD", mode: "recorded" }
   const [timeMachineDraftDate, setTimeMachineDraftDate] = useState("");
-  const [timeMachineDraftMode, setTimeMachineDraftMode] = useState("effective");
   const [timeMachineLoading, setTimeMachineLoading] = useState(false);
   const [timeMachineError, setTimeMachineError] = useState("");
   const liveDirectoryBackupRef = useRef(null); // { nodes, rels } snapshot of live data while time-traveling
@@ -1489,6 +1499,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   const quickFindRef = useRef(null);
   const quickFindInputRef = useRef(null);
   const appHeaderRef = useRef(null);
+  const tabularGridRef = useRef(null);
   const focusBoxRef = useRef(null);
   const hierarchyStageRef = useRef(null);
   const hierarchyContainerRef = useRef(null);
@@ -1715,7 +1726,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   }
 
   const [editNodeId, setEditNodeId] = useState(() => (token ? "" : (initialNodes[0]?.id ?? "")));
-  const [editNodeEffectiveDate, setEditNodeEffectiveDate] = useState("");
   const [editNodeOwnershipTimeline, setEditNodeOwnershipTimeline] = useState([]);
   // Version history shown in the edit dialog (null = loading, false = failed to load).
   const [editNodeVersions, setEditNodeVersions] = useState(null);
@@ -2119,6 +2129,15 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   };
 
   useEffect(() => {
+    if (!settingsOpen || serverBuildInfo) return;
+    let cancelled = false;
+    apiRequest("/api/version")
+      .then((info) => { if (!cancelled) setServerBuildInfo(info); })
+      .catch(() => { if (!cancelled) setServerBuildInfo({ error: "unknown (predates versioning)" }); });
+    return () => { cancelled = true; };
+  }, [settingsOpen, serverBuildInfo]);
+
+  useEffect(() => {
     try {
       localStorage.setItem(TABULAR_PREFS_STORAGE_KEY, JSON.stringify({
         tabularViews,
@@ -2233,13 +2252,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
   // ── Time Machine ────────────────────────────────────────────────────────
   // Loads a read-only snapshot into nodeList/relList (stashing the live data first) so
   // Directory/Tabular render it with zero other call-site changes.
-  const enterTimeMachine = useCallback(async (rawDate, rawMode) => {
+  const enterTimeMachine = useCallback(async (rawDate) => {
     const date = normalizeDateInput(rawDate);
     if (!date) {
       setTimeMachineError("Enter a valid date.");
       return;
     }
-    const mode = rawMode === "recorded" ? "recorded" : "effective";
+    // Effective-dating is no longer an option here: entities now always report a single
+    // effective date, so the only meaningful reconstruction is "as recorded" (based on
+    // real audit timestamps). Ownership keeps its own effective-dated history separately.
+    const mode = "recorded";
     setTimeMachineLoading(true);
     setTimeMachineError("");
     try {
@@ -2445,7 +2467,10 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       return;
     }
     try {
-      if (!normalizeDateInput(uploadOwnershipAsOfDate)) {
+      // Only ownership imports still need an effective date — entities/persons are
+      // always effective from the moment they're created, and detail updates are
+      // always effective from each entity's own creation date.
+      if (uploadType === "ownership" && !normalizeDateInput(uploadOwnershipAsOfDate)) {
         setUploadStatus("error");
         setUploadError("Effective as of date is required for imports.");
         return;
@@ -2589,6 +2614,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         { header: "Cell Phone", helper: "(People only)" },
         { header: "e-Mail", helper: "(People only)" },
         { header: "Tax ID", helper: "" },
+        { header: "Notes", helper: "" },
       ];
 
       // Mirrors the server's normalizeHeader — strips punctuation, lowercases, collapses spaces.
@@ -2604,6 +2630,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         "cell phone", "cell", "mobile", "mobile phone", "cellphone", "cell number", "personal phone",
         "email", "emails", "email address", "e mail", "email addr",
         "tax id", "taxid", "ein", "tin", "federal id", "tax identification", "federal tax id", "fein",
+        "notes", "note", "comments", "comment", "memo", "remarks",
       ]);
 
       // DD custom fields — exclude file type and any field redundant with a built-in, sorted by sortOrder
@@ -2920,6 +2947,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     if ((draft.workPhone || "") !== (node.workPhone || "")) return true;
     if ((draft.cellPhone || "") !== (node.cellPhone || "")) return true;
     if ((draft.taxId || "") !== (node.taxId || "")) return true;
+    if ((draft.notes || "") !== (node.notes || "")) return true;
     const toEmailStr = (v) => Array.isArray(v) ? v.join(", ") : (v || "");
     if (toEmailStr(draft.emails) !== toEmailStr(node.emails)) return true;
     const nodeCustom = JSON.stringify(normalizeCustomFields(node.customFields || {}));
@@ -2943,6 +2971,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
       cellPhone: "",
       emails: "",
       taxId: "",
+      notes: "",
       customFields: {},
       client: clientId,
     };
@@ -3087,6 +3116,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           cellPhone: draft.cellPhone || "",
           emails: draft.emails || "",
           taxId: draft.taxId || "",
+          notes: draft.notes || "",
           customFields: draft.customFields || {},
         };
         // The server may assign a different (unique) ID than the one requested.
@@ -3097,10 +3127,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         setNodeList((prev) => [...prev, { ...payload, ...created }]);
         removeTableNewRow(rowKey);
       } else if (existingNode) {
+        // Entities no longer support a per-edit effective date: the server computes
+        // and anchors every field change to the entity's own origin date independently
+        // (see `useOriginDate` in persistNodeVersion), so no date is sent here.
         const payload = {
           name: draft.name.trim(),
           kind: draft.kind,
-          asOfDate: todayIso,
           client: clientId,
           photo: draft.kind === "person" ? (draft.photo || "") : "",
           logo: draft.kind === "entity" ? (draft.logo || "") : "",
@@ -3112,6 +3144,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           cellPhone: draft.cellPhone || "",
           emails: draft.emails || "",
           taxId: draft.taxId || "",
+          notes: draft.notes || "",
           customFields: draft.customFields || {},
         };
         await apiRequest(`/api/nodes/${rowKey}`, {
@@ -3137,6 +3170,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                 cellPhone: payload.cellPhone,
                 emails: payload.emails,
                 taxId: payload.taxId,
+                notes: payload.notes,
                 customFields: payload.customFields,
                 client: n.client || clientId,
               }
@@ -4704,6 +4738,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     cellPhone: node.cellPhone || "",
     emails: node.emails || "",
     taxId: node.taxId || "",
+    notes: node.notes || "",
     operationalRole: node.operationalRole || "",
     legalStatus: node.legalStatus || "",
     personStatus: node.personStatus || "",
@@ -4715,7 +4750,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     if (node) {
       // Edits always start from the current, live data — never a browsed historical version.
       setNodeDraft(nodeToEditDraft(node, node.id));
-      setEditNodeEffectiveDate("");
 
       // For entities, fetch ownership timeline to show in the ownership records field
       if (node.kind === "entity") {
@@ -4737,7 +4771,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
     const listNode = getNode(nodeList, editNodeId);
     if (listNode) {
       setNodeDraft(nodeToEditDraft(listNode, listNode.id));
-      setEditNodeEffectiveDate("");
     }
     if (!token) return undefined;
     let cancelled = false;
@@ -5255,17 +5288,52 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
 
   // Keep --app-header-height in sync with the actual (variable) header height,
   // so fixed-position content below it (error banners, quick view, dialogs) never gets clipped.
+  // When the emulation banner is shown (rendered by main.jsx), the header sits below it and
+  // --app-header-height covers both.
   useEffect(() => {
     const el = appHeaderRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
+    const banner = document.querySelector(".emulation-banner");
+    const root = document.documentElement.style;
     const update = () => {
-      document.documentElement.style.setProperty("--app-header-height", `${el.offsetHeight}px`);
+      const bannerHeight = banner && banner.isConnected ? banner.offsetHeight : 0;
+      root.setProperty("--emulation-banner-height", `${bannerHeight}px`);
+      root.setProperty("--app-header-height", `${bannerHeight + el.offsetHeight}px`);
     };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
+    if (banner) observer.observe(banner);
+    return () => {
+      observer.disconnect();
+      root.setProperty("--emulation-banner-height", "0px");
+    };
+  }, [isEmulating, profileLoading, directoryLoaded]);
+
+  // The tabular view must exactly fill the viewport below whatever sits above it (fixed
+  // header, content padding, Time Machine / error banners). If the page is even slightly
+  // taller than the window, the window can scroll and slide the tabular toolbar under the
+  // fixed header, out of reach.
+  useLayoutEffect(() => {
+    if (viewMode !== "tabular") return undefined;
+    const grid = tabularGridRef.current;
+    if (!grid) return undefined;
+    const update = () => {
+      const top = grid.getBoundingClientRect().top + window.scrollY;
+      const height = Math.max(240, Math.floor(window.innerHeight - top - 12));
+      grid.style.height = `${height}px`;
+      if (window.scrollY !== 0) window.scrollTo(0, 0);
+      if (grid.scrollTop !== 0) grid.scrollTop = 0;
+    };
+    update();
+    window.addEventListener("resize", update);
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
+    if (observer && appHeaderRef.current) observer.observe(appHeaderRef.current);
+    return () => {
+      window.removeEventListener("resize", update);
+      if (observer) observer.disconnect();
+    };
+  }, [viewMode, timeMachine?.active, remoteStatus, remoteError]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -5451,14 +5519,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   className="time-machine-header-badge"
                   onClick={() => {
                     setTimeMachineDraftDate(timeMachine.date);
-                    setTimeMachineDraftMode(timeMachine.mode || "effective");
                     setTimeMachineError("");
                     setOpenDialog({ type: "time-machine" });
                   }}
                   title="Click to change date or return to live data"
                 >
                   <Clock size={15} />
-                  Time Machine — {timeMachine.date} · {timeMachine.mode === "recorded" ? "As Recorded" : "Effective"} (read-only)
+                  Time Machine — {timeMachine.date} (read-only)
                 </button>
               )}
             </div>
@@ -5547,7 +5614,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       className="settings-menu-item"
                       onClick={() => {
                         setTimeMachineDraftDate(timeMachine?.date || todayIso);
-                        setTimeMachineDraftMode(timeMachine?.mode || "effective");
                         setTimeMachineError("");
                         setOpenDialog({ type: "time-machine" });
                         setSettingsOpen(false);
@@ -5733,6 +5799,11 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       <LogOut size={15} />
                       Sign out
                     </button>
+                    <div className="settings-menu-divider" />
+                    <div className="settings-menu-version">
+                      <div>Client {formatBuildInfo(CLIENT_BUILD_INFO)}</div>
+                      <div>Server {serverBuildInfo ? formatBuildInfo(serverBuildInfo) : "…"}</div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -6010,19 +6081,21 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     }}
                   />
                 </div>
-                <div>
-                  <Label htmlFor="ownership-import-as-of">Effective as of</Label>
-                  <Input
-                    id="ownership-import-as-of"
-                    style={{ width: "80%" }}
-                    type="date"
-                    value={uploadOwnershipAsOfDate}
-                    onChange={(event) => {
-                      setUploadOwnershipAsOfDate(event.target.value);
-                      setUploadError("");
-                    }}
-                  />
-                </div>
+                {uploadType === "ownership" && (
+                  <div>
+                    <Label htmlFor="ownership-import-as-of">Effective as of</Label>
+                    <Input
+                      id="ownership-import-as-of"
+                      style={{ width: "80%" }}
+                      type="date"
+                      value={uploadOwnershipAsOfDate}
+                      onChange={(event) => {
+                        setUploadOwnershipAsOfDate(event.target.value);
+                        setUploadError("");
+                      }}
+                    />
+                  </div>
+                )}
                 {uploadStatus === "error" && uploadError && (
                   <div style={{ color: "#dc2626", fontSize: 14 }}>{uploadError}</div>
                 )}
@@ -6122,7 +6195,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     </div>
                   </div>
                 )}
-                {!normalizeDateInput(uploadOwnershipAsOfDate) && (
+                {uploadType === "ownership" && !normalizeDateInput(uploadOwnershipAsOfDate) && (
                   <div style={{ color: "#dc2626", fontSize: 13 }}>
                     Effective as of date is required before importing rows.
                   </div>
@@ -6195,7 +6268,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       uploadStatus === "uploading" ||
                       uploadStatus === "loading-background" ||
                       uploadPreview.total === 0 ||
-                      ((uploadType === "ownership" && !ownershipPreviewValidation.valid) || !normalizeDateInput(uploadOwnershipAsOfDate))
+                      (uploadType === "ownership" && (!ownershipPreviewValidation.valid || !normalizeDateInput(uploadOwnershipAsOfDate)))
                     }
                   >
                     {uploadStatus === "uploading"
@@ -6238,15 +6311,13 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
           <div className="time-machine-banner">
             <Clock size={15} />
             <span>
-              Time Machine — viewing as of <strong>{timeMachine.date}</strong> (
-              {timeMachine.mode === "recorded" ? "as recorded" : "effective-dated"}). Read-only.
+              Time Machine — viewing as of <strong>{timeMachine.date}</strong>. Read-only.
             </span>
             <button
               type="button"
               className="time-machine-banner-btn"
               onClick={() => {
                 setTimeMachineDraftDate(timeMachine.date);
-                setTimeMachineDraftMode(timeMachine.mode || "effective");
                 setTimeMachineError("");
                 setOpenDialog({ type: "time-machine" });
               }}
@@ -6664,7 +6735,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
         )}
 
         {viewMode === "tabular" && (
-          <div className="tabular-grid">
+          <div className="tabular-grid" ref={tabularGridRef}>
 
             {/* ── Sub-mode toggle: Entities | Persons | Ownerships ── */}
             <div style={{ display: "flex", alignItems: "center", gap: 0, borderRadius: 6, overflow: "hidden", border: "1px solid #cbd5e1", alignSelf: "flex-start" }}>
@@ -6904,15 +6975,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                                     }
                                   }
                                   if (colIdx === 0 && !row.isNew) {
+                                    const rowNotes = String(rowNode.notes || "").trim();
                                     nextCell = React.cloneElement(nextCell, {
                                       className: `${nextCell.props.className || ""} tabular-actions-anchor`.trim(),
                                       children: (
                                         <div className="tabular-actions-anchor-box">
                                           <button
-                                            className="tabular-edit-btn"
+                                            className={`tabular-edit-btn${rowNotes ? " tabular-edit-btn--has-notes" : ""}`}
                                             type="button"
-                                            title="Edit"
-                                            aria-label="Edit"
+                                            title={rowNotes ? `Notes:\n${rowNotes}\n\nTap to Edit Entity data` : "Edit"}
+                                            aria-label={rowNotes ? "Edit (has notes)" : "Edit"}
                                             onClick={() => {
                                               setEditNodeId(row.key);
                                               setOpenDialog({ type: "edit-node" });
@@ -7277,46 +7349,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                     onChange={(e) => setTimeMachineDraftDate(e.target.value)}
                   />
                 </div>
-                <div>
-                  <label className="form-label">Reconstruction</label>
-                  <div style={{ display: "flex", gap: 10, flexDirection: "column", marginTop: 8 }}>
-                    <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: 14 }}>
-                      <input
-                        type="radio"
-                        name="time-machine-mode"
-                        value="effective"
-                        checked={timeMachineDraftMode === "effective"}
-                        onChange={() => setTimeMachineDraftMode("effective")}
-                        style={{ marginTop: 3 }}
-                      />
-                      <span>
-                        <strong>Data effective as of the selected day</strong>
-                        <div style={{ fontSize: 12, color: "#64748b" }}>
-                          Uses each record's business effective-from/to dates — e.g. an ownership
-                          change backdated to when it actually took effect.
-                        </div>
-                      </span>
-                    </label>
-                    <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: 14 }}>
-                      <input
-                        type="radio"
-                        name="time-machine-mode"
-                        value="recorded"
-                        checked={timeMachineDraftMode === "recorded"}
-                        onChange={() => setTimeMachineDraftMode("recorded")}
-                        style={{ marginTop: 3 }}
-                      />
-                      <span>
-                        <strong>Data as it existed on the selected day</strong>
-                        <div style={{ fontSize: 12, color: "#64748b" }}>
-                          Reconstructs what a live query would literally have shown at the end of
-                          that day, based on when each change was actually made — ignoring
-                          effective dating.
-                        </div>
-                      </span>
-                    </label>
-                  </div>
-                </div>
                 {timeMachineError && (
                   <div style={{ color: "#dc2626", fontSize: 13 }}>{timeMachineError}</div>
                 )}
@@ -7339,7 +7371,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       // Flush any outstanding inline edits before swapping in the snapshot,
                       // so nothing pending in the live grid is silently lost underneath it.
                       await flushTableRowSaves();
-                      enterTimeMachine(timeMachineDraftDate, timeMachineDraftMode);
+                      enterTimeMachine(timeMachineDraftDate);
                     }}
                     disabled={timeMachineLoading || !timeMachineDraftDate}
                   >
@@ -7392,6 +7424,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                             { _builtin: true, prompt: "Address", type: "Address", appliesTo: "Entity, Person", multi: "No", values: "" },
                             { _builtin: true, prompt: "Cell Phone", type: "Phone", appliesTo: "Person", multi: "No", values: "" },
                             { _builtin: true, prompt: "e-Mail", type: "Email", appliesTo: "Entity, Person", multi: "Yes", values: "" },
+                            { _builtin: true, prompt: "Notes", type: "Long text", appliesTo: "Entity, Person", multi: "No", values: "" },
                             { _builtin: true, prompt: "Ownership Records", type: "Computed", appliesTo: "Entity", multi: "No", values: "Read-only" },
                             { _builtin: true, prompt: "Primary Phone", type: "Phone", appliesTo: "Entity, Person", multi: "No", values: "" },
                             { _builtin: true, prompt: "Tax ID", type: "Short text", appliesTo: "Entity", multi: "No", values: "" },
@@ -8022,6 +8055,16 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       </div>
                     )}
                   </div>
+                  {/* Notes — always second, system field */}
+                  <div className="form-row">
+                    <label className="form-label">Notes</label>
+                    <textarea
+                      className="form-input"
+                      style={{ minHeight: 70, resize: "vertical", fontFamily: "inherit" }}
+                      value={newNode.notes || ""}
+                      onChange={(e) => setNewNode((prev) => ({ ...prev, notes: e.target.value }))}
+                    />
+                  </div>
                   {/* Photo / Logo — built-in system field */}
                   <NodeImageField
                     kind={newNode.kind}
@@ -8159,6 +8202,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                         cellPhone: newNode.cellPhone || "",
                         emails: newNode.emails || "",
                         taxId: newNode.taxId || "",
+                        notes: newNode.notes || "",
                         customFields: newNode.customFields || {},
                       };
                       try {
@@ -8170,7 +8214,7 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                         const createdNode = { ...payload, ...created };
                         setNodeList((prev) => [...prev, createdNode]);
                         if (!focusId) setFocusId(createdNode.id);
-                        setNewNode({ name: "", kind: newNode.kind, photo: "", logo: "", address: "", workPhone: "", cellPhone: "", emails: "", taxId: "", customFields: {} });
+                        setNewNode({ name: "", kind: newNode.kind, photo: "", logo: "", address: "", workPhone: "", cellPhone: "", emails: "", taxId: "", notes: "", customFields: {} });
                         setRemoteStatus("connected");
                         setOpenDialog(null);
                       } catch (err) {
@@ -8539,15 +8583,12 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                         : `Entered by ${version.changedByName || version.changedBy || "an unknown user"}`;
                       return (
                         <div key={version.versionId || idx} className="node-history-entry">
-                          <div className="node-history-entry-range">
-                            {formatVersionRange(version.effectiveFrom, version.effectiveTo)}
-                            {idx === editNodeVersions.length - 1 && <span className="node-history-entry-current"> (current)</span>}
-                          </div>
                           <div className="node-history-entry-meta">
                             {enteredBy}
                             {version.changedAt && ` on ${new Date(version.changedAt).toLocaleString("en-US", {
                               month: "2-digit", day: "2-digit", year: "numeric", hour: "numeric", minute: "2-digit",
                             })}`}
+                            {idx === editNodeVersions.length - 1 && <span className="node-history-entry-current"> (current)</span>}
                           </div>
                           {prior ? (
                             changed.size > 0 ? (
@@ -8583,24 +8624,6 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                   style={{ border: "none", margin: 0, padding: 0, minWidth: 0 }}
                 >
                 <div className="form-grid">
-                  {/* Effective date of this change */}
-                  <div className="form-row">
-                    <label className="form-label" title="Leave blank to default to today">
-                      Change effective
-                    </label>
-                    <input
-                      className="form-input"
-                      type="date"
-                      value={editNodeEffectiveDate}
-                      placeholder={todayIso}
-                      onChange={(e) => setEditNodeEffectiveDate(e.target.value)}
-                    />
-                    <span style={{ fontSize: 11, color: "#6b7280", marginLeft: 4 }}>
-                      {editNodeEffectiveDate
-                        ? `Recording change as of ${editNodeEffectiveDate}`
-                        : `Defaulting to today (${todayIso})`}
-                    </span>
-                  </div>
                   {/* Name — always first, system field */}
                   {withVersionChangeHighlight("name", "Name", (
                   <div className="form-row">
@@ -8614,6 +8637,18 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       }
                       autoComplete="off"
                       data-lpignore="true"
+                    />
+                  </div>
+                  ))}
+                  {/* Notes — always second, system field */}
+                  {withVersionChangeHighlight("notes", "Notes", (
+                  <div className="form-row">
+                    <label className="form-label">Notes</label>
+                    <textarea
+                      className="form-input"
+                      style={{ minHeight: 70, resize: "vertical", fontFamily: "inherit" }}
+                      value={nodeDraft.notes || ""}
+                      onChange={(e) => setNodeDraft((prev) => ({ ...prev, notes: e.target.value }))}
                     />
                   </div>
                   ))}
@@ -8804,109 +8839,84 @@ export default function EntityApp({ token, clientId: clientIdProp, onSignOut, on
                       const nameConflicts = nameChanged
                         ? await getNameConflicts({ name: nodeDraft.name, kind: nodeDraft.kind, excludeId: editNodeId })
                         : [];
-                      const effectiveDate = editNodeEffectiveDate || todayIso;
-                      const range = describeSaveRange(editNodeVersions || [], effectiveDate);
-                      const replacedBy = range.replaces
-                        ? (range.replaces.changedBy === "import" ? "an import" : (range.replaces.changedByName || range.replaces.changedBy || "an unknown user"))
-                        : null;
-                      setConfirmDialog({
-                        title: nameConflicts.length ? "Duplicate name ? confirm save" : "Confirm effective dates",
-                        confirmLabel: nameConflicts.length ? "Save anyway" : "Save",
-                        message: (
-                          <div style={{ display: "grid", gap: 8, fontSize: 14 }}>
-                            {nameConflicts.length > 0 && (
-                              <div className="name-conflict-warning">
-                                {renderNameConflictMessage(nameConflicts, {
-                                  kind: nodeDraft.kind,
-                                  intro: <>The name <strong>{nodeDraft.name.trim()}</strong> is already used:</>,
-                                })}
-                              </div>
-                            )}
-                            <div>
-                              This change will apply <strong>{range.to
-                                ? `from ${formatIsoDate(range.from)} through ${formatInclusiveEnd(range.to)}`
-                                : `from ${formatIsoDate(range.from)} with no end date`}</strong>.
-                            </div>
-                            {!Array.isArray(editNodeVersions) && (
-                              <div style={{ color: "#b91c1c" }}>Version history couldn't be loaded, so later versions (if any) can't be checked.</div>
-                            )}
-                            {range.replaces && (
-                              <div>It replaces the version for the same start date{replacedBy ? ` (entered by ${replacedBy})` : ""}.</div>
-                            )}
-                            {range.splits && (
-                              <div>
-                                The version starting {formatIsoDate(range.splits.effectiveFrom)} will now end on {formatInclusiveEnd(range.from)}.
-                              </div>
-                            )}
-                            {range.to && (
-                              <div style={{ color: "#92400e" }}>
-                                A later version starts {formatIsoDate(range.to)} and is not changed. If this edit should also apply after that date, update the later version(s) too.
-                              </div>
-                            )}
-                            {range.from > todayIso && (
-                              <div style={{ color: "#1d4ed8" }}>This is a future-dated change.</div>
-                            )}
-                          </div>
-                        ),
-                        onConfirm: () => {
-                          setConfirmDialog(null);
-                          const viewDate = todayIso;
-                          const coversView = range.from <= viewDate && (!range.to || viewDate < range.to);
-                          const payload = {
-                            name: nodeDraft.name.trim(),
-                            kind: nodeDraft.kind,
-                            asOfDate: effectiveDate,
-                            client: clientId,
-                            photo: nodeDraft.kind === "person" ? (nodeDraft.photo || "") : "",
-                            logo: nodeDraft.kind === "entity" ? (nodeDraft.logo || "") : "",
-                            operationalRole: nodeDraft.kind === "entity" ? (nodeDraft.operationalRole || "") : "",
-                            legalStatus: nodeDraft.kind === "entity" ? (nodeDraft.legalStatus || "") : "",
-                            personStatus: nodeDraft.kind === "person" ? (nodeDraft.personStatus || "") : "",
-                            address: nodeDraft.address || "",
-                            workPhone: nodeDraft.workPhone || "",
-                            cellPhone: nodeDraft.cellPhone || "",
-                            emails: nodeDraft.emails || "",
-                            taxId: nodeDraft.taxId || "",
-                            customFields: nodeDraft.customFields || {},
-                          };
-                          apiRequest(`/api/nodes/${editNodeId}`, {
-                            method: "PUT",
-                            body: JSON.stringify(payload),
+                      // Entities no longer support a per-edit effective date: the server
+                      // computes and anchors every field change to the entity's own
+                      // origin date independently (see `useOriginDate` in
+                      // persistNodeVersion), so no date is sent here.
+                      const payload = {
+                        name: nodeDraft.name.trim(),
+                        kind: nodeDraft.kind,
+                        client: clientId,
+                        photo: nodeDraft.kind === "person" ? (nodeDraft.photo || "") : "",
+                        logo: nodeDraft.kind === "entity" ? (nodeDraft.logo || "") : "",
+                        operationalRole: nodeDraft.kind === "entity" ? (nodeDraft.operationalRole || "") : "",
+                        legalStatus: nodeDraft.kind === "entity" ? (nodeDraft.legalStatus || "") : "",
+                        personStatus: nodeDraft.kind === "person" ? (nodeDraft.personStatus || "") : "",
+                        address: nodeDraft.address || "",
+                        workPhone: nodeDraft.workPhone || "",
+                        cellPhone: nodeDraft.cellPhone || "",
+                        emails: nodeDraft.emails || "",
+                        taxId: nodeDraft.taxId || "",
+                        notes: nodeDraft.notes || "",
+                        customFields: nodeDraft.customFields || {},
+                      };
+                      const saveNode = () => {
+                        apiRequest(`/api/nodes/${editNodeId}`, {
+                          method: "PUT",
+                          body: JSON.stringify(payload),
+                        })
+                          .then(() => {
+                            setNodeList((prev) =>
+                              prev.map((n) => {
+                                if (n.id !== editNodeId) return n;
+                                return {
+                                  ...n,
+                                  name: payload.name,
+                                  kind: payload.kind,
+                                  photo: payload.photo,
+                                  logo: payload.logo,
+                                  operationalRole: payload.operationalRole,
+                                  legalStatus: payload.legalStatus,
+                                  personStatus: payload.personStatus,
+                                  address: payload.address,
+                                  workPhone: payload.workPhone,
+                                  cellPhone: payload.cellPhone,
+                                  emails: payload.emails,
+                                  taxId: payload.taxId,
+                                  notes: payload.notes,
+                                  customFields: payload.customFields,
+                                  client: n.client || clientId,
+                                };
+                              })
+                            );
+                            setRemoteStatus("connected");
+                            setOpenDialog(null);
                           })
-                            .then(() => {
-                              setNodeList((prev) =>
-                                prev.map((n) => {
-                                  if (n.id !== editNodeId) return n;
-                                  // A version outside the date being viewed doesn't change what's shown.
-                                  if (!coversView) return n;
-                                  return {
-                                    ...n,
-                                    name: payload.name,
-                                    kind: payload.kind,
-                                    photo: payload.photo,
-                                    logo: payload.logo,
-                                    operationalRole: payload.operationalRole,
-                                    legalStatus: payload.legalStatus,
-                                    personStatus: payload.personStatus,
-                                    address: payload.address,
-                                    workPhone: payload.workPhone,
-                                    cellPhone: payload.cellPhone,
-                                    emails: payload.emails,
-                                    taxId: payload.taxId,
-                                    customFields: payload.customFields,
-                                    client: n.client || clientId,
-                                  };
-                                })
-                              );
-                              setRemoteStatus("connected");
-                              setOpenDialog(null);
-                            })
-                            .catch((err) => {
-                              setRemoteStatus("error");
-                              setRemoteError(err.message);
-                            });
-                        },
-                      });
+                          .catch((err) => {
+                            setRemoteStatus("error");
+                            setRemoteError(err.message);
+                          });
+                      };
+                      if (nameConflicts.length) {
+                        setConfirmDialog({
+                          title: "Duplicate name — confirm save",
+                          confirmLabel: "Save anyway",
+                          message: (
+                            <div className="name-conflict-warning">
+                              {renderNameConflictMessage(nameConflicts, {
+                                kind: nodeDraft.kind,
+                                intro: <>The name <strong>{nodeDraft.name.trim()}</strong> is already used:</>,
+                              })}
+                            </div>
+                          ),
+                          onConfirm: () => {
+                            setConfirmDialog(null);
+                            saveNode();
+                          },
+                        });
+                        return;
+                      }
+                      saveNode();
                     }}
                   >
                     Update
